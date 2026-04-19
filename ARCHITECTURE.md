@@ -75,9 +75,11 @@ arithmetic operation over pre-sorted arrays indexed by S2 cell.
 | File | Built by | Purpose |
 |---|---|---|
 | `tantivy/` or `tantivy_<cc>/` | `build-forward-index` | Forward search via tantivy (monolithic or per-country) |
+| `fst_<cc>.fst`, `fst_<cc>.bin`, `fst_<cc>_strings.bin` | `build-autocomplete-fst` | Per-country FST for `/autocomplete` + `/search` fast-path (400 ns exact-match lookups) |
 | `gnaf_points.bin`, `gnaf_cells.bin`, `gnaf_entries.bin`, `gnaf_strings.bin` | `build-gnaf-index` | G-NAF-derived AU address points (16.4M records) |
 | `oa_<cc>_*.bin` | `build-openaddresses-index` | Per-country OpenAddresses address points |
 | `postcode_lookup.bin`, `postcode_lookup_strings.bin` | `build-postcode-lookup` | Suburb-modal postcode lookup (AU G-NAF) |
+| `i18n_names.bin` | emitted by `build-index` from `name:<lang>` OSM tags | Localised admin names keyed on (entity_type, entity_id, lang_code); used when `/reverse?lang=...` is set |
 
 ### Spatial indexing
 
@@ -119,15 +121,22 @@ Index {
   postcode_lookup: Option<PostcodeLookup>     // G-NAF suburb-modal
   gnaf: Option<Gnaf>                          // G-NAF AU authoritative
   open_addresses: Option<OpenAddresses>        // Per-country OA
+  i18n_names: Option<I18nNames>                // name:<lang> OSM tag lookup
 }
 
 Forward {
   default: Option<FieldedIndex>                // Monolithic `tantivy/`
   per_country: HashMap<[u8;2], FieldedIndex>   // `tantivy_<cc>/`
 }
+
+Autocomplete {
+  per_country: HashMap<[u8;2], AutocompleteCountry>  // fst_<cc>.*
+}
+// Exposed via main.rs Extension<Option<Arc<Autocomplete>>>; used by
+// both /autocomplete (prefix walk) and /search (exact-match fast-path).
 ```
 
-### Reverse geocoding: `Index::query(lat, lng)`
+### Reverse geocoding: `Index::query(lat, lng)` / `query_with_lang(lat, lng, lang)`
 
 ```
 1. find_admin(lat, lng)
@@ -153,11 +162,26 @@ Forward {
 6. Compose Address with country-specific format rules (format_rules):
      US/AU/NZ etc.: "<house> <street>, <city>, <state> <postcode>, <country>"
      DE/FR etc.:    "<street> <house>, <postcode> <city>, <country>"
+
+7. (query_with_lang only) If `lang=` was passed and i18n_names.bin is
+     loaded, binary-search (entity_type, poly_id, lang_code) for each
+     admin field that carries a poly_id. Override the default name with
+     the OSM name:<lang> tag when present, then re-render display_name.
+
+8. Stamp `confidence`: `exact` (addr_point hit), `interpolated` (via
+     addr:interpolation way), or `fallback` (street centroid / admin-only).
 ```
 
-### Forward geocoding: `Forward::search_structured(q)`
+### Forward geocoding: HTTP `/search` handler + `Forward::search_structured(q)`
 
 ```
+0. (HTTP layer, FST fast-path) If the query is simple freeform
+     (no street/city/state set, single country, query length ≥ 2)
+     and the country's FST is loaded, probe it for an exact-key match.
+     On hit: enrich via reverse geocode at the FST coord, return.
+     Response carries `"source": "fst"`. Median latency: ~400 ns for
+     the FST lookup + ~40 µs for the reverse-geocode enrichment.
+
 1. Parse freeform `q` if present:
      extract house_number (leading digits),
      state abbreviation (NSW/VIC/...),
@@ -181,11 +205,15 @@ Forward {
 5. Fallback ladder if 0 hits: drop country_code → state → city → kind,
      retry each drop. Re-dispatch in case the fallback crosses countries.
 
-6. For each top hit, if housenumber was parsed, refine via
+6. Last-resort fuzzy fallback: retry with FuzzyTermQuery (Levenshtein
+     distance 1) on the name field. Fires only if the strict ladder
+     produced nothing — typical typo cost is ~150 µs vs ~40 µs strict.
+
+7. For each top hit, if housenumber was parsed, refine via
      find_addr_point_in_country — routes through G-NAF first (AU),
      then OpenAddresses per-country, then OSM addr_points.
 
-7. Each hit is enriched by calling Index::query at the resolved coord,
+8. Each hit is enriched by calling Index::query at the resolved coord,
      giving the full normalised address object in the response.
 ```
 
@@ -300,7 +328,9 @@ compares shape-by-shape.
 | Spatial index | Google S2 (Rust bindings for s2 crate) | Google S2 (Rust bindings, plan to open-source) |
 | Forward text search | Tantivy | Tantivy |
 | Storage | mmap'd flat binaries | RocksDB (LSM) + mmap |
-| Country partitioning | Per-country `tantivy_<cc>/` + `oa_<cc>_*.bin` | ISO-2 prefix in FST, ~250 country partitions |
+| Country partitioning | Per-country `tantivy_<cc>/` + `oa_<cc>_*.bin` + `fst_<cc>.*` | ISO-2 prefix in FST, ~250 country partitions |
+| FST fast-path for common queries | `/autocomplete` + `/search` exact-match, 400 ns | "Serves 80% of traffic, order-of-magnitude faster than tantivy" |
+| Fuzzy fallback | FuzzyTermQuery (Levenshtein-1) on zero hits | FastText n-gram embeddings + Levenshtein |
 | Open-source intent | Yes | "Plan to open source" their S2 bindings |
 
 Both architectures rejected the same class of alternatives: no
@@ -311,14 +341,20 @@ process, multi-threaded, S2 + Tantivy is apparently the right answer.
 
 | Thing | Radar | Ours |
 |---|---|---|
-| **FST fast-path** | Tiny in-memory FST caches "millions of happy paths in MBs", returns "order of magnitude faster than a Tantivy query". Serves 80% of their traffic. | No FST cache — every forward query goes through tantivy. |
-| **ML-driven query understanding** | FastText for typo-tolerant n-gram embedding; LightGBM classifier routes queries by intent. | Heuristic AU-state-abbreviation parser + token canonicalisation. |
-| **Two-tier query architecture** | "Fast tier" for speed/precision, "deep search tier" for recall. | Single Fallback ladder within one tantivy index. |
+| **FST fast-path** | In-memory FST caches "millions of happy paths in MBs", returns "order of magnitude faster than a Tantivy query". Serves 80% of their traffic. | **Shipped.** Per-country FSTs used by both `/autocomplete` and `/search` for exact-key queries. Measured **400 ns per FST hit** vs 19–70 µs via tantivy — matches Radar's order-of-magnitude claim. |
+| **ML-driven query understanding** | FastText for typo-tolerant n-gram embedding; LightGBM classifier routes queries by intent. | **Partial.** FuzzyTermQuery (Levenshtein 1) as last-resort fallback catches most single-char typos. No ML intent classification. |
+| **Two-tier query architecture** | "Fast tier" for speed/precision, "deep search tier" for recall. | **Matches in shape.** FST fast-path + tantivy + fuzzy fallback is effectively a three-tier ladder. |
 | **Data pipeline** | Apache Spark, versioned S3 assets, ingest+eval new sources "within a day". | Per-dataset CLI builders + shell scripts. |
-| **Separate stores per domain** | Separate tantivy indexes + RocksDB stores for **Addresses / Regions / Places** (three independent data clients). | Single `strings.bin` pool; separate `*_points.bin` files but not separate tantivys. |
+| **Separate stores per domain** | Separate tantivy indexes + RocksDB stores for **Addresses / Regions / Places** (three independent data clients). | Single tantivy with a `kind` fast field. Address-point, admin, and place indexes are already separate bin files. |
 | **RocksDB-backed KV** | Point lookups over RocksDB for record retrieval. | mmap'd fixed-record arrays indexed by S2 cells. |
+| **Custom fst::Automaton for country prefix pruning** | One FST per data type, keys prefixed with 2-byte ISO code. Custom automaton peels the prefix before delegating. | Per-country FST files — equivalent behaviour, different file layout. Unified FST is a low-priority structural cleanup. |
+| **u64-bitmap fast fields for dense numerics** | Custom Collector intersects query bitmask with per-hit bitmap pre-BM25 for street numbers. | Not yet — we dedup housenumber strings in tantivy, which is less efficient but works. |
+| **ML typo tolerance (FastText n-grams)** | Embedding model for semantic/typo recall. | Levenshtein-1 only. |
 | **Production battle-testing** | 1B+ calls/day, 1K QPS/core measured. | 20K QPS/core measured on AU synthetic load, not yet run at production scale globally. |
 | **Cost savings documented** | Replaced Mongo + Elasticsearch clusters, saved "high five-figures/month". | Greenfield — no legacy to replace. |
+| **api-diff regression harness** | Open-sourced `@radarlabs/api-diff` — CSV-driven regression tool used to shadow HorizonDB traffic for a year. | Not built. |
+| **Kinesis → S3 + Athena partition-projection** | Telemetry pipeline with nightly Airflow repartitioning. >1000× bytes-read reduction. | Not built — no query-log pipeline yet. |
+| **CDKTF-driven blue-green deployment** | Each index release is a versioned S3 asset; new ASG reads it, ALB weighted-shifts traffic. | Our ArcSwap + marker-file pattern covers single-instance hot-reload; multi-instance deployment pattern not documented. |
 
 ### Where we do more (or differently)
 
@@ -329,6 +365,9 @@ process, multi-threaded, S2 + Tantivy is apparently the right answer.
 | **Nominatim-JSON-compatible output** | `/reverse` and `/search` return the Nominatim response shape. Drop-in replacement for Nominatim clients. | Their own API shape. |
 | **Zero-downtime reload pattern** | `ArcSwap<Arc<Index>>` + marker file polling. Index rebuild → atomic swap. | Not explicitly described; they mention "gradual migration" over a year for their own system cut-over. |
 | **Simpler operational surface** | Single binary, no RocksDB tuning, no Spark cluster. Just mmap. | Single binary but RocksDB + Spark ingestion to operate. |
+| **Built-in i18n** | `/reverse?lang=zh` returns localised admin names from OSM `name:<lang>` tags via `i18n_names.bin`. | Radar's public docs don't specify an i18n mechanism for returned names. |
+| **gRPC API** | `geocoder.proto` mirrors every REST endpoint. Typed clients, lower serialisation cost. | REST only. |
+| **Every enrichment optional** | Missing `gnaf_*.bin` / `fst_*.fst` / `i18n_names.bin` / `postcode_lookup.bin` → server starts, the corresponding feature returns 501 or degrades silently. Per-country deployments only mount what they need. | Not documented. |
 
 ### Performance: apples vs oranges
 
@@ -338,8 +377,12 @@ solving different problems:
 | | Ours (measured, AU) | Radar (published) |
 |---|---|---|
 | Reverse p50 | **20–60 µs** | <1 ms |
-| Forward p50 | **19–70 µs** (structured, exact) | 50 ms (freeform, fuzzy, ML-disambiguated) |
-| QPS/core | **~20 K** (structured) | ~1 K (full-pipeline, global) |
+| Reverse with `lang=` | 80–100 µs | — |
+| Forward p50, FST fast-path hit | **0.4 µs FST + ~40 µs enrich** | — |
+| Forward p50, tantivy | **19–70 µs** (structured) | 50 ms (freeform, fuzzy, ML-disambiguated) |
+| Forward, fuzzy fallback | ~150 µs | included in their 50 ms |
+| Autocomplete p50 | **~7 µs** | included in forward figures |
+| QPS/core | **~20 K** (structured) | **2 K** (full-pipeline, global — they publish "2000 rps/core" as a headline number) |
 | Scale tested | AU only, ~16 M addresses | Global, 1B+ calls/day |
 
 - Our latency is dominated by S2 cell lookups + polygon tests. We don't
@@ -352,29 +395,49 @@ solving different problems:
   our 20K QPS/core is uniform AU reverse — we haven't load-tested
   global freeform.
 
-### What we'd adopt from their playbook
+### What we've since adopted from their playbook
 
-If this geocoder starts carrying production global traffic, the highest-
-leverage borrowings from Radar:
+Three of the biggest Radar-documented patterns are now live:
 
-1. **FST fast-path for top queries.** A tiny in-memory trie keyed on
-   normalised-query-string → result-set. Serves the 80% "well-formed"
-   queries without touching tantivy at all. ~1 day of work, major
-   latency/throughput win on repeated queries.
+1. **FST fast-path** — ✅ shipped. `/search` probes per-country FSTs for
+   exact-key matches before touching tantivy; 400 ns when it hits.
+2. **Fuzzy fallback** — ✅ shipped. FuzzyTermQuery (Levenshtein-1) retries
+   the freeform query on zero hits; catches most single-char typos.
+3. **i18n via OSM `name:<lang>`** — ✅ shipped. `/reverse?lang=zh` swaps
+   admin names to the requested language when OSM has the tag.
 
-2. **Per-domain isolation** (separate tantivy indexes for places vs.
-   streets vs. addresses vs. regions). Smaller per-domain BM25 tables,
-   cleaner scoring. Our single tantivy mixes place/street docs already
-   with a `kind` fast field — separating would mean one more tantivy
-   per country but better scoring.
+### What we'd still adopt if the scope grew
 
-3. **Spark-like batch pipeline**. Our per-builder tools work but don't
-   compose. A DAG ingestion layer would let us "ingest and evaluate a
-   new data source within a day" as they claim. Low priority until we
-   have multiple data sources in flight.
-
-4. **ML for query understanding**. Only pays off at global scale with
-   truly freeform input. Not needed for Traccar's dispatch workload.
+1. **Unified FST with country-prefix automaton** — Radar's documented
+   trick: one FST with keys prefixed by 2-byte ISO code, custom
+   `fst::Automaton` peels the prefix. Cleaner file layout than our
+   per-country FSTs, same pruning behaviour. Low priority.
+2. **Tantivy u64-bitmap fast fields + custom `Collector`** for
+   housenumber filtering — pre-BM25 bitmap intersection instead of
+   string-term matching. Better when house-number ranges matter.
+3. **Per-domain isolation** (separate tantivy indexes for places vs
+   streets vs addresses vs regions). Our single tantivy + `kind` fast
+   field works; per-domain would give tighter BM25 IDF. Structural.
+4. **ML intent classification** (LightGBM). Radar uses it to route
+   query shapes to the right index; we use a heuristic classifier
+   (is-this-query-structured?) which is sufficient for dispatch
+   workloads.
+5. **Apache Spark DAG ingestion**. Our per-source CLIs don't compose.
+   An Airflow/Spark DAG would let us "ingest and evaluate a new data
+   source within a day" the way Radar claims. Pay-off scales with
+   number of data sources.
+6. **api-diff regression harness** (they open-sourced
+   `@radarlabs/api-diff`). Would gate ranking changes without shipping
+   regressions. Easy to port; not yet built.
+7. **Kinesis → S3 + Athena partition-projection telemetry**. Once we
+   have query traffic worth sampling, this pattern keeps analytics
+   costs near-zero.
+8. **DuckDB as index-debug workbench**. Dump the binary indexes as
+   Parquet for ad-hoc investigation ("why did this address rank
+   there?").
+9. **CDKTF + blue-green deployment** with versioned S3 index artifacts.
+   Our ArcSwap reload handles single-instance; fleet-level rollouts
+   want the Radar pattern.
 
 ### What we already do better (or more explicitly)
 
@@ -397,14 +460,31 @@ leverage borrowings from Radar:
    `postcode_lookup.bin`? Postcode fields are just null. Lets operators
    pick their exact cost/coverage tradeoff per country.
 
+### Areas Radar hasn't publicly documented
+
+Worth flagging as both our risk areas and opportunities to differentiate
+through our own documentation:
+
+- **Observability / SLOs** — we don't expose per-endpoint metrics yet;
+  they don't publish what they measure either.
+- **Polygon simplification strategies** — our Douglas-Peucker at 500
+  vertices works; they haven't documented their approach.
+- **Timezone lookups** — classic "given a coord, what's the TZ"
+  service. Often co-located with geocoding. Not shipped either side.
+- **Address deduplication algorithms** — Radar mentions it matters;
+  neither of us has published a technique.
+- **Bloom filter / column-family tuning** for RocksDB (theirs) —
+  irrelevant to us because we don't use RocksDB.
+
 ## Summary
 
 We've built a geocoder architecturally congruent with Radar's
-production HorizonDB at ~100× their measured per-query latency for our
-narrower problem (structured country-aware dispatch vs. full freeform
-global search). We don't yet do ML-driven query understanding, FST
-fast-paths, or million-QPS global scale — those are natural next
-increments if the project grows that direction.
+production HorizonDB and have since closed the three biggest
+documented gaps: **FST fast-path, fuzzy fallback, and i18n via OSM
+`name:<lang>` tags** are all live. Measured latency is still 100–1000×
+below Radar's published numbers for the narrower structured-dispatch
+workload, with room for the harder freeform/ML-disambiguated case if
+the scope grows.
 
 Both systems validate that Rust + S2 + tantivy + mmap is the current
 best-in-class answer for geocoding infrastructure, and neither needed
