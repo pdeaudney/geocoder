@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package geocoder.v1;
+
+// Geocoding service. Mirrors the REST API (/reverse, /search, /validate,
+// /autocomplete, /geocode/ip). Message shapes match the JSON responses
+// field-for-field so clients that currently consume the REST endpoints
+// get the same data via gRPC without translation.
+service Geocoder {
+  rpc Reverse(ReverseRequest) returns (AddressResponse);
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc Validate(ValidateRequest) returns (ValidateResponse);
+  rpc Autocomplete(AutocompleteRequest) returns (AutocompleteResponse);
+  rpc IpGeocode(IpGeocodeRequest) returns (IpGeocodeResponse);
+}
+
+// --- Shared types ---
+
+message AddressDetails {
+  string house_number = 1;
+  string road = 2;
+  string city = 3;
+  string state = 4;
+  string county = 5;
+  string postcode = 6;
+  string country = 7;
+  string country_code = 8;
+}
+
+message Address {
+  string display_name = 1;
+  AddressDetails address = 2;
+  // "exact" | "interpolated" | "fallback"
+  string confidence = 3;
+}
+
+// --- /reverse ---
+
+message ReverseRequest {
+  double lat = 1;
+  double lon = 2;
+  // ISO 639-1 language preference for returned names. Accepted today;
+  // honoured once the OSM builder emits name:<lang> tags.
+  string lang = 3;
+}
+
+message AddressResponse {
+  Address address = 1;
+}
+
+// --- /search ---
+
+message SearchRequest {
+  string q = 1;
+  string street = 2;
+  string housenumber = 3;
+  string city = 4;
+  string state = 5;
+  string country_code = 6;
+  // "place" or "street"; empty = no filter
+  string kind = 7;
+  // 1..=50, defaults to 10 if 0.
+  uint32 limit = 8;
+}
+
+message SearchHit {
+  string name = 1;
+  uint32 kind = 2;
+  uint32 rank = 3;
+  float score = 4;
+  double lat = 5;
+  double lon = 6;
+  string display_name = 7;
+  AddressDetails address = 8;
+}
+
+message SearchResponse {
+  repeated SearchHit results = 1;
+}
+
+// --- /validate ---
+
+message ValidateRequest {
+  string housenumber = 1;
+  string street = 2;
+  string city = 3;
+  string state = 4;
+  string postcode = 5;
+  string country_code = 6;
+}
+
+message ValidateResponse {
+  bool verified = 1;
+  string confidence = 2;
+  double lat = 3;
+  double lon = 4;
+  Address normalized = 5;
+}
+
+// --- /autocomplete ---
+
+message AutocompleteRequest {
+  string q = 1;
+  string country_code = 2;
+  uint32 limit = 3;
+}
+
+message AutocompleteHit {
+  string name = 1;
+  string suburb = 2;
+  uint32 kind = 3;
+  uint32 rank = 4;
+  double lat = 5;
+  double lon = 6;
+}
+
+message AutocompleteResponse {
+  repeated AutocompleteHit results = 1;
+}
+
+// --- /geocode/ip ---
+
+message IpGeocodeRequest {
+  // Textual IPv4 or IPv6. Empty = server uses the peer address.
+  string ip = 1;
+}
+
+message IpGeocodeResponse {
+  string ip = 1;
+  double lat = 2;
+  double lon = 3;
+  Address address = 4;
+}

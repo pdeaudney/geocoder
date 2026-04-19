@@ -5,6 +5,10 @@ DATA_DIR="${DATA_DIR:-/data}"
 
 download_pbf() {
     mkdir -p "$DATA_DIR/pbf"
+    if [ -z "$PBF_URLS" ] && [ -n "$REGION" ]; then
+        DATA_DIR="$DATA_DIR" download-region.sh "$REGION" "$DATA_DIR/pbf"
+        return
+    fi
     for url in $PBF_URLS; do
         filename=$(basename "$url")
         if [ ! -f "$DATA_DIR/pbf/$filename" ]; then
@@ -27,15 +31,26 @@ build_index() {
     fi
     if [ -f "$DATA_DIR/index/geo_cells.bin" ]; then
         echo "Index already exists, skipping build"
-        return
+    else
+        mkdir -p "$DATA_DIR/index"
+        level_args=""
+        [ -n "$STREET_LEVEL" ] && level_args="$level_args --street-level $STREET_LEVEL"
+        [ -n "$ADMIN_LEVEL" ] && level_args="$level_args --admin-level $ADMIN_LEVEL"
+        echo "Building index..."
+        build-index "$DATA_DIR/index" $files $level_args
+        echo "Index built."
     fi
-    mkdir -p "$DATA_DIR/index"
-    level_args=""
-    [ -n "$STREET_LEVEL" ] && level_args="$level_args --street-level $STREET_LEVEL"
-    [ -n "$ADMIN_LEVEL" ] && level_args="$level_args --admin-level $ADMIN_LEVEL"
-    echo "Building index..."
-    build-index "$DATA_DIR/index" $files $level_args
-    echo "Index built."
+
+    # Forward-geocoding tantivy index (optional; enables /search).
+    # Set FORWARD_INDEX=0 to skip.
+    if [ "${FORWARD_INDEX:-1}" = "1" ] && command -v build-forward-index >/dev/null 2>&1; then
+        if [ -d "$DATA_DIR/index/tantivy" ] && [ -n "$(ls -A "$DATA_DIR/index/tantivy" 2>/dev/null)" ]; then
+            echo "Forward index already exists, skipping build"
+        else
+            echo "Building forward-geocoding index..."
+            build-forward-index "$DATA_DIR/index"
+        fi
+    fi
 }
 
 serve() {

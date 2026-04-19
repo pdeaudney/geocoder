@@ -16,12 +16,12 @@ RUN mkdir build && cd build && cmake ../builder && make -j$(nproc)
 FROM rust:bookworm AS builder-rust
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    cmake \
+    cmake protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY server/ server/
-RUN cargo build --release --manifest-path server/Cargo.toml
+RUN cargo build --release --manifest-path server/Cargo.toml --bins
 
 # Stage 3: Runtime
 FROM debian:bookworm-slim
@@ -34,9 +34,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder-cpp /src/build/build-index /usr/local/bin/
 COPY --from=builder-rust /src/server/target/release/query-server /usr/local/bin/
+COPY --from=builder-rust /src/server/target/release/build-forward-index /usr/local/bin/
+COPY --from=builder-rust /src/server/target/release/build-postcode-lookup /usr/local/bin/
+COPY --from=builder-rust /src/server/target/release/build-gnaf-index /usr/local/bin/
+COPY --from=builder-rust /src/server/target/release/build-openaddresses-index /usr/local/bin/
+COPY --from=builder-rust /src/server/target/release/build-autocomplete-fst /usr/local/bin/
 COPY entrypoint.sh /usr/local/bin/
+COPY scripts/download-region.sh /usr/local/bin/
 
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/download-region.sh
 
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["auto"]

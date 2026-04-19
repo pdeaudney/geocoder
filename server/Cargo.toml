@@ -2,6 +2,9 @@
 name = "query-server"
 version = "0.1.0"
 edition = "2021"
+description = "Self-hosted geocoder: reverse, forward, autocomplete, validate, IP geocode over REST + gRPC"
+license = "Apache-2.0"
+readme = "../README.md"
 
 [dependencies]
 axum = "0.8"
@@ -15,7 +18,62 @@ rustls-acme = { version = "0.14", features = ["axum"] }
 axum-server = "0.7"
 bcrypt = "0.15"
 getrandom = "0.2"
+arc-swap = "1.7"
+tantivy = { version = "0.22", optional = true }
+maxminddb = "0.24"
+fst = "0.4"
+tonic = { version = "0.12", optional = true }
+prost = { version = "0.13", optional = true }
+
+[features]
+default = ["forward", "grpc"]
+# `forward` wires in tantivy for the /search endpoint. Drop it for a lean
+# reverse-only build.
+forward = ["dep:tantivy"]
+# `grpc` starts a gRPC server alongside the REST API on a separate port.
+# Messages mirror the REST JSON shape; see server/proto/geocoder.proto.
+grpc = ["dep:tonic", "dep:prost"]
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "reverse_geocode"
+harness = false
+
+[[bin]]
+name = "query-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "build-forward-index"
+path = "src/bin/build_forward_index.rs"
+required-features = ["forward"]
+
+[[bin]]
+name = "build-postcode-lookup"
+path = "src/bin/build_postcode_lookup.rs"
+
+[[bin]]
+name = "build-gnaf-index"
+path = "src/bin/build_gnaf_index.rs"
+
+[[bin]]
+name = "build-openaddresses-index"
+path = "src/bin/build_openaddresses_index.rs"
+
+[[bin]]
+name = "build-autocomplete-fst"
+path = "src/bin/build_autocomplete_fst.rs"
 
 [profile.release]
 opt-level = 3
 lto = true
+
+[profile.bench]
+opt-level = 3
+lto = true
+debug = false

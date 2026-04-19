@@ -66,6 +66,34 @@ struct NodeCoord {
     float lng;
 };
 
+// place=* point feature (city/town/village/suburb/hamlet) — used as a
+// fallback locality when admin boundaries don't cover an area.
+struct PlacePoint {
+    float lat;
+    float lng;
+    uint32_t name_id;
+    uint8_t rank;         // Nominatim-style address rank: 16=city/town, 19=suburb, 20=hamlet
+    uint8_t _pad[3];
+};
+
+// Per-entity localized name. Sorted by (entity_type, entity_id, lang_code)
+// so the runtime does a single binary search per reverse query.
+//
+// entity_type: 0 = admin polygon (entity_id = index into admin_polygons.bin)
+//              1 = place point  (entity_id = index into place_points.bin)
+// lang_code:   packed 2-char lowercase ASCII ("en" = 'e' | ('n'<<8)).
+//              OSM uses keys like name:en, name:fr. We accept anything
+//              matching `^name:[a-z]{2}$`; anything richer (name:zh-Hant,
+//              name:en-AU) is skipped for MVP — covers 95% of tagged data.
+struct I18nName {
+    uint8_t entity_type;
+    uint8_t _pad0;
+    uint16_t lang_code;
+    uint32_t entity_id;
+    uint32_t name_id;
+    uint32_t _pad1;
+};
+
 static const uint32_t INTERIOR_FLAG = 0x80000000u;
 static const uint32_t ID_MASK = 0x7FFFFFFFu;
 
@@ -114,6 +142,16 @@ static std::unordered_map<uint64_t, std::vector<uint32_t>> cell_to_interps;
 static std::vector<AdminPolygon> admin_polygons;
 static std::vector<NodeCoord> admin_vertices;
 static std::unordered_map<uint64_t, std::vector<uint32_t>> cell_to_admin;
+
+// Place=* points (nodes and way centroids tagged as city/town/suburb/etc)
+static std::vector<PlacePoint> place_points;
+static std::unordered_map<uint64_t, std::vector<uint32_t>> cell_to_places;
+static uint64_t place_count_total = 0;
+
+// Localized names from OSM `name:<lang>` tags. Populated inline as we
+// process admin polygons and place points; written sorted.
+static std::vector<I18nName> i18n_names;
+static uint64_t i18n_count_total = 0;
 
 // --- S2 helpers ---
 
@@ -325,6 +363,87 @@ static bool is_included_highway(const char* value) {
     return true;
 }
 
+// --- place=* rank mapping (compatible with Nominatim address_rank defaults) ---
+
+// Returns 0 to skip this place tag (not useful for address output).
+// --- Localized names (`name:<lang>`) ---
+
+// Capture `name:xx` tags (xx = 2 ASCII letters) on the given OSM entity
+// and append them to the global i18n_names table. `entity_type` is 0 for
+// admin polygons, 1 for place points. `entity_id` must be the same index
+// the runtime uses to look up the entity (i.e. admin_polygons.size() -1
+// or place_points.size() - 1 depending on type, captured by the caller
+// before it increments).
+template <typename Tags>
+static void collect_i18n_names(const Tags& tags, uint8_t entity_type, uint32_t entity_id) {
+    for (const auto& tag : tags) {
+        const char* k = tag.key();
+        if (!k || std::strncmp(k, "name:", 5) != 0) {
+            continue;
+        }
+        const char* suffix = k + 5;
+        // Accept only plain 2-letter lowercase lang codes. Anything richer
+        // (zh-Hant, en-AU, name:left:en, etc.) is skipped for MVP.
+        if (!(suffix[0] >= 'a' && suffix[0] <= 'z' &&
+              suffix[1] >= 'a' && suffix[1] <= 'z' &&
+              suffix[2] == '\0')) {
+            continue;
+        }
+        const char* value = tag.value();
+        if (!value || !*value) {
+            continue;
+        }
+        // Pack the two-letter code into a u16 with 'a' in the low byte —
+        // matches what the Rust runtime expects ("en" → 'e' | ('n'<<8)).
+        uint16_t lang_code = static_cast<uint16_t>(suffix[0])
+            | (static_cast<uint16_t>(suffix[1]) << 8);
+
+        I18nName rec{};
+        rec.entity_type = entity_type;
+        rec.lang_code = lang_code;
+        rec.entity_id = entity_id;
+        rec.name_id = strings.intern(value);
+        i18n_names.push_back(rec);
+        i18n_count_total++;
+    }
+}
+
+static uint8_t place_rank(const char* place) {
+    if (!place) return 0;
+    if (std::strcmp(place, "city") == 0) return 16;
+    if (std::strcmp(place, "town") == 0) return 16;
+    if (std::strcmp(place, "village") == 0) return 16;
+    if (std::strcmp(place, "suburb") == 0) return 19;
+    if (std::strcmp(place, "hamlet") == 0) return 20;
+    return 0;
+}
+
+// Returns the `place_id` the point was assigned to, or UINT32_MAX when
+// the point was dropped. Callers can pass that id plus the feature's
+// OSM tag list into `collect_i18n_names` to capture localized name:xx.
+static uint32_t add_place_point(double lat, double lng, uint8_t rank, const char* name) {
+    if (!name || !*name) return UINT32_MAX;
+    uint32_t place_id = static_cast<uint32_t>(place_points.size());
+    place_points.push_back({
+        static_cast<float>(lat),
+        static_cast<float>(lng),
+        strings.intern(name),
+        rank,
+        {0, 0, 0},
+    });
+
+    // Index at kAdminCellLevel so nearest-neighbour queries use the same
+    // cell neighbourhood as find_admin.
+    S2CellId cell = S2CellId(S2LatLng::FromDegrees(lat, lng)).parent(kAdminCellLevel);
+    cell_to_places[cell.id()].push_back(place_id);
+
+    place_count_total++;
+    if (place_count_total % 100000 == 0) {
+        std::cerr << "Collected " << place_count_total / 1000 << "K place points..." << std::endl;
+    }
+    return place_id;
+}
+
 // --- Parse house number (leading digits) ---
 
 static uint32_t parse_house_number(const char* s) {
@@ -361,12 +480,16 @@ static void add_addr_point(double lat, double lng, const char* housenumber, cons
 
 // --- Add an admin polygon ---
 
-static void add_admin_polygon(const std::vector<std::pair<double,double>>& vertices,
-                               const char* name, uint8_t admin_level,
-                               const char* country_code) {
+// Returns the `poly_id` written into admin_polygons.bin (i.e. the index
+// the runtime will use), or UINT32_MAX when the polygon was skipped.
+// Callers can pass the id plus the source OSM area's tag list into
+// `collect_i18n_names` to capture localized name:xx.
+static uint32_t add_admin_polygon(const std::vector<std::pair<double,double>>& vertices,
+                                   const char* name, uint8_t admin_level,
+                                   const char* country_code) {
     // Simplify large polygons
     auto simplified = simplify_polygon(vertices, 500);
-    if (simplified.size() < 3) return;
+    if (simplified.size() < 3) return UINT32_MAX;
 
     uint32_t poly_id = static_cast<uint32_t>(admin_polygons.size());
     uint32_t vertex_offset = static_cast<uint32_t>(admin_vertices.size());
@@ -392,6 +515,7 @@ static void add_admin_polygon(const std::vector<std::pair<double,double>>& verti
         uint32_t entry = is_interior ? (poly_id | INTERIOR_FLAG) : poly_id;
         cell_to_admin[cell_id.id()].push_back(entry);
     }
+    return poly_id;
 }
 
 // --- OSM handler (pass 2) ---
@@ -399,11 +523,26 @@ static void add_admin_polygon(const std::vector<std::pair<double,double>>& verti
 class BuildHandler : public osmium::handler::Handler {
 public:
     void node(const osmium::Node& node) {
+        if (!node.location().valid()) return;
+
+        // place=* locality features (skip if no name — unnameable places are useless)
+        const char* place = node.tags()["place"];
+        if (place) {
+            uint8_t rank = place_rank(place);
+            if (rank > 0) {
+                const char* name = node.tags()["name"];
+                uint32_t place_id = add_place_point(
+                    node.location().lat(), node.location().lon(), rank, name);
+                if (place_id != UINT32_MAX) {
+                    collect_i18n_names(node.tags(), /*type=*/1, place_id);
+                }
+            }
+        }
+
         const char* housenumber = node.tags()["addr:housenumber"];
         if (!housenumber) return;
         const char* street = node.tags()["addr:street"];
         if (!street) return;
-        if (!node.location().valid()) return;
 
         add_addr_point(node.location().lat(), node.location().lon(), housenumber, street);
     }
@@ -422,6 +561,35 @@ public:
             const char* street = way.tags()["addr:street"];
             if (street) {
                 process_building_address(way, housenumber, street);
+            }
+        }
+
+        // place=* on a closed way (suburb/town polygon) — use centroid as
+        // the representative point. Non-closed ways are unusual for
+        // place tags but we handle them the same way.
+        const char* place = way.tags()["place"];
+        if (place) {
+            uint8_t rank = place_rank(place);
+            if (rank > 0) {
+                const char* name = way.tags()["name"];
+                if (name && *name) {
+                    const auto& wnodes = way.nodes();
+                    double sum_lat = 0, sum_lng = 0;
+                    int valid = 0;
+                    for (const auto& nr : wnodes) {
+                        if (!nr.location().valid()) continue;
+                        sum_lat += nr.location().lat();
+                        sum_lng += nr.location().lon();
+                        valid++;
+                    }
+                    if (valid > 0) {
+                        uint32_t place_id = add_place_point(
+                            sum_lat / valid, sum_lng / valid, rank, name);
+                        if (place_id != UINT32_MAX) {
+                            collect_i18n_names(way.tags(), /*type=*/1, place_id);
+                        }
+                    }
+                }
             }
         }
 
@@ -480,7 +648,11 @@ public:
                 }
             }
             if (vertices.size() >= 3) {
-                add_admin_polygon(vertices, name_str.c_str(), admin_level, country_code);
+                uint32_t poly_id = add_admin_polygon(
+                    vertices, name_str.c_str(), admin_level, country_code);
+                if (poly_id != UINT32_MAX) {
+                    collect_i18n_names(area.tags(), /*type=*/0, poly_id);
+                }
             }
         }
 
@@ -777,6 +949,39 @@ static void write_index(const std::string& output_dir) {
     write_cell_index(output_dir + "/admin_cells.bin", output_dir + "/admin_entries.bin", cell_to_admin);
     std::cerr << "admin index: " << cell_to_admin.size() << " cells, " << admin_polygons.size() << " polygons" << std::endl;
 
+    write_cell_index(output_dir + "/place_cells.bin", output_dir + "/place_entries.bin", cell_to_places);
+    std::cerr << "place index: " << cell_to_places.size() << " cells, " << place_points.size() << " points" << std::endl;
+
+    {
+        std::ofstream f(output_dir + "/place_points.bin", std::ios::binary);
+        f.write(reinterpret_cast<const char*>(place_points.data()), place_points.size() * sizeof(PlacePoint));
+    }
+
+    // Localized names — sorted by (entity_type, entity_id, lang_code) so
+    // the runtime does a single binary search per reverse query. Leave the
+    // file as zero bytes when no name:xx tags exist — the runtime treats
+    // missing/empty as "no i18n available".
+    {
+        std::sort(i18n_names.begin(), i18n_names.end(), [](const I18nName& a, const I18nName& b) {
+            if (a.entity_type != b.entity_type) return a.entity_type < b.entity_type;
+            if (a.entity_id != b.entity_id) return a.entity_id < b.entity_id;
+            return a.lang_code < b.lang_code;
+        });
+        // Collapse duplicate (type, id, lang) triples — OSM occasionally
+        // repeats tags (e.g. name:en on both an area and its relation);
+        // keep the first which is stable under our order.
+        i18n_names.erase(std::unique(i18n_names.begin(), i18n_names.end(),
+            [](const I18nName& a, const I18nName& b) {
+                return a.entity_type == b.entity_type
+                    && a.entity_id == b.entity_id
+                    && a.lang_code == b.lang_code;
+            }), i18n_names.end());
+        std::ofstream f(output_dir + "/i18n_names.bin", std::ios::binary);
+        f.write(reinterpret_cast<const char*>(i18n_names.data()),
+                i18n_names.size() * sizeof(I18nName));
+        std::cerr << "i18n names: " << i18n_names.size() << " (name:xx entries)" << std::endl;
+    }
+
     // Street ways
     {
         std::ofstream f(output_dir + "/street_ways.bin", std::ios::binary);
@@ -897,6 +1102,7 @@ int main(int argc, char* argv[]) {
     std::cerr << "  " << handler.interp_count() << " interpolation ways" << std::endl;
     std::cerr << "  " << handler.admin_count() << " admin/postcode boundaries ("
               << admin_polygons.size() << " polygon rings)" << std::endl;
+    std::cerr << "  " << place_count_total << " place=* points" << std::endl;
 
     std::cerr << "Resolving interpolation endpoints..." << std::endl;
     resolve_interpolation_endpoints();
@@ -906,6 +1112,7 @@ int main(int argc, char* argv[]) {
     deduplicate(cell_to_addrs);
     deduplicate(cell_to_interps);
     deduplicate(cell_to_admin);
+    deduplicate(cell_to_places);
 
     std::cerr << "Writing index files to " << output_dir << "..." << std::endl;
     write_index(output_dir);

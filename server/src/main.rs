@@ -1,710 +1,108 @@
 mod auth;
 
+use arc_swap::ArcSwap;
 use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use memmap2::Mmap;
-use s2::cellid::CellID;
-use s2::latlng::LatLng;
-use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
-use std::fs::File;
+use query_server::admin_config::AdminConfig;
+use query_server::autocomplete::Autocomplete;
+use query_server::ip_geo::IpGeo;
+use query_server::{Index, DEFAULT_ADMIN_CELL_LEVEL, DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL};
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-
-// --- S2 helpers ---
-
-const DEFAULT_STREET_CELL_LEVEL: u64 = 17;
-const DEFAULT_ADMIN_CELL_LEVEL: u64 = 10;
-const DEFAULT_SEARCH_DISTANCE: f64 = 75.0;
-
-fn cell_id_at_level(lat: f64, lng: f64, level: u64) -> u64 {
-    let ll = LatLng::from_degrees(lat, lng);
-    CellID::from(ll).parent(level).0
-}
-
-fn cell_neighbors_at_level(cell_id: u64, level: u64) -> Vec<u64> {
-    let cell = CellID(cell_id);
-    cell.all_neighbors(level).into_iter().map(|c| c.0).collect()
-}
-
-// --- Binary format structs (must match C++ build pipeline) ---
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct WayHeader {
-    node_offset: u32,
-    node_count: u8,
-    name_id: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct AddrPoint {
-    lat: f32,
-    lng: f32,
-    housenumber_id: u32,
-    street_id: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct InterpWay {
-    node_offset: u32,
-    node_count: u8,
-    street_id: u32,
-    start_number: u32,
-    end_number: u32,
-    interpolation: u8,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct AdminPolygon {
-    vertex_offset: u32,
-    vertex_count: u16,
-    name_id: u32,
-    admin_level: u8,
-    area: f32,
-    country_code: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct NodeCoord {
-    lat: f32,
-    lng: f32,
-}
-
-// --- Index data ---
-
-struct Index {
-    geo_cells: Mmap,
-    street_entries: Mmap,
-    street_ways: Mmap,
-    street_nodes: Mmap,
-    addr_entries: Mmap,
-    addr_points: Mmap,
-    interp_entries: Mmap,
-    interp_ways: Mmap,
-    interp_nodes: Mmap,
-    admin_cells: Mmap,
-    admin_entries: Mmap,
-    admin_polygons: Mmap,
-    admin_vertices: Mmap,
-    strings: Mmap,
-    street_cell_level: u64,
-    admin_cell_level: u64,
-    max_distance_sq: f64,
-}
-
-const NO_DATA: u32 = 0xFFFFFFFF;
-
-struct GeoCellOffsets {
-    street: u32,
-    addr: u32,
-    interp: u32,
-}
-
-fn mmap_file(path: &str) -> Result<Mmap, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open {}: {}", path, e))?;
-    unsafe { Mmap::map(&file).map_err(|e| format!("Failed to mmap {}: {}", path, e)) }
-}
-
-impl Index {
-    fn load(dir: &str, street_cell_level: u64, admin_cell_level: u64, search_distance: f64) -> Result<Self, String> {
-        let meters_to_rad = search_distance / 111_320.0;
-        let max_distance_sq = meters_to_rad * meters_to_rad;
-        Ok(Index {
-            geo_cells: mmap_file(&format!("{}/geo_cells.bin", dir))?,
-            street_entries: mmap_file(&format!("{}/street_entries.bin", dir))?,
-            street_ways: mmap_file(&format!("{}/street_ways.bin", dir))?,
-            street_nodes: mmap_file(&format!("{}/street_nodes.bin", dir))?,
-            addr_entries: mmap_file(&format!("{}/addr_entries.bin", dir))?,
-            addr_points: mmap_file(&format!("{}/addr_points.bin", dir))?,
-            interp_entries: mmap_file(&format!("{}/interp_entries.bin", dir))?,
-            interp_ways: mmap_file(&format!("{}/interp_ways.bin", dir))?,
-            interp_nodes: mmap_file(&format!("{}/interp_nodes.bin", dir))?,
-            admin_cells: mmap_file(&format!("{}/admin_cells.bin", dir))?,
-            admin_entries: mmap_file(&format!("{}/admin_entries.bin", dir))?,
-            admin_polygons: mmap_file(&format!("{}/admin_polygons.bin", dir))?,
-            admin_vertices: mmap_file(&format!("{}/admin_vertices.bin", dir))?,
-            strings: mmap_file(&format!("{}/strings.bin", dir))?,
-            street_cell_level,
-            admin_cell_level,
-            max_distance_sq,
-        })
-    }
-
-    fn get_string(&self, offset: u32) -> &str {
-        let bytes = &self.strings[offset as usize..];
-        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-        std::str::from_utf8(&bytes[..end]).unwrap_or("")
-    }
-
-    fn read_u16(data: &[u8], offset: usize) -> u16 {
-        u16::from_le_bytes([data[offset], data[offset + 1]])
-    }
-
-    fn read_u32(data: &[u8], offset: usize) -> u32 {
-        u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
-    }
-
-    fn read_u64(data: &[u8], offset: usize) -> u64 {
-        u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
-    }
-
-    // Iterate entry IDs inline from entries file at given offset
-    fn for_each_entry(entries: &[u8], offset: u32, mut f: impl FnMut(u32)) {
-        if offset == NO_DATA { return; }
-        let offset = offset as usize;
-        if offset + 2 > entries.len() { return; }
-
-        let id_count = Self::read_u16(entries, offset) as usize;
-        let data_start = offset + 2;
-        if data_start + id_count * 4 > entries.len() { return; }
-
-        for i in 0..id_count {
-            f(Self::read_u32(entries, data_start + i * 4));
-        }
-    }
-
-    // Binary search geo cell index: 20 bytes per entry (u64 cell_id + u32 street + u32 addr + u32 interp)
-    fn lookup_geo_cell(cells: &[u8], cell_id: u64) -> GeoCellOffsets {
-        let entry_size: usize = 20;
-        let count = cells.len() / entry_size;
-        let empty = GeoCellOffsets { street: NO_DATA, addr: NO_DATA, interp: NO_DATA };
-        if count == 0 { return empty; }
-
-        let mut lo = 0usize;
-        let mut hi = count;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let mid_id = Self::read_u64(cells, mid * entry_size);
-            if mid_id == cell_id {
-                return GeoCellOffsets {
-                    street: Self::read_u32(cells, mid * entry_size + 8),
-                    addr: Self::read_u32(cells, mid * entry_size + 12),
-                    interp: Self::read_u32(cells, mid * entry_size + 16),
-                };
-            } else if mid_id < cell_id {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        empty
-    }
-
-    // Binary search admin cell index: 12 bytes per entry (u64 cell_id + u32 offset)
-    fn lookup_admin_cell(cells: &[u8], cell_id: u64) -> u32 {
-        let entry_size: usize = 12;
-        let count = cells.len() / entry_size;
-        if count == 0 { return NO_DATA; }
-
-        let mut lo = 0usize;
-        let mut hi = count;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let mid_id = Self::read_u64(cells, mid * entry_size);
-            if mid_id == cell_id {
-                return Self::read_u32(cells, mid * entry_size + 8);
-            } else if mid_id < cell_id {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        NO_DATA
-    }
-
-    // --- Geo lookup (streets, addresses, interpolation from merged index) ---
-
-    fn query_geo(&self, lat: f64, lng: f64) -> (Option<(f64, &AddrPoint)>, Option<(f64, &str, u32)>, Option<(f64, &WayHeader)>) {
-        let cell = cell_id_at_level(lat, lng, self.street_cell_level);
-        let neighbors = cell_neighbors_at_level(cell, self.street_cell_level);
-
-        let all_points: &[AddrPoint] = unsafe {
-            std::slice::from_raw_parts(
-                self.addr_points.as_ptr() as *const AddrPoint,
-                self.addr_points.len() / std::mem::size_of::<AddrPoint>(),
-            )
-        };
-        let all_ways: &[WayHeader] = unsafe {
-            std::slice::from_raw_parts(
-                self.street_ways.as_ptr() as *const WayHeader,
-                self.street_ways.len() / std::mem::size_of::<WayHeader>(),
-            )
-        };
-        let all_street_nodes: &[NodeCoord] = unsafe {
-            std::slice::from_raw_parts(
-                self.street_nodes.as_ptr() as *const NodeCoord,
-                self.street_nodes.len() / std::mem::size_of::<NodeCoord>(),
-            )
-        };
-        let all_interps: &[InterpWay] = unsafe {
-            std::slice::from_raw_parts(
-                self.interp_ways.as_ptr() as *const InterpWay,
-                self.interp_ways.len() / std::mem::size_of::<InterpWay>(),
-            )
-        };
-        let all_interp_nodes: &[NodeCoord] = unsafe {
-            std::slice::from_raw_parts(
-                self.interp_nodes.as_ptr() as *const NodeCoord,
-                self.interp_nodes.len() / std::mem::size_of::<NodeCoord>(),
-            )
-        };
-
-        let cos_lat = lat.to_radians().cos();
-
-        let mut best_addr_dist = f64::MAX;
-        let mut best_addr: Option<&AddrPoint> = None;
-        let mut best_street_dist = f64::MAX;
-        let mut best_street: Option<&WayHeader> = None;
-        let mut best_interp_dist = f64::MAX;
-        let mut best_interp: Option<&InterpWay> = None;
-        let mut best_interp_t: f64 = 0.0;
-
-        // Fixed-size hash set on stack to skip duplicate street IDs across cells
-        let mut seen_streets: [u32; 64] = [u32::MAX; 64];
-
-        for c in std::iter::once(cell).chain(neighbors.into_iter()) {
-            let offsets = Self::lookup_geo_cell(&self.geo_cells, c);
-
-            // Addresses
-            Self::for_each_entry(&self.addr_entries, offsets.addr, |id| {
-                let point = &all_points[id as usize];
-                let dlat = (point.lat as f64 - lat).to_radians();
-                let dlng = (point.lng as f64 - lng).to_radians();
-                let dist = dist_sq(dlat, dlng, cos_lat);
-                if dist < best_addr_dist {
-                    best_addr_dist = dist;
-                    best_addr = Some(point);
-                }
-            });
-
-            // Streets
-            Self::for_each_entry(&self.street_entries, offsets.street, |id| {
-                let slot = (id as usize) & 0x3F;
-                if seen_streets[slot] == id { return; }
-                seen_streets[slot] = id;
-
-                let way = &all_ways[id as usize];
-                let offset = way.node_offset as usize;
-                let count = way.node_count as usize;
-                let nodes = &all_street_nodes[offset..offset + count];
-
-                for i in 0..nodes.len() - 1 {
-                    let dist = point_to_segment_distance(
-                        lat, lng,
-                        nodes[i].lat as f64, nodes[i].lng as f64,
-                        nodes[i + 1].lat as f64, nodes[i + 1].lng as f64,
-                        cos_lat,
-                    );
-                    if dist < best_street_dist {
-                        best_street_dist = dist;
-                        best_street = Some(way);
-                    }
-                }
-            });
-
-            // Interpolation
-            Self::for_each_entry(&self.interp_entries, offsets.interp, |id| {
-                let iw = &all_interps[id as usize];
-                if iw.start_number == 0 || iw.end_number == 0 { return; }
-
-                let offset = iw.node_offset as usize;
-                let count = iw.node_count as usize;
-                let nodes = &all_interp_nodes[offset..offset + count];
-
-                let mut total_len: f64 = 0.0;
-                for i in 0..nodes.len() - 1 {
-                    let dlat = (nodes[i + 1].lat as f64 - nodes[i].lat as f64).to_radians();
-                    let dlng = (nodes[i + 1].lng as f64 - nodes[i].lng as f64).to_radians();
-                    total_len += dist_sq(dlat, dlng, cos_lat);
-                }
-                if total_len == 0.0 { return; }
-
-                let mut best_seg_dist = f64::MAX;
-                let mut best_seg_t: f64 = 0.0;
-                let mut prev_accumulated: f64 = 0.0;
-
-                for i in 0..nodes.len() - 1 {
-                    let dlat = (nodes[i + 1].lat as f64 - nodes[i].lat as f64).to_radians();
-                    let dlng = (nodes[i + 1].lng as f64 - nodes[i].lng as f64).to_radians();
-                    let seg_len = dist_sq(dlat, dlng, cos_lat);
-                    let (dist, seg_t) = point_to_segment_with_t(
-                        lat, lng,
-                        nodes[i].lat as f64, nodes[i].lng as f64,
-                        nodes[i + 1].lat as f64, nodes[i + 1].lng as f64,
-                        cos_lat,
-                    );
-                    if dist < best_seg_dist {
-                        best_seg_dist = dist;
-                        best_seg_t = (prev_accumulated + seg_t * seg_len) / total_len;
-                    }
-                    prev_accumulated += seg_len;
-                }
-
-                if best_seg_dist < best_interp_dist {
-                    best_interp_dist = best_seg_dist;
-                    best_interp = Some(iw);
-                    best_interp_t = best_seg_t;
-                }
-            });
-        }
-
-        let addr_result = best_addr.map(|p| (best_addr_dist, p));
-        let street_result = best_street.map(|w| (best_street_dist, w));
-        let interp_result = best_interp.map(|iw| {
-            let start = iw.start_number as f64;
-            let end = iw.end_number as f64;
-            let raw = start + best_interp_t * (end - start);
-
-            let step: u32 = match iw.interpolation {
-                1 | 2 => 2,
-                _ => 1,
-            };
-
-            let number = if step == 2 {
-                let base = iw.start_number;
-                let offset = ((raw - base as f64) / step as f64).round() as u32 * step;
-                base + offset
-            } else {
-                raw.round() as u32
-            };
-
-            (best_interp_dist, self.get_string(iw.street_id), number)
-        });
-
-        (addr_result, interp_result, street_result)
-    }
-
-    // --- Admin boundary lookup (point-in-polygon) ---
-
-    fn find_admin(&self, lat: f64, lng: f64) -> AdminResult<'_> {
-        let cell = cell_id_at_level(lat, lng, self.admin_cell_level);
-        let neighbors = cell_neighbors_at_level(cell, self.admin_cell_level);
-
-        let all_polygons: &[AdminPolygon] = unsafe {
-            std::slice::from_raw_parts(
-                self.admin_polygons.as_ptr() as *const AdminPolygon,
-                self.admin_polygons.len() / std::mem::size_of::<AdminPolygon>(),
-            )
-        };
-        let all_vertices: &[NodeCoord] = unsafe {
-            std::slice::from_raw_parts(
-                self.admin_vertices.as_ptr() as *const NodeCoord,
-                self.admin_vertices.len() / std::mem::size_of::<NodeCoord>(),
-            )
-        };
-
-        // For each admin level, find the smallest-area polygon containing the point
-        let mut best_by_level: [Option<(f32, &AdminPolygon)>; 12] = [None; 12];
-
-        const INTERIOR_FLAG: u32 = 0x80000000;
-        const ID_MASK: u32 = 0x7FFFFFFF;
-
-        for c in std::iter::once(cell).chain(neighbors.into_iter()) {
-            Self::for_each_entry(&self.admin_entries, Self::lookup_admin_cell(&self.admin_cells, c), |id| {
-                let is_interior = (id & INTERIOR_FLAG) != 0;
-                let poly_id = (id & ID_MASK) as usize;
-                let poly = &all_polygons[poly_id];
-                let level = poly.admin_level as usize;
-                if level >= 12 { return; }
-
-                // Skip if we already have a smaller polygon at this level
-                if let Some((best_area, _)) = best_by_level[level] {
-                    if poly.area >= best_area { return; }
-                }
-
-                // Interior cells skip point-in-polygon test
-                if is_interior || point_in_polygon(lat as f32, lng as f32, {
-                    let offset = poly.vertex_offset as usize;
-                    let count = poly.vertex_count as usize;
-                    &all_vertices[offset..offset + count]
-                }) {
-                    best_by_level[level] = Some((poly.area, poly));
-                }
-            });
-        }
-
-        let mut result = AdminResult::default();
-
-        for level in 0..12 {
-            if let Some((_, poly)) = best_by_level[level] {
-                let name = self.get_string(poly.name_id);
-                match poly.admin_level {
-                    2 => {
-                        result.country = Some(name);
-                        if poly.country_code != 0 {
-                            result.country_code = Some([
-                                (poly.country_code >> 8) as u8,
-                                (poly.country_code & 0xFF) as u8,
-                            ]);
-                        }
-                    }
-                    4 => result.state = Some(name),
-                    6 => result.county = Some(name),
-                    8 => result.city = Some(name),
-                    11 => result.postcode = Some(name),
-                    _ => {}
-                }
-            }
-        }
-
-        result
-    }
-
-    // --- Combined query ---
-
-    fn query(&self, lat: f64, lng: f64) -> Address<'_> {
-        let max_dist = self.max_distance_sq;
-
-        let admin = self.find_admin(lat, lng);
-        let (addr, interp, street) = self.query_geo(lat, lng);
-
-        // Determine house_number and road from best geo match (priority: address > interpolation > street)
-        let mut house_number: Option<Cow<'_, str>> = None;
-        let mut road: Option<&str> = None;
-
-        if let Some((dist, point)) = addr {
-            if dist < max_dist {
-                house_number = Some(Cow::Borrowed(self.get_string(point.housenumber_id)));
-                road = Some(self.get_string(point.street_id));
-            }
-        }
-        if road.is_none() {
-            if let Some((dist, street_name, number)) = interp {
-                if dist < max_dist {
-                    house_number = Some(Cow::Owned(number.to_string()));
-                    road = Some(street_name);
-                }
-            }
-        }
-        if road.is_none() {
-            if let Some((dist, way)) = street {
-                if dist < max_dist {
-                    road = Some(self.get_string(way.name_id));
-                }
-            }
-        }
-
-        if road.is_none() && admin.country.is_none() && admin.city.is_none() {
-            return Address::default();
-        }
-
-        let address = AddressDetails {
-            house_number,
-            road,
-            city: admin.city,
-            state: admin.state,
-            county: admin.county,
-            postcode: admin.postcode,
-            country: admin.country,
-            country_code: admin.country_code.map(|c| String::from_utf8_lossy(&c).into_owned()),
-        };
-        let display_name = format_address(&address);
-        Address { display_name, address }
-    }
-}
-
-// --- Geometry helpers ---
-
-fn dist_sq(dlat: f64, dlng: f64, cos_lat: f64) -> f64 {
-    dlat * dlat + dlng * dlng * cos_lat * cos_lat
-}
-
-fn point_to_segment_with_t(
-    px: f64, py: f64,
-    ax: f64, ay: f64,
-    bx: f64, by: f64,
-    cos_lat: f64,
-) -> (f64, f64) {
-    let dx = bx - ax;
-    let dy = by - ay;
-    let len_sq = dx * dx + dy * dy;
-
-    let t = if len_sq == 0.0 {
-        0.0
-    } else {
-        (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0)
-    };
-
-    let proj_x = ax + t * dx;
-    let proj_y = ay + t * dy;
-    let dlat = (px - proj_x).to_radians();
-    let dlng = (py - proj_y).to_radians();
-    (dist_sq(dlat, dlng, cos_lat), t)
-}
-
-fn point_to_segment_distance(
-    px: f64, py: f64,
-    ax: f64, ay: f64,
-    bx: f64, by: f64,
-    cos_lat: f64,
-) -> f64 {
-    point_to_segment_with_t(px, py, ax, ay, bx, by, cos_lat).0
-}
-
-// Ray casting point-in-polygon test
-fn point_in_polygon(lat: f32, lng: f32, vertices: &[NodeCoord]) -> bool {
-    let mut inside = false;
-    let n = vertices.len();
-    let mut j = n - 1;
-
-    for i in 0..n {
-        let vi = &vertices[i];
-        let vj = &vertices[j];
-
-        if ((vi.lng > lng) != (vj.lng > lng))
-            && (lat < (vj.lat - vi.lat) * (lng - vi.lng) / (vj.lng - vi.lng) + vi.lat)
-        {
-            inside = !inside;
-        }
-        j = i;
-    }
-
-    inside
-}
-
-// --- API types ---
-
-#[derive(Default)]
-struct AdminResult<'a> {
-    country: Option<&'a str>,
-    country_code: Option<[u8; 2]>,
-    state: Option<&'a str>,
-    county: Option<&'a str>,
-    city: Option<&'a str>,
-    postcode: Option<&'a str>,
-}
-
-#[derive(Serialize, Default)]
-struct AddressDetails<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    house_number: Option<Cow<'a, str>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    road: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    city: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    county: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    postcode: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    country: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    country_code: Option<String>,
-}
-
-#[derive(Serialize, Default)]
-struct Address<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    display_name: Option<String>,
-    address: AddressDetails<'a>,
-}
-
-// Address formatting patterns by country code
-// Returns (number_after_street, postcode_before_city, include_state)
-fn format_rules(country_code: Option<&str>) -> (bool, bool, bool) {
-    match country_code {
-        // Number before street, postcode after city, include state
-        Some("US") | Some("CA") | Some("AU") | Some("NZ")
-        | Some("GB") | Some("IE") | Some("ZA") | Some("IN")
-        | Some("NG") | Some("KE") | Some("GH") | Some("PK")
-        | Some("PH") | Some("TH") | Some("MY") => (false, false, true),
-
-        // Number before street, postcode before city, include state
-        Some("JP") | Some("KR") | Some("CN") | Some("TW") => (false, true, true),
-
-        // Number after street, postcode before city, no state (most of Europe, etc.)
-        _ => (true, true, false),
-    }
-}
-
-fn format_address(addr: &AddressDetails<'_>) -> Option<String> {
-    if addr.road.is_none() && addr.city.is_none() && addr.country.is_none() {
-        return None;
-    }
-
-    let (number_after, postcode_before_city, include_state) = format_rules(addr.country_code.as_deref());
-    let mut parts: Vec<String> = Vec::new();
-
-    // Street + house number
-    if let Some(road) = addr.road {
-        if let Some(ref hn) = addr.house_number {
-            if number_after {
-                parts.push(format!("{} {}", road, hn));
-            } else {
-                parts.push(format!("{} {}", hn, road));
-            }
-        } else {
-            parts.push(road.to_string());
-        }
-    }
-
-    // City + postcode + state
-    if postcode_before_city {
-        let mut city_part = String::new();
-        if let Some(pc) = addr.postcode {
-            city_part.push_str(pc);
-            city_part.push(' ');
-        }
-        if let Some(city) = addr.city {
-            city_part.push_str(city);
-        }
-        if include_state {
-            if let Some(state) = addr.state {
-                if !city_part.is_empty() { city_part.push_str(", "); }
-                city_part.push_str(state);
-            }
-        }
-        if !city_part.is_empty() {
-            parts.push(city_part.trim().to_string());
-        }
-    } else {
-        let mut city_part = String::new();
-        if let Some(city) = addr.city {
-            city_part.push_str(city);
-        }
-        if include_state {
-            if let Some(state) = addr.state {
-                if !city_part.is_empty() { city_part.push_str(", "); }
-                city_part.push_str(state);
-            }
-        }
-        if let Some(pc) = addr.postcode {
-            if !city_part.is_empty() { city_part.push(' '); }
-            city_part.push_str(pc);
-        }
-        if !city_part.is_empty() {
-            parts.push(city_part);
-        }
-    }
-
-    // Country
-    if let Some(country) = addr.country {
-        parts.push(country.to_string());
-    }
-
-    if parts.is_empty() { None } else { Some(parts.join(", ")) }
-}
+use std::time::{Duration, SystemTime};
+
+#[cfg(feature = "forward")]
+use query_server::forward::{self, Forward};
+
+/// Live index handle. Handlers clone the outer Arc (cheap) and call
+/// `.load()` to get the current inner `Arc<Index>`. A background task can
+/// replace the inner value atomically when the index on disk changes.
+type LiveIndex = Arc<ArcSwap<Index>>;
 
 #[derive(Deserialize)]
 struct QueryParams {
     lat: f64,
     lon: f64,
+    /// Optional language code (ISO 639-1: `en`, `fr`, `de`, `es`, `ja`,
+    /// `zh`, etc.). When present and the underlying entity has a matching
+    /// `name:<lang>` tag in OSM, the returned city/state/country names are
+    /// in that language. When the C++ builder has not yet emitted the
+    /// i18n index (see ARCHITECTURE.md `Future work`), this param is
+    /// silently accepted and ignored — clients can ship the param
+    /// unconditionally without breaking.
+    #[serde(default)]
+    lang: Option<String>,
+    key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AutocompleteParams {
+    q: String,
+    #[serde(default)]
+    country_code: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ValidateParams {
+    /// Optional — when present, resolves the specific property via the
+    /// address-point indexes and returns `verified` confidence.
+    #[serde(default)]
+    housenumber: Option<String>,
+    street: String,
+    /// Locality / suburb / city. Required.
+    city: String,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    postcode: Option<String>,
+    country_code: String,
+    key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct IpParams {
+    /// Optional override — defaults to the request's peer IP. Accepts
+    /// either IPv4 or IPv6 in the usual textual form.
+    #[serde(default)]
+    ip: Option<String>,
+    key: Option<String>,
+}
+
+#[cfg(feature = "forward")]
+#[derive(Deserialize)]
+struct SearchParams {
+    /// Freeform query. Either `q` alone or any of the structured fields below
+    /// (or both) can be provided.
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    street: Option<String>,
+    #[serde(default)]
+    housenumber: Option<String>,
+    #[serde(default)]
+    city: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    country_code: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
     key: Option<String>,
 }
 
 async fn reverse_geocode(
     Query(params): Query<QueryParams>,
     state: axum::extract::State<Arc<RwLock<auth::Db>>>,
-    index: axum::extract::Extension<Arc<Index>>,
+    index: axum::extract::Extension<LiveIndex>,
     limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Response {
@@ -728,9 +126,632 @@ async fn reverse_geocode(
         return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
     }
 
-    let address = index.query(params.lat, params.lon);
-    let json = serde_json::to_string(&address).unwrap_or_default();
+    let snapshot = index.load();
+    let address = snapshot.query_with_lang(params.lat, params.lon, params.lang.as_deref());
+    // serde_json::to_string never fails for Address (no non-string map keys,
+    // no Serialize impls that can return Err). An error here is a code bug,
+    // not a runtime condition — panicking with a clear message is more
+    // useful than silently returning "" to the client.
+    let json = serde_json::to_string(&address).expect("Address is always serialisable");
     ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
+}
+
+/// Address validation — given structured components, confirm whether the
+/// address exists in our authoritative sources and return the canonical
+/// normalised form. Radar's `/v1/addresses/validate` counterpart.
+#[cfg(feature = "forward")]
+async fn validate_address(
+    Query(params): Query<ValidateParams>,
+    state: axum::extract::State<Arc<RwLock<auth::Db>>>,
+    index: axum::extract::Extension<LiveIndex>,
+    forward_idx: axum::extract::Extension<Option<Arc<Forward>>>,
+    limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
+    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> Response {
+    let key = match params.key {
+        Some(k) => k,
+        None => return (StatusCode::UNAUTHORIZED, "Missing API key").into_response(),
+    };
+    let (login, rps, rpd, by_ip) = match state.read().unwrap().validate_token(&key) {
+        Some(info) => info,
+        None => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
+    };
+    let rate_key = if by_ip {
+        format!("{}:{}", login, connect_info.0.ip())
+    } else {
+        login
+    };
+    if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
+        return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
+    }
+
+    let Some(fwd) = forward_idx.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "Address validation requires the forward index. Run build-forward-index.",
+        )
+            .into_response();
+    };
+
+    // Step 1: locate the street within the named city, for a coarse
+    // candidate coord. forward::search_structured applies the same fallback
+    // ladder as /search so slightly-wrong inputs still resolve.
+    let structured = forward::StructuredQuery {
+        street: Some(&params.street),
+        city: Some(&params.city),
+        state: params.state.as_deref(),
+        country_code: Some(&params.country_code),
+        kind: Some(forward::KIND_STREET),
+        limit: 5,
+        ..Default::default()
+    };
+    let hits = match fwd.search_structured(structured) {
+        Ok(h) => h,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("search failed: {e}"))
+                .into_response()
+        }
+    };
+    let Some(top) = hits.first() else {
+        let body = serde_json::json!({
+            "verified": false,
+            "confidence": "fallback",
+            "reason": "street not found in the requested city/state/country",
+        });
+        return (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            serde_json::to_string(&body).expect("serialise"),
+        )
+            .into_response();
+    };
+
+    // Step 2: refine to the exact property if a housenumber was supplied.
+    let idx_snap = index.load();
+    let cc_bytes: Option<[u8; 2]> = parse_country_code_bytes(&params.country_code);
+    let (final_lat, final_lng, verified, confidence_reason) = if let Some(hn) = params.housenumber.as_deref()
+    {
+        let resolved = idx_snap.find_addr_point_in_country(
+            hn,
+            Some(&top.name),
+            top.lat,
+            top.lng,
+            cc_bytes.as_ref(),
+        );
+        match resolved {
+            Some(m) => (m.lat, m.lng, true, "exact"),
+            None => (top.lat, top.lng, false, "fallback: street found, house number not in index"),
+        }
+    } else {
+        (top.lat, top.lng, false, "interpolated: street resolved, no house number to verify")
+    };
+
+    // Step 3: reverse-geocode the final coord to build the canonical form.
+    let canonical = idx_snap.query(final_lat, final_lng);
+
+    let body = serde_json::json!({
+        "verified": verified,
+        "confidence": if verified { "exact" } else { confidence_reason },
+        "input": {
+            "housenumber": params.housenumber,
+            "street": params.street,
+            "city": params.city,
+            "state": params.state,
+            "postcode": params.postcode,
+            "country_code": params.country_code,
+        },
+        "normalized": {
+            "display_name": canonical.display_name,
+            "address": canonical.address,
+        },
+        "lat": final_lat,
+        "lon": final_lng,
+    });
+    let json = serde_json::to_string(&body).expect("validate response serialisable");
+    ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
+}
+
+/// Build a `/search`-response-shaped record from a FST fast-path hit.
+/// Reverse-geocodes the coord to fill in the full address so clients see
+/// the same response shape whether the hit came from FST or tantivy.
+#[cfg(feature = "forward")]
+fn enrich_fst_hit(
+    fst_hit: query_server::autocomplete::Hit,
+    index: &Index,
+) -> serde_json::Value {
+    let addr = index.query(fst_hit.lat, fst_hit.lng);
+    let d = &addr.address;
+    serde_json::json!({
+        "name": fst_hit.name,
+        "kind": fst_hit.kind,
+        "rank": fst_hit.rank,
+        // Fast-path doesn't run BM25; report a sentinel score that clients
+        // can use to detect FST hits for telemetry. Prominence-sorted by
+        // rank on return, so "score" isn't meaningful here.
+        "score": 0.0,
+        "source": "fst",
+        "lat": fst_hit.lat,
+        "lon": fst_hit.lng,
+        "display_name": addr.display_name,
+        "address": {
+            "house_number": d.house_number.as_deref().map(str::to_owned),
+            "road": d.road,
+            "city": d.city,
+            "state": d.state,
+            "county": d.county,
+            "postcode": d.postcode,
+            "country": d.country,
+            "country_code": d.country_code,
+        },
+        "confidence": addr.confidence,
+    })
+}
+
+/// Parse a user-supplied country code string into the 2-byte uppercase
+/// pair our `find_addr_point_in_country` uses.
+fn parse_country_code_bytes(s: &str) -> Option<[u8; 2]> {
+    let b = s.trim().as_bytes();
+    if b.len() != 2 || !b[0].is_ascii_alphabetic() || !b[1].is_ascii_alphabetic() {
+        return None;
+    }
+    Some([b[0].to_ascii_uppercase(), b[1].to_ascii_uppercase()])
+}
+
+async fn autocomplete(
+    Query(params): Query<AutocompleteParams>,
+    state: axum::extract::State<Arc<RwLock<auth::Db>>>,
+    autocomplete_idx: axum::extract::Extension<Option<Arc<Autocomplete>>>,
+    limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
+    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> Response {
+    let key = match params.key {
+        Some(k) => k,
+        None => return (StatusCode::UNAUTHORIZED, "Missing API key").into_response(),
+    };
+    let (login, rps, rpd, by_ip) = match state.read().unwrap().validate_token(&key) {
+        Some(info) => info,
+        None => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
+    };
+    let rate_key = if by_ip {
+        format!("{}:{}", login, connect_info.0.ip())
+    } else {
+        login
+    };
+    if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
+        return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
+    }
+
+    let Some(autoc) = autocomplete_idx.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "Autocomplete not built. Run build-autocomplete-fst.",
+        )
+            .into_response();
+    };
+
+    let limit = params.limit.unwrap_or(10).clamp(1, 50);
+    let results: Vec<query_server::autocomplete::Hit> =
+        match params.country_code.as_deref().and_then(parse_country_code_bytes) {
+            Some(cc_upper) => {
+                let cc_lower = [cc_upper[0].to_ascii_lowercase(), cc_upper[1].to_ascii_lowercase()];
+                autoc.search(&cc_lower, &params.q, limit)
+            }
+            None => autoc.search_any(&params.q, limit),
+        };
+
+    let body = serde_json::json!({ "results": results });
+    let json = serde_json::to_string(&body).expect("autocomplete response serialisable");
+    ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
+}
+
+async fn ip_geocode(
+    Query(params): Query<IpParams>,
+    state: axum::extract::State<Arc<RwLock<auth::Db>>>,
+    index: axum::extract::Extension<LiveIndex>,
+    ip_db: axum::extract::Extension<Option<Arc<IpGeo>>>,
+    limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
+    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> Response {
+    let key = match params.key {
+        Some(k) => k,
+        None => return (StatusCode::UNAUTHORIZED, "Missing API key").into_response(),
+    };
+    let (login, rps, rpd, by_ip) = match state.read().unwrap().validate_token(&key) {
+        Some(info) => info,
+        None => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
+    };
+    let rate_key = if by_ip {
+        format!("{}:{}", login, connect_info.0.ip())
+    } else {
+        login
+    };
+    if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
+        return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
+    }
+
+    // If the caller passes `?ip=...` accept that (convenient for admin
+    // testing), otherwise default to the socket's peer address.
+    let ip: std::net::IpAddr = match params.ip.as_deref() {
+        Some(s) => match s.parse() {
+            Ok(ip) => ip,
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, format!("invalid ip {s:?}")).into_response();
+            }
+        },
+        None => connect_info.0.ip(),
+    };
+
+    let Some(db) = ip_db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "IP geocoding not enabled. Put GeoLite2-City.mmdb under the data dir or set GEOLITE2_DB.",
+        )
+            .into_response();
+    };
+
+    let Some((lat, lon)) = db.lookup(ip) else {
+        return (StatusCode::NOT_FOUND, format!("no location for ip {ip}")).into_response();
+    };
+
+    let snapshot = index.load();
+    let address = snapshot.query(lat, lon);
+    let body = serde_json::json!({
+        "ip": ip.to_string(),
+        "lat": lat,
+        "lon": lon,
+        "display_name": address.display_name,
+        "address": address.address,
+        "confidence": address.confidence,
+    });
+    let json = serde_json::to_string(&body).expect("ip response serialisable");
+    ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
+}
+
+#[cfg(feature = "forward")]
+async fn search(
+    Query(params): Query<SearchParams>,
+    state: axum::extract::State<Arc<RwLock<auth::Db>>>,
+    index: axum::extract::Extension<LiveIndex>,
+    forward_idx: axum::extract::Extension<Option<Arc<Forward>>>,
+    autocomplete_idx: axum::extract::Extension<Option<Arc<Autocomplete>>>,
+    limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
+    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> Response {
+    let key = match params.key {
+        Some(k) => k,
+        None => return (StatusCode::UNAUTHORIZED, "Missing API key").into_response(),
+    };
+
+    let (login, rps, rpd, by_ip) = match state.read().unwrap().validate_token(&key) {
+        Some(info) => info,
+        None => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
+    };
+
+    let rate_key = if by_ip {
+        format!("{}:{}", login, connect_info.0.ip())
+    } else {
+        login
+    };
+    if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
+        return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
+    }
+
+    let Some(fwd) = forward_idx.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "Forward geocoding index not loaded; run `build-forward-index <data>/index` to enable /search",
+        )
+            .into_response();
+    };
+
+    let kind_filter = match params.kind.as_deref() {
+        Some("place") => Some(forward::KIND_PLACE),
+        Some("street") => Some(forward::KIND_STREET),
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid kind {other:?}; expected 'place' or 'street'"),
+            )
+                .into_response()
+        }
+        None => None,
+    };
+
+    // If the caller sent a freeform `q`, pre-parse to surface house number /
+    // state / postcode hints. Structured params take precedence when both
+    // are present.
+    let parsed = params.q.as_deref().map(forward::parse_freeform_query);
+    let housenumber = params
+        .housenumber
+        .clone()
+        .or_else(|| parsed.as_ref().and_then(|p| p.house_number.clone()));
+
+    let limit = params.limit.unwrap_or(10).clamp(1, 50);
+
+    // Support Radar-style multi-country filter: `country_code=US,CA,MX`.
+    // When multiple codes are present we run one search per code against
+    // its per-country index and merge the top-N by score. Single-value
+    // queries take the common path with no extra work.
+    let country_codes: Vec<&str> = params
+        .country_code
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // FST fast-path: a simple freeform query that exactly matches an FST
+    // key (e.g. `"sydney"` → the Sydney place record) resolves in ~5 µs
+    // without touching tantivy. Radar's public architecture attributes
+    // ~80% of their traffic to this fast-path. Skip when the query is
+    // structured (street/city/state set), when the caller asked for
+    // multiple countries, when no FST is loaded, or when we'd need to
+    // over-fetch (fast-path returns exactly one hit).
+    let is_simple_freeform = params.street.is_none()
+        && params.city.is_none()
+        && params.state.is_none()
+        && country_codes.len() <= 1
+        && params.q.as_deref().is_some_and(|s| !s.trim().is_empty());
+    if is_simple_freeform {
+        if let Some(autoc) = autocomplete_idx.as_ref() {
+            let q_text = params
+                .q
+                .as_deref()
+                .expect("is_simple_freeform guarantees q is Some and non-empty");
+            let fst_hit = match country_codes.first().copied() {
+                Some(cc) => parse_country_code_bytes(cc).map(|code| {
+                    let cc_lower = [code[0].to_ascii_lowercase(), code[1].to_ascii_lowercase()];
+                    autoc.exact_match(&cc_lower, q_text)
+                }).unwrap_or(None),
+                None => autoc.exact_match_any(q_text).map(|(_, h)| h),
+            };
+            if let Some(fst_hit) = fst_hit {
+                // Honour kind filter even on the fast-path.
+                let wanted_kind = match params.kind.as_deref() {
+                    Some("place") => Some(forward::KIND_PLACE as u64),
+                    Some("street") => Some(forward::KIND_STREET as u64),
+                    _ => None,
+                };
+                let kind_ok = wanted_kind
+                    .map(|k| k == fst_hit.kind as u64)
+                    .unwrap_or(true);
+                if kind_ok {
+                    let idx_snap = index.load();
+                    let enriched = enrich_fst_hit(fst_hit, &idx_snap);
+                    let body = serde_json::json!({ "results": [enriched] });
+                    let json =
+                        serde_json::to_string(&body).expect("fst fast-path serialisable");
+                    return ([(axum::http::header::CONTENT_TYPE, "application/json")], json)
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    let hits = if country_codes.len() > 1 {
+        let mut merged: Vec<forward::Hit> = Vec::new();
+        for cc in &country_codes {
+            let structured = forward::StructuredQuery {
+                q: params.q.as_deref(),
+                street: params.street.as_deref(),
+                city: params.city.as_deref(),
+                state: params.state.as_deref(),
+                country_code: Some(cc),
+                kind: kind_filter,
+                limit,
+            };
+            match fwd.search_structured(structured) {
+                Ok(mut h) => merged.append(&mut h),
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("search failed: {e}"))
+                        .into_response()
+                }
+            }
+        }
+        merged.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        merged.truncate(limit);
+        merged
+    } else {
+        let structured = forward::StructuredQuery {
+            q: params.q.as_deref(),
+            street: params.street.as_deref(),
+            city: params.city.as_deref(),
+            state: params.state.as_deref(),
+            country_code: country_codes.first().copied(),
+            kind: kind_filter,
+            limit,
+        };
+        match fwd.search_structured(structured) {
+            Ok(h) => h,
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("search failed: {e}"))
+                    .into_response()
+            }
+        }
+    };
+
+    // Enrich each hit: if a house number is known, try to refine the street
+    // result to the specific addr_point; in any case reverse-geocode the
+    // final coordinate so callers get the full display_name + structured
+    // address fields.
+    let idx_snapshot = index.load();
+    let enriched: Vec<serde_json::Value> = hits
+        .into_iter()
+        .map(|hit| enrich_hit(hit, housenumber.as_deref(), &idx_snapshot))
+        .collect();
+
+    let body = serde_json::json!({ "results": enriched });
+    let json = serde_json::to_string(&body).expect("enriched results are always serialisable");
+    ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
+}
+
+/// Upgrade a forward `Hit` into a dispatch-grade record: apply house-number
+/// refinement when a number was parsed from the query and the hit is a
+/// street, then reverse-geocode the final coord so the response carries
+/// normalised admin fields (country, state, city, postcode).
+#[cfg(feature = "forward")]
+fn enrich_hit(
+    hit: forward::Hit,
+    housenumber: Option<&str>,
+    index: &Index,
+) -> serde_json::Value {
+    use serde_json::json;
+
+    let (final_lat, final_lng, matched_hn) = match (hit.kind, housenumber) {
+        (forward::KIND_STREET, Some(hn)) => {
+            match index.find_addr_point(hn, Some(&hit.name), hit.lat, hit.lng) {
+                Some(m) => (m.lat, m.lng, Some(m.housenumber.to_owned())),
+                None => (hit.lat, hit.lng, None),
+            }
+        }
+        _ => (hit.lat, hit.lng, None),
+    };
+
+    let addr = index.query(final_lat, final_lng);
+    let details = &addr.address;
+
+    json!({
+        "name": hit.name,
+        "kind": hit.kind,
+        "rank": hit.rank,
+        "score": hit.score,
+        "lat": final_lat,
+        "lon": final_lng,
+        "display_name": addr.display_name,
+        "address": {
+            "house_number": matched_hn.or_else(|| details.house_number.as_deref().map(str::to_owned)),
+            "road": details.road,
+            "city": details.city,
+            "state": details.state,
+            "county": details.county,
+            "postcode": details.postcode,
+            "country": details.country,
+            "country_code": details.country_code,
+        },
+    })
+}
+
+/// Try to open the tantivy forward-geocoding index at `<data_dir>/tantivy`.
+/// Returns `None` (and logs) when the directory doesn't exist — the server
+/// still starts, but `/search` will respond 501 until an index is built.
+#[cfg(feature = "forward")]
+fn load_forward_index(data_dir: &str) -> Option<Arc<Forward>> {
+    let dir = Path::new(data_dir).join("tantivy");
+    if !dir.exists() {
+        eprintln!(
+            "Forward index not found at {} — /search disabled. Run `build-forward-index {}` to enable.",
+            dir.display(),
+            data_dir
+        );
+        return None;
+    }
+    match Forward::open(&dir) {
+        Ok(fwd) => {
+            eprintln!("Loaded forward-geocoding index from {}", dir.display());
+            Some(Arc::new(fwd))
+        }
+        Err(e) => {
+            eprintln!("Failed to open forward index at {}: {} — /search disabled", dir.display(), e);
+            None
+        }
+    }
+}
+
+/// Load the admin-level mapping config. If `GEOCODER_ADMIN_CONFIG` points
+/// at a JSON file, use that; otherwise fall back to the embedded default.
+fn load_admin_config() -> AdminConfig {
+    match std::env::var("GEOCODER_ADMIN_CONFIG").ok() {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(src) => match AdminConfig::from_json(&src) {
+                Ok(cfg) => {
+                    eprintln!("Loaded admin-mapping config from {}", path);
+                    cfg
+                }
+                Err(e) => {
+                    eprintln!("Invalid admin-mapping config at {}: {} — using default", path, e);
+                    AdminConfig::embedded_default()
+                }
+            },
+            Err(e) => {
+                eprintln!("Failed to read {}: {} — using default", path, e);
+                AdminConfig::embedded_default()
+            }
+        },
+        None => AdminConfig::embedded_default(),
+    }
+}
+
+/// Spawn a background task that polls a marker file (`<data_dir>/.reload`
+/// by default, override via GEOCODER_RELOAD_MARKER env var) and reloads the
+/// index atomically when the marker's mtime changes. Poll interval is 5 s
+/// by default, override via GEOCODER_RELOAD_INTERVAL_SEC.
+fn spawn_index_reloader(
+    live: LiveIndex,
+    data_dir: String,
+    street_level: u64,
+    admin_level: u64,
+    search_distance: f64,
+) {
+    let marker = std::env::var("GEOCODER_RELOAD_MARKER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(&data_dir).join(".reload"));
+    let interval_sec: u64 = std::env::var("GEOCODER_RELOAD_INTERVAL_SEC")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+
+    eprintln!(
+        "Index reloader: watching {} every {}s",
+        marker.display(),
+        interval_sec
+    );
+
+    tokio::spawn(async move {
+        let mut last_mtime: Option<SystemTime> = std::fs::metadata(&marker)
+            .ok()
+            .and_then(|m| m.modified().ok());
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(interval_sec)).await;
+
+            let Some(current) = std::fs::metadata(&marker)
+                .ok()
+                .and_then(|m| m.modified().ok())
+            else {
+                continue;
+            };
+
+            if last_mtime == Some(current) {
+                continue;
+            }
+
+            eprintln!("Index reloader: marker changed, reloading from {}", data_dir);
+            let admin_config = load_admin_config();
+            match Index::load_with_admin_config(
+                &data_dir,
+                street_level,
+                admin_level,
+                search_distance,
+                admin_config,
+            ) {
+                Ok(new_idx) => {
+                    live.store(Arc::new(new_idx));
+                    last_mtime = Some(current);
+                    eprintln!("Index reloader: swap complete");
+                }
+                Err(e) => {
+                    eprintln!("Index reloader: load failed, keeping old index: {}", e);
+                }
+            }
+        }
+    });
 }
 
 #[tokio::main]
@@ -749,25 +770,106 @@ async fn main() {
     let db = auth::Db::load(&db_path);
 
     eprintln!("Loading index from {}...", data_dir);
-    let index = match Index::load(data_dir, street_cell_level, admin_cell_level, search_distance) {
-        Ok(idx) => Arc::new(idx),
+    let admin_config = load_admin_config();
+    let index = match Index::load_with_admin_config(
+        data_dir,
+        street_cell_level,
+        admin_cell_level,
+        search_distance,
+        admin_config,
+    ) {
+        Ok(idx) => Arc::new(ArcSwap::from(Arc::new(idx))),
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
     };
 
-    let db = Arc::new(RwLock::new(db));
-    let limiter = Arc::new(auth::RateLimiter::default()); // RwLock<HashMap> with atomic counters
+    // Background reloader: watches a marker file and atomically swaps the
+    // Index when the marker's mtime changes. Writer side (update-index.sh)
+    // `touch`es the marker after moving a fresh index into place.
+    spawn_index_reloader(
+        index.clone(),
+        data_dir.to_string(),
+        street_cell_level,
+        admin_cell_level,
+        search_distance,
+    );
 
+    let db = Arc::new(RwLock::new(db));
+    let limiter = Arc::new(auth::RateLimiter::default());
+
+    // Optional MaxMind GeoLite2 loader. Missing DB → /geocode/ip returns 503.
+    let ip_db: Option<Arc<IpGeo>> = match IpGeo::open(Path::new(data_dir)) {
+        Ok(Some(db)) => Some(Arc::new(db)),
+        Ok(None) => {
+            eprintln!("No GeoLite2-City.mmdb — /geocode/ip disabled");
+            None
+        }
+        Err(e) => {
+            eprintln!("Failed to open GeoLite2 DB: {e} — /geocode/ip disabled");
+            None
+        }
+    };
+
+    // Optional per-country FST autocomplete indexes.
+    let autocomplete_idx: Option<Arc<Autocomplete>> = match Autocomplete::open(Path::new(data_dir)) {
+        Ok(Some(a)) => {
+            eprintln!(
+                "Loaded FST autocomplete for {} countries",
+                a.countries().count()
+            );
+            Some(Arc::new(a))
+        }
+        Ok(None) => {
+            eprintln!("No FST autocomplete indexes — /autocomplete disabled");
+            None
+        }
+        Err(e) => {
+            eprintln!("Failed to open FST indexes: {e} — /autocomplete disabled");
+            None
+        }
+    };
+
+    // Forward geocoding index (optional — loaded from <data_dir>/tantivy if
+    // build-forward-index has been run; otherwise /search returns 501).
+    #[cfg(feature = "forward")]
+    let forward_idx: Option<Arc<Forward>> = load_forward_index(data_dir);
+    #[cfg(not(feature = "forward"))]
+    let forward_idx: Option<()> = None;
+
+    #[cfg(feature = "forward")]
+    let app = {
+        let mut app = Router::new()
+            .route("/reverse", get(reverse_geocode))
+            .route("/search", get(search))
+            .route("/validate", get(validate_address))
+            .route("/autocomplete", get(autocomplete))
+            .route("/geocode/ip", get(ip_geocode))
+            .merge(auth::router())
+            .layer(axum::Extension(index.clone()))
+            .layer(axum::Extension(limiter))
+            .layer(axum::Extension(forward_idx.clone()))
+            .layer(axum::Extension(autocomplete_idx.clone()))
+            .layer(axum::Extension(ip_db.clone()))
+            .with_state(db);
+        app = app.layer(axum::extract::DefaultBodyLimit::max(1 << 20));
+        app
+    };
+    #[cfg(not(feature = "forward"))]
     let app = Router::new()
         .route("/reverse", get(reverse_geocode))
+        .route("/autocomplete", get(autocomplete))
+        .route("/geocode/ip", get(ip_geocode))
         .merge(auth::router())
-        .layer(axum::Extension(index))
+        .layer(axum::Extension(index.clone()))
         .layer(axum::Extension(limiter))
+        .layer(axum::Extension(autocomplete_idx.clone()))
+        .layer(axum::Extension(ip_db.clone()))
         .with_state(db);
 
-    // ACME mode: --domain <domain> [--cache <dir>]
+    let _ = forward_idx; // silence unused when feature disabled
+
     let domain_pos = args.iter().position(|a| a == "--domain");
     if let Some(pos) = domain_pos {
         let domain = args.get(pos + 1).expect("--domain requires a value").clone();
@@ -805,7 +907,72 @@ async fn main() {
     } else {
         let bind_addr = args.get(2).map(|s| s.as_str()).unwrap_or("0.0.0.0:3000");
         eprintln!("Starting HTTP server on {}...", bind_addr);
+
+        // Optional gRPC server alongside REST. Default port 3001; override
+        // with --grpc-port or GEOCODER_GRPC_ADDR. Bind 0.0.0.0 so the
+        // container exposes the port predictably.
+        #[cfg(feature = "grpc")]
+        {
+            spawn_grpc_server(
+                &args,
+                index.clone(),
+                #[cfg(feature = "forward")]
+                forward_idx.clone(),
+                #[cfg(feature = "forward")]
+                autocomplete_idx.clone(),
+                ip_db.clone(),
+            );
+        }
+
         let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
         axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
     }
+}
+
+/// Spawn the gRPC server as a background tokio task. Reads the address
+/// from `--grpc-addr` (cli) / `GEOCODER_GRPC_ADDR` (env), defaulting to
+/// `0.0.0.0:3001`. Shares the same `Index`/`Forward`/etc. the REST side
+/// uses — no duplicate mmap.
+#[cfg(feature = "grpc")]
+fn spawn_grpc_server(
+    args: &[String],
+    index: LiveIndex,
+    #[cfg(feature = "forward")] forward_idx: Option<Arc<query_server::forward::Forward>>,
+    #[cfg(feature = "forward")] autocomplete_idx: Option<Arc<Autocomplete>>,
+    ip_db: Option<Arc<IpGeo>>,
+) {
+    let grpc_addr = args
+        .iter()
+        .position(|a| a == "--grpc-addr")
+        .and_then(|p| args.get(p + 1).cloned())
+        .or_else(|| std::env::var("GEOCODER_GRPC_ADDR").ok())
+        .unwrap_or_else(|| "0.0.0.0:3001".to_string());
+
+    let service = query_server::grpc_service::GeocoderService {
+        index,
+        #[cfg(feature = "forward")]
+        forward: forward_idx,
+        #[cfg(feature = "forward")]
+        autocomplete: autocomplete_idx,
+        ip_db,
+    };
+
+    let addr: std::net::SocketAddr = match grpc_addr.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Invalid gRPC address {grpc_addr:?}: {e} — gRPC server disabled");
+            return;
+        }
+    };
+
+    tokio::spawn(async move {
+        eprintln!("Starting gRPC server on {}...", addr);
+        if let Err(e) = tonic::transport::Server::builder()
+            .add_service(query_server::grpc_service::GeocoderServer::new(service))
+            .serve(addr)
+            .await
+        {
+            eprintln!("gRPC server error: {e}");
+        }
+    });
 }

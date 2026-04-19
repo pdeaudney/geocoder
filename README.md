@@ -1,30 +1,51 @@
-# Traccar Geocoder
+# Geocoder
 
-A fast, self-hosted reverse geocoding service built from OpenStreetMap data. Given latitude and longitude coordinates, it returns the nearest street address including house number, street name, city, state, county, postcode, and country.
+A self-hosted, single-binary geocoding service in Rust. Reverse geocoding, structured + freeform forward search, typeahead autocomplete, address validation, and IP geolocation — all over HTTP/REST and gRPC, with sub-millisecond latency on commodity hardware.
 
-Part of the [Traccar](https://www.traccar.org) open source GPS tracking platform. Also available as a [hosted service](https://www.traccar.org/product/geocoder/).
+Indexes OpenStreetMap data alongside authoritative per-country sources (G-NAF for Australia, OpenAddresses.io for ~60 other countries) into mmap-friendly binary files. No database, no search cluster, no queue — the server is one process, one directory of `.bin` files, one port.
 
-## Features
+> **Fork notice.** This project was forked from [traccar/traccar-geocoder](https://github.com/traccar/traccar-geocoder) and has diverged significantly in scope and capability. Bug fixes from this fork are periodically contributed back upstream; scope additions (forward geocoding, G-NAF ingestion, FST fast-path, per-country partitioning, gRPC, i18n, etc.) stay here.
 
-- Street-level reverse geocoding from OSM data
-- Address point, street name, and address interpolation lookup
-- Administrative boundary resolution (country, state, county, city, postcode)
-- Sub-millisecond query latency with memory-mapped index files
-- Automatic HTTPS with Let's Encrypt
-- Docker support with automatic PBF download and indexing
+## What it gives you
 
-## Quick Start
+| | |
+|---|---|
+| **Reverse geocode** | coordinate → full address with country-aware admin mapping |
+| **Forward search** | text or structured fields → ranked candidate list, Nominatim-compatible JSON |
+| **Autocomplete** | FST-backed prefix typeahead, ~400 ns per exact key match |
+| **Address validation** | structured fields → verified status + canonical normalised address |
+| **IP geocode** | requester IP → coordinate (optional MaxMind GeoLite2) |
+| **Multi-language** | OSM `name:<lang>` translations honoured via `lang=` parameter |
+| **Authoritative country data** | G-NAF (AU) and OpenAddresses.io (~60 countries) drop in as optional enrichment |
+| **Hot reload** | index rebuilds swap atomically via `ArcSwap`; queries don't drop |
+| **Zero external deps at runtime** | one binary, one data directory, optional MaxMind file |
 
-### Docker Compose
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical reference: on-disk format, query paths, data pipeline, deployment model, and a detailed comparison to Radar's public HorizonDB architecture.
+
+## Quick start
+
+### Docker
+
+```bash
+# All-in-one: download, build index, and serve
+docker run -e REGION=oceania \
+  -v geocoder-data:/data -p 3000:3000 geocoder:latest
+```
+
+The `auto` mode (default) downloads the PBF for a named region, builds the reverse + forward indexes, and starts serving.
+
+Supported region presets: `oceania` (default), `australia`, `new-zealand`, `africa`, `antarctica`, `asia`, `europe`, `north-america`, `south-america`, `central-america`, `russia`, `usa`, `planet`.
 
 ```yaml
+# docker-compose.yml
 services:
   geocoder:
-    image: traccar/traccar-geocoder
+    image: geocoder:latest
     environment:
-      - PBF_URLS=https://download.geofabrik.de/europe/monaco-latest.osm.pbf
+      - REGION=australia
     ports:
-      - "3000:3000"
+      - "3000:3000"   # REST
+      - "3001:3001"   # gRPC
     volumes:
       - geocoder-data:/data
 
@@ -32,54 +53,79 @@ volumes:
   geocoder-data:
 ```
 
-```bash
-docker compose up
-```
+`PBF_URLS="https://... https://..."` as an alternative to `REGION`; pass any PBF URL(s) and the builder will use them instead.
 
-### Docker
+Custom region? Use the download helper directly:
 
 ```bash
-# All-in-one: download, build index, and serve
-docker run -e PBF_URLS="https://download.geofabrik.de/europe-latest.osm.pbf" \
-  -v geocoder-data:/data -p 3000:3000 traccar/traccar-geocoder
-
-# Build index only
-docker run -e PBF_URLS="https://download.geofabrik.de/europe-latest.osm.pbf" \
-  -v geocoder-data:/data traccar/traccar-geocoder build
-
-# Serve only (from pre-built index)
-docker run -v geocoder-data:/data -p 3000:3000 traccar/traccar-geocoder serve
-
-# Multiple PBF files
-docker run -e PBF_URLS="https://download.geofabrik.de/europe/france-latest.osm.pbf https://download.geofabrik.de/europe/germany-latest.osm.pbf" \
-  -v geocoder-data:/data -p 3000:3000 traccar/traccar-geocoder
-
-# With automatic HTTPS
-docker run -e PBF_URLS="https://planet.openstreetmap.org/pbf/planet-latest.osm.pbf" \
-  -e DOMAIN=geocoder.example.com \
-  -v geocoder-data:/data -p 443:443 traccar/traccar-geocoder
+./scripts/download-region.sh europe        # all of Europe
+./scripts/download-region.sh north-america ./my-pbf-dir
 ```
 
-PBF files can be downloaded from [Geofabrik](https://download.geofabrik.de/).
+### Build from source
 
-The full earth index will take up around 18gb of disk space, so for high performance you want a machine with at least 16gb ram, or fast NVME storage.
+Prerequisites: a C++17 compiler + CMake for the builder, Rust stable for the server, `protoc` for gRPC. On macOS:
 
-## API
+```bash
+brew install cmake libosmium protozero s2geometry protobuf
+```
+
+On Debian/Ubuntu:
+
+```bash
+apt-get install cmake libosmium2-dev libprotozero-dev libs2-dev \
+                zlib1g-dev libbz2-dev libexpat1-dev liblz4-dev \
+                protobuf-compiler
+```
+
+Then:
+
+```bash
+# Indexer
+mkdir build && cd build && cmake ../builder && make && cd ..
+
+# Server + all build tools
+cargo build --release --manifest-path server/Cargo.toml
+
+# Index an OSM PBF
+./build/build-index data/index data/pbf/*.osm.pbf
+
+# (Optional) forward search — tantivy per-country
+./server/target/release/build-forward-index data/index --partition-by-country
+
+# (Optional) autocomplete FST
+./server/target/release/build-autocomplete-fst data/index
+
+# Serve
+./server/target/release/query-server data/index
+```
+
+The server starts on `0.0.0.0:3000` (REST) and `0.0.0.0:3001` (gRPC) by default.
+
+### Storage sizing
+
+| Deployment | OSM index | Tantivy | FST | G-NAF (AU) | Total |
+|---|---:|---:|---:|---:|---:|
+| Single country (AU) | 620 MB | 42 MB | 16 MB | 488 MB | **~1.2 GB** |
+| EU-only (10 countries) | ~6 GB | ~400 MB | ~100 MB | n/a | **~6.5 GB** |
+| Planet | ~20 GB | ~2 GB | ~600 MB | n/a | **~22 GB** |
+
+The full planet index wants ≥16 GB of RAM or fast NVMe. Single-country deployments fit a `t4g.medium` class instance fine.
+
+## HTTP API
+
+All endpoints require an API key. Authentication is managed via a web dashboard served at the root URL — create an admin account on first launch, generate keys, set per-user rate limits.
 
 ### GET /reverse
 
-Query parameters:
-- `lat` - latitude (required)
-- `lon` - longitude (required)
-- `key` - API key (required)
-
-Example request:
+Coordinate → address.
 
 ```
-GET /reverse?lat=43.7384&lon=7.4246&key=YOUR_API_KEY
+GET /reverse?lat=-33.8688&lon=151.2093&key=YOUR_KEY
+GET /reverse?lat=-33.8688&lon=151.2093&lang=zh&key=YOUR_KEY
 ```
 
-Response follows [Nominatim](https://nominatim.org/release-docs/latest/api/Reverse/) format:
+Response follows [Nominatim's format](https://nominatim.org/release-docs/latest/api/Reverse/):
 
 ```json
 {
@@ -93,106 +139,215 @@ Response follows [Nominatim](https://nominatim.org/release-docs/latest/api/Rever
     "postcode": "98000",
     "country": "Monaco",
     "country_code": "MC"
-  }
+  },
+  "confidence": "exact"
 }
 ```
 
-Fields are omitted when not available.
+Parameters:
 
-Status codes:
-- `200` - success
-- `401` - missing or invalid API key
-- `429` - rate limit exceeded
+| Param | Required | Description |
+|---|---|---|
+| `lat`, `lon` | yes | WGS84 coordinate |
+| `lang` | no | ISO 639-1 language code; returns OSM `name:<lang>` tag for admin fields when available |
+| `key` | yes | API key |
 
-### Authentication
+Typical p50 latency: **20–60 µs**.
 
-The server includes a web dashboard for managing API keys. On first launch, navigate to the server URL in a browser to create an admin account. Once logged in, you can generate API keys and create additional users with configurable rate limits.
+### GET /search
+
+Text → ranked coordinate candidates.
+
+```bash
+# Freeform
+GET /search?q=10%20alysse%20close%20baulkham%20hills%20nsw&key=KEY
+
+# Structured (takes precedence over q when both present)
+GET /search?street=Alysse%20Close&housenumber=10&city=Baulkham%20Hills&country_code=AU&key=KEY
+
+# Multi-country
+GET /search?q=Elizabeth%20Street&country_code=US,CA,AU&key=KEY
+```
+
+Parameters:
+
+| Param | Description |
+|---|---|
+| `q` | Freeform text. Parsed for house number (leading digits), state abbreviation, postcode, country hints |
+| `street`, `housenumber`, `city`, `state`, `country_code` | Structured fields; take precedence over `q` |
+| `kind` | `place` or `street` (filter) |
+| `limit` | 1–50 (default 10) |
+
+Response includes each hit's `confidence` label (`exact`, `interpolated`, `fallback`) and a `source` field when served from the FST fast-path.
+
+Features:
+
+- **Token canonicalisation** — `Hwy`/`Tce`/`Pde`/`Cres`/`Blvd`/`Ln`/`Ave`/`Rd`/`Dr`/`Ct`/`Cl`/`Pl` expand symmetrically at index + query time.
+- **Diacritic folding** — `Zürich` ≡ `Zurich`, `Café` ≡ `Cafe`.
+- **Rank-based ranking** — cities outrank streets of the same name.
+- **Fallback ladder** — strict → drop country → state → city → kind → fuzzy (Levenshtein 1) on name.
+- **House-number refinement** — if a number is parsed, the coord is refined via G-NAF / OpenAddresses / OSM addr_point lookup.
+- **FST fast-path** — exact-key queries bypass tantivy entirely, returning in ~400 ns.
+
+Typical latency: **~400 ns** (FST fast-path) / **20–70 µs** (tantivy) / **~150 µs** (fuzzy fallback).
+
+### GET /autocomplete
+
+Prefix typeahead.
+
+```
+GET /autocomplete?q=alys&country_code=AU&limit=5&key=KEY
+```
+
+Built per country from the OSM + place index as `fst_<cc>.fst` files (~16 MB for AU). Typical latency: **~7 µs** per query.
+
+### GET /validate
+
+Structured address validation.
+
+```
+GET /validate?street=Alysse%20Close&housenumber=10&city=Baulkham%20Hills&country_code=AU&key=KEY
+```
+
+Returns `verified: true/false`, a canonical normalised address, confidence level, and coordinate. Use for ingest-side address cleaning.
+
+### GET /geocode/ip
+
+IP → coordinate + full address via MaxMind GeoLite2.
+
+```
+GET /geocode/ip?key=KEY                          # uses requester IP
+GET /geocode/ip?ip=8.8.8.8&key=KEY               # explicit override
+```
+
+Requires `GeoLite2-City.mmdb` in the data directory (free signup at [maxmind.com](https://www.maxmind.com/en/geolite2/signup)) or the `GEOLITE2_DB` env var pointing at one. Returns `503 Service Unavailable` when the DB isn't loaded.
+
+## gRPC
+
+A typed mirror of every REST endpoint. Service definition: [`server/proto/geocoder.proto`](server/proto/geocoder.proto).
+
+Default bind: `0.0.0.0:3001`. Override with `--grpc-addr` or `GEOCODER_GRPC_ADDR`.
+
+```
+rpc Reverse(ReverseRequest) returns (AddressResponse);
+rpc Search(SearchRequest) returns (SearchResponse);
+rpc Validate(ValidateRequest) returns (ValidateResponse);
+rpc Autocomplete(AutocompleteRequest) returns (AutocompleteResponse);
+rpc IpGeocode(IpGeocodeRequest) returns (IpGeocodeResponse);
+```
+
+Disable with `--no-default-features --features forward` at build time.
+
+## Data sources
+
+The server loads whatever is present in the data directory; any missing source degrades gracefully to a simpler response.
+
+### OpenStreetMap (always; primary)
+
+Address points, street centrelines, admin polygons, `place=*` nodes, postcode boundaries. Built by the C++ `build-index` from any `.osm.pbf` file.
+
+### G-NAF (Australia)
+
+Authoritative AU addresses from [data.gov.au](https://data.gov.au/dataset/ds-dga-19432f89-dc3a-4ef3-b943-5326ef1dbecc). Two import paths:
+
+- **Postcode lookup** (`build-postcode-lookup`, ~30 s, ~240 KB): suburb-modal postcode table that fills in `postcode` for reverse queries where OSM lacks `boundary=postal_code` (OSM covers <5% of AU postcodes).
+- **Full address-point index** (`build-gnaf-index`, ~3 min, ~488 MB): 16.4 M AU addresses with exact geocodes and per-address postcodes. Routes `find_addr_point` through G-NAF first for AU queries — `10 Alysse Close` returns the real G-NAF coord, not the street centroid.
+
+```bash
+# After downloading the G-NAF ZIP from data.gov.au:
+unzip -j g-naf_*_allstates_gda2020_psv_*.zip \
+    '*_LOCALITY_psv.psv' '*_STATE_psv.psv' '*_ADDRESS_DETAIL_psv.psv' \
+    '*_ADDRESS_DEFAULT_GEOCODE_psv.psv' '*_STREET_LOCALITY_psv.psv' \
+    -d data/gnaf/psv
+
+build-postcode-lookup data/gnaf/psv data/index
+build-gnaf-index data/gnaf/psv data/index
+```
+
+**Attribution required** (CC-BY 4.0): this distribution incorporates data from G-NAF © Commonwealth of Australia (Geoscape Australia).
+
+### OpenAddresses.io (worldwide)
+
+Authoritative addresses from ~60 countries (US, FR, DE, NL, ES, BE, CH, PL, DK, CA, and more). Per-country binary files so you only mount the countries you serve.
+
+```bash
+# After extracting an OpenAddresses batch under data/openaddresses/:
+build-openaddresses-index data/openaddresses data/index \
+    --country us,fr,de \
+    --skip au           # use G-NAF direct for AU instead
+```
+
+### MaxMind GeoLite2 (IP geocoding)
+
+Optional. Drop `GeoLite2-City.mmdb` into the data directory to enable `/geocode/ip`.
+
+## Updates & hot reload
+
+`scripts/update-index.sh` automates a full zero-downtime refresh:
+
+1. `pyosmium-get-changes` pulls OSM diffs since the local PBF's timestamp.
+2. `osmium apply-changes` updates the PBF.
+3. `build-index` rewrites the binary index into a new directory.
+4. Atomic `mv` swaps directories.
+5. Touching the reload marker prompts the server to re-mmap within 5 s.
+
+In-flight queries keep the old `Arc<Index>` until they return; new queries see the new one. No dropped requests.
+
+```bash
+# Nightly cron
+0 3 * * * DATA_DIR=/data \
+          REPLICATION_URL=https://download.geofabrik.de/australia-oceania-updates \
+          /path/to/scripts/update-index.sh
+```
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATA_DIR` | `/data` | Data directory (PBFs under `pbf/`, indexes under `index/`) |
+| `BIND_ADDR` | `0.0.0.0:3000` | REST bind address |
+| `GEOCODER_GRPC_ADDR` | `0.0.0.0:3001` | gRPC bind address |
+| `DOMAIN` | (off) | Domain name for automatic HTTPS via Let's Encrypt |
+| `CACHE_DIR` | `acme-cache` | ACME certificate cache |
+| `PBF_URLS` | — | Space-separated list of PBF download URLs (required for `auto`/`build` unless `REGION` is set) |
+| `REGION` | — | Named Geofabrik region preset (e.g. `oceania`) |
+| `FORWARD_INDEX` | `1` | Build the tantivy forward index in `auto`/`build` modes (set to `0` to skip) |
+| `GEOCODER_RELOAD_MARKER` | `$DATA_DIR/index/.reload` | Path to the hot-reload marker file |
+| `GEOCODER_RELOAD_INTERVAL_SEC` | `5` | Reload marker poll interval |
+| `GEOCODER_ADMIN_CONFIG` | (embedded) | Path to a JSON file overriding the `admin_level` → output-field mapping |
+| `GEOLITE2_DB` | `$DATA_DIR/GeoLite2-City.mmdb` | MaxMind GeoLite2 path for IP geocoding |
+
+## Tooling
+
+| Binary | Purpose |
+|---|---|
+| `build-index` (C++) | Parse OSM PBF → OSM binary index |
+| `build-forward-index` | Tantivy index for `/search`. `--partition-by-country` emits per-country indexes |
+| `build-autocomplete-fst` | FST prefix index for `/autocomplete` + `/search` fast-path |
+| `build-postcode-lookup` | G-NAF suburb-modal postcode table |
+| `build-gnaf-index` | Full G-NAF address-point index |
+| `build-openaddresses-index` | Per-country OpenAddresses address-point index |
+| `query-server` | The HTTP + gRPC server |
+
+All Rust binaries take `--help`.
 
 ## Architecture
 
-The project consists of two components:
+See [ARCHITECTURE.md](ARCHITECTURE.md) for:
 
-- **Builder** (C++) - Parses OSM PBF files and creates a compact binary index using S2 geometry cells for spatial lookup.
-- **Server** (Rust) - Memory-maps the index files and serves queries via HTTP/HTTPS with sub-millisecond latency.
-
-### Index Structure
-
-The builder produces 14 binary files:
-
-| File | Description |
-|------|-------------|
-| `geo_cells.bin` | Merged S2 cell index for streets, addresses, and interpolations |
-| `street_entries.bin` | Street way IDs per cell |
-| `street_ways.bin` | Street way headers (node offset, name) |
-| `street_nodes.bin` | Street node coordinates |
-| `addr_entries.bin` | Address point IDs per cell |
-| `addr_points.bin` | Address point data (coordinates, house number, street) |
-| `interp_entries.bin` | Interpolation way IDs per cell |
-| `interp_ways.bin` | Interpolation way headers |
-| `interp_nodes.bin` | Interpolation node coordinates |
-| `admin_cells.bin` | S2 cell index for admin boundaries |
-| `admin_entries.bin` | Admin polygon IDs per cell |
-| `admin_polygons.bin` | Admin polygon metadata |
-| `admin_vertices.bin` | Admin polygon vertices |
-| `strings.bin` | Deduplicated string pool |
-
-## Building from Source
-
-### Prerequisites
-
-**Builder (C++):**
-- CMake 3.16+
-- C++17 compiler
-- libosmium, protozero, s2geometry, zlib, bzip2, expat
-
-**Server (Rust):**
-- Rust toolchain
-
-### Build
-
-```bash
-# Build the indexer
-mkdir build && cd build && cmake ../builder && make
-
-# Build the server
-cargo build --release --manifest-path server/Cargo.toml
-```
-
-### Run
-
-```bash
-# Create index from PBF file
-./build/build-index output-dir input.osm.pbf [input2.osm.pbf ...]
-
-# Start the server
-./server/target/release/query-server output-dir [bind-address]
-
-# Start with automatic HTTPS
-./server/target/release/query-server output-dir --domain geocoder.example.com
-```
-
-## Environment Variables (Docker)
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PBF_URLS` | Space-separated list of PBF download URLs | (required for auto/build) |
-| `DOMAIN` | Domain name for automatic HTTPS via Let's Encrypt | (disabled) |
-| `BIND_ADDR` | HTTP bind address | `0.0.0.0:3000` |
-| `DATA_DIR` | Data directory for PBF files and index | `/data` |
-| `CACHE_DIR` | ACME certificate cache directory | `acme-cache` |
+- Complete data-flow diagram (PBF → binaries → query server)
+- Every binary file's record format
+- Reverse + forward query paths as numbered flows
+- Deployment sizing recommendations for AWS (EC2/EBS/NVMe)
+- Comparison to Radar's HorizonDB architecture
 
 ## License
 
-    Apache License, Version 2.0
+Apache License, Version 2.0. Original copyright © Traccar (upstream project); additions copyright © this project's contributors.
 
-    Licensed under the Apache License, Version 2.0 (the "License");
-    you may not use this file except in compliance with the License.
-    You may obtain a copy of the License at
+Data licences travel through the index:
 
-        http://www.apache.org/licenses/LICENSE-2.0
-
-    Unless required by applicable law or agreed to in writing, software
-    distributed under the License is distributed on an "AS IS" BASIS,
-    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-    See the License for the specific language governing permissions and
-    limitations under the License.
+- **OpenStreetMap**: ODbL 1.0. Attribute OSM and its contributors when using the output.
+- **G-NAF**: CC-BY 4.0. Attribute "G-NAF © Commonwealth of Australia (Geoscape Australia)" when redistributing.
+- **OpenAddresses.io**: per-source, mostly CC-BY / CC0 / ODbL. Carry through attributions from the included `CREDITS.md` in your distribution.
+- **MaxMind GeoLite2**: CC BY-SA 4.0. Attribute MaxMind when exposing IP-geocoding results.

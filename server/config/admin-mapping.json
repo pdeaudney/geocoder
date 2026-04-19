@@ -1,0 +1,31 @@
+{
+  "_description": "Maps (country_code, admin_level) to output field. Country code is ISO 3166-1 alpha-2 (upper case). If a country has no entry or the admin_level is not listed, defaults.admin is consulted. Unlisted levels are ignored.",
+
+  "defaults": {
+    "admin": {
+      "2":  "country",
+      "4":  "state",
+      "6":  "county",
+      "8":  "city",
+      "11": "postcode"
+    }
+  },
+
+  "countries": {
+    "AU": {
+      "_note": "Australia Post uses SUBURB not LGA as the postal locality. Admin hierarchy: 2=country, 4=state, 6=LGA (e.g. 'City of Sydney'), 7=district (mostly ACT), 9=suburb ('Sydney', 'Bondi'), 11=postcode. Level-9 has a max_area cap because OSM occasionally tags remote pastoral stations at this level with polygons >1000 km²; real urban suburbs are always well below 0.05 sq deg (~500 km²).",
+      "admin": {
+        "6": "county",
+        "7": "county_if_empty",
+        "9": { "field": "city", "max_area": 0.05 }
+      }
+    },
+    "NZ": {
+      "_note": "NZ Post uses City (TA) + suburb. Admin hierarchy: 2=country, 4=region, 6=TA ('Auckland', 'Wellington'), 10=suburb, 11=postcode.",
+      "admin": {
+        "6": "city",
+        "10": "county_if_empty"
+      }
+    }
+  }
+}
