@@ -351,9 +351,18 @@ static std::vector<std::pair<double,double>> simplify_polygon(
 
 // --- Highway filter ---
 
+// Highway values excluded from the street index. Narrowly scoped to
+// way types that are almost always unnamed trails/service access or
+// transient (`construction`). `highway=pedestrian` is intentionally
+// kept IN the index: it tags named plazas and shopping streets that
+// are legitimate geocoding targets (Martin Place Sydney, Bourke Street
+// Mall Melbourne, Stephansplatz Vienna, most European old-town lanes).
+// The surrounding `if (name)` gate in process_ways filters unnamed
+// pedestrian ways out regardless, so including the type here only
+// pulls in the subset with an explicit `name=` tag.
 static const std::vector<std::string> kExcludedHighways = {
     "footway", "path", "track", "steps", "cycleway",
-    "service", "pedestrian", "bridleway", "construction"
+    "service", "bridleway", "construction"
 };
 
 static bool is_included_highway(const char* value) {

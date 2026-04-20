@@ -244,7 +244,7 @@ The server loads whatever is present in the data directory; any missing source d
 
 ### OpenStreetMap (always; primary)
 
-Address points, street centrelines, admin polygons, `place=*` nodes, postcode boundaries. Built by the C++ `build-index` from any `.osm.pbf` file.
+Address points, street centrelines, admin polygons, `place=*` nodes, postcode boundaries. Built by the C++ `build-index` from any `.osm.pbf` file. See [ARCHITECTURE.md § "What the C++ indexer includes and excludes"](ARCHITECTURE.md#what-the-c-indexer-includes-and-excludes) for the exact tag filters (which `highway=*` types, which `place=*` ranks, which `admin_level`s).
 
 ### G-NAF (Australia)
 

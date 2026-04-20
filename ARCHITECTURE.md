@@ -267,6 +267,111 @@ Forward index:
         → tantivy/ (monolithic) or tantivy_<cc>/ per country
 ```
 
+### What the C++ indexer includes and excludes
+
+Filters applied during `build-index`'s OSM pass. Values are currently
+hard-coded in `builder/src/build_index.cpp`; see "Customising the
+indexer" below for the rationale and the pattern we'd use if we made
+them config-driven.
+
+**Streets** — `highway=*` ways with an explicit `name=` tag.
+
+| Category | Included | Excluded |
+|---|---|---|
+| Motor roads | `motorway`, `trunk`, `primary`, `secondary`, `tertiary`, `unclassified`, `residential`, `living_street`, `motorway_link`/`trunk_link`/etc. | — |
+| Named pedestrian ways | `pedestrian` (plazas, shopping streets — named only) | — |
+| Trails & service | — | `footway`, `path`, `track`, `steps`, `cycleway`, `bridleway`, `service` |
+| Transient | — | `construction` |
+
+Unnamed ways are rejected universally regardless of type (the indexer
+gates on `if (name)` before classification). `highway=pedestrian`
+was moved from the exclusion list to the inclusion list in April 2026
+so that named plazas like Sydney's Martin Place, Melbourne's Bourke
+Street Mall, and most European old-town lanes become addressable.
+
+**Places** — `place=*` nodes or named areas with `place=*` on a closed
+way. Mapped to a Nominatim-compatible `rank` and included only if the
+tag is one of:
+
+| `place=` | Rank | Intent |
+|---|---|---|
+| `city` | 16 | Major population centre |
+| `town` | 16 | |
+| `village` | 16 | |
+| `suburb` | 19 | Named neighbourhoods inside a city |
+| `hamlet` | 20 | Small settlements |
+
+All other `place=*` values (`farm`, `island`, `isolated_dwelling`,
+`locality`, `quarter`, etc.) are dropped. They carry too much noise
+for typeahead and address display — e.g. `place=farm` nodes often
+share names with roads nearby, and `locality` is used inconsistently
+across mappers.
+
+**Admin polygons** — `boundary=administrative` at
+`admin_level=2..=10`, plus `boundary=postal_code` treated as
+`admin_level=11` so a postcode polygon can back-fill the postcode
+field when no OSM postal boundary is available.
+
+| `admin_level` | Typical use |
+|---|---|
+| 2 | Country |
+| 3 | State grouping (rarely used) |
+| 4 | State / province |
+| 6 | County / local government area |
+| 8 | City / town boundary |
+| 9 | Suburb (AU) — honoured because OSM's AU taxonomy uses 9 not 10 for suburbs |
+| 10 | Suburb (most other countries) |
+
+Levels outside 2–10 are skipped because they carry almost no
+geocoding signal and inflate the polygon index.
+
+**Addresses** — every node with `addr:housenumber` + `addr:street`,
+plus buildings (closed ways) carrying the same tags; centroids are
+emitted for closed-way buildings. No filter by type; we take what
+OSM has.
+
+**Interpolation** — `addr:interpolation` ways with resolvable
+endpoints (`addr:housenumber` tagged on the end-nodes). Unresolvable
+interpolations are silently dropped.
+
+**i18n names** — every admin polygon and named place also emits
+`name:<lang>` pairs (e.g. `name:ja`, `name:zh`) into `i18n_names.bin`.
+No filter; all languages OSM provides are kept.
+
+### Customising the indexer
+
+Today the filters above are hard-coded in C++. That's intentional: the
+defaults are a considered baseline ("Nominatim minus the obviously
+unhelpful") and most deployments never need to deviate.
+
+The pragmatic extension point when someone actually needs custom
+filters is a JSON config file next to `admin-mapping.json`, consumed
+by both the C++ builder and the runtime. Shape we'd land on:
+
+```json
+{
+  "included_highways": ["motorway", "trunk", "primary", "pedestrian", ...],
+  "excluded_highways": ["footway", "path", ...],
+  "place_ranks": { "city": 16, "suburb": 19, "custom_type": 18 },
+  "admin_levels": [2, 4, 6, 8, 9, 10]
+}
+```
+
+Not shipped because no caller has asked for it yet. The trigger to
+revisit: concrete failures in the regression corpora we're bringing
+online (Pelias acceptance-tests, translated Nominatim BDD scenarios,
+OpenAddresses round-trip) that point to tag filters as the root cause —
+e.g. a Pelias case expects `place=locality` to resolve in a region
+where it's the local convention for suburb, or an OpenAddresses
+round-trip misses a country because we drop `highway=service` that
+carries the address there.
+
+When that happens, a small PR adds a config parser, hands the
+resulting arrays to the existing `is_included_highway` / `place_rank` /
+admin filter call sites, and ships an `indexer-config.json` alongside
+the PBF. Until then the hard-coded defaults are simpler to reason
+about and produce byte-identical indexes across rebuilds.
+
 ## Update model
 
 Zero-downtime index reloads via `ArcSwap<Arc<Index>>` + a marker file:

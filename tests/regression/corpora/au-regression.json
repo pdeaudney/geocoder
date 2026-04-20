@@ -1,0 +1,439 @@
+{
+  "name": "au-regression",
+  "description": "Australia regression suite — hand-curated cases covering health, search, autocomplete, reverse, country filtering, and authoritative address resolution. Coords are sanity-bounded, not pixel-exact, because reverse of a place centroid vs a G-NAF point can legitimately differ by a few km within the same locality.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "id": "healthz-liveness",
+      "tags": ["health", "liveness"],
+      "auth": false,
+      "request": { "path": "/healthz" },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "status", "value": "ok" }
+        ]
+      }
+    },
+    {
+      "id": "healthz-indexes-reports-au",
+      "tags": ["health", "indexes"],
+      "auth": false,
+      "request": { "path": "/healthz/indexes" },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "status", "value": "ok" },
+          { "kind": "json_path_equals", "path": "indexes.reverse.loaded", "value": true },
+          { "kind": "json_path_equals", "path": "indexes.autocomplete.loaded", "value": true },
+          { "kind": "json_path_equals", "path": "indexes.autocomplete.countries.0", "value": "au" }
+        ]
+      }
+    },
+    {
+      "id": "search-no-key-rejects",
+      "tags": ["auth"],
+      "auth": false,
+      "request": { "path": "/search", "query": { "q": "Sydney" } },
+      "expect": { "status": 401 }
+    },
+    {
+      "id": "search-bad-key-rejects",
+      "tags": ["auth"],
+      "auth": false,
+      "request": { "path": "/search", "query": { "q": "Sydney", "key": "this-token-does-not-exist" } },
+      "expect": { "status": 401 }
+    },
+    {
+      "id": "search-sydney-city",
+      "tags": ["search", "place"],
+      "request": {
+        "path": "/search",
+        "query": { "q": "Sydney", "country_code": "au" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "sydney" },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": -33.87,
+            "expected_lng": 151.21,
+            "max_m": 10000
+          },
+          { "kind": "json_path_equals", "path": "results.0.address.country_code", "value": "AU" }
+        ]
+      }
+    },
+    {
+      "id": "search-melbourne-city",
+      "tags": ["search", "place"],
+      "request": {
+        "path": "/search",
+        "query": { "q": "Melbourne", "country_code": "au" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "melbourne" },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": -37.814,
+            "expected_lng": 144.963,
+            "max_m": 15000
+          }
+        ]
+      }
+    },
+    {
+      "id": "search-brisbane-city",
+      "tags": ["search", "place"],
+      "request": {
+        "path": "/search",
+        "query": { "q": "Brisbane", "country_code": "au" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "brisbane" },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": -27.468,
+            "expected_lng": 153.025,
+            "max_m": 15000
+          }
+        ]
+      }
+    },
+    {
+      "id": "search-perth-city",
+      "tags": ["search", "place"],
+      "request": {
+        "path": "/search",
+        "query": { "q": "Perth", "country_code": "au" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "perth" }
+        ]
+      }
+    },
+    {
+      "id": "search-canberra-capital",
+      "tags": ["search", "place"],
+      "request": {
+        "path": "/search",
+        "query": { "q": "Canberra", "country_code": "au" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "canberra" },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": -35.28,
+            "expected_lng": 149.13,
+            "max_m": 20000
+          }
+        ]
+      }
+    },
+    {
+      "id": "search-us-filter-excludes-au-sydney",
+      "tags": ["search", "country-filter", "negative"],
+      "request": {
+        "path": "/search",
+        "query": { "q": "Sydney", "country_code": "us" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_exists", "path": "results" }
+        ]
+      }
+    },
+    {
+      "id": "search-pitt-street-sydney",
+      "tags": ["search", "street"],
+      "request": {
+        "path": "/search",
+        "query": { "q": "Pitt Street Sydney", "country_code": "au" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "pitt" },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": -33.864,
+            "expected_lng": 151.209,
+            "max_m": 3000
+          }
+        ]
+      }
+    },
+    {
+      "id": "search-martin-place-sydney",
+      "tags": ["search", "street", "pedestrian"],
+      "request": {
+        "path": "/search",
+        "query": { "q": "Martin Place Sydney", "country_code": "au" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "martin place" },
+          { "kind": "json_path_contains_ci", "path": "results.0.address.city", "value": "sydney" },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": -33.8675,
+            "expected_lng": 151.2072,
+            "max_m": 1000
+          }
+        ]
+      }
+    },
+    {
+      "id": "search-george-street-sydney",
+      "tags": ["search", "street"],
+      "request": {
+        "path": "/search",
+        "query": { "q": "George Street Sydney", "country_code": "au" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "george" }
+        ]
+      }
+    },
+    {
+      "id": "search-alysse-close-baulkham-hills",
+      "tags": ["search", "street", "gnaf"],
+      "request": {
+        "path": "/search",
+        "query": { "q": "Alysse Close Baulkham Hills", "country_code": "au" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "alysse" },
+          { "kind": "json_path_contains_ci", "path": "results.0.address.city", "value": "baulkham hills" },
+          { "kind": "json_path_equals", "path": "results.0.address.postcode", "value": "2153" },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": -33.737,
+            "expected_lng": 150.980,
+            "max_m": 1000
+          }
+        ]
+      }
+    },
+    {
+      "id": "search-gnaf-housenumber-resolves",
+      "tags": ["search", "gnaf", "address-point"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "housenumber": "10",
+          "street": "Alysse Close",
+          "city": "Baulkham Hills",
+          "country_code": "au"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_equals", "path": "results.0.address.house_number", "value": "10" },
+          { "kind": "json_path_equals", "path": "results.0.address.postcode", "value": "2153" },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": -33.737,
+            "expected_lng": 150.980,
+            "max_m": 500
+          }
+        ]
+      }
+    },
+    {
+      "id": "autocomplete-sydney-prefix",
+      "tags": ["autocomplete"],
+      "request": {
+        "path": "/autocomplete",
+        "query": { "q": "sydn", "country_code": "au", "limit": "5" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "sydney" }
+        ]
+      }
+    },
+    {
+      "id": "autocomplete-melbourne-prefix",
+      "tags": ["autocomplete"],
+      "request": {
+        "path": "/autocomplete",
+        "query": { "q": "melbourn", "country_code": "au", "limit": "5" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "melbourne" }
+        ]
+      }
+    },
+    {
+      "id": "autocomplete-brisbane-prefix",
+      "tags": ["autocomplete"],
+      "request": {
+        "path": "/autocomplete",
+        "query": { "q": "brisban", "country_code": "au", "limit": "5" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "brisbane" }
+        ]
+      }
+    },
+    {
+      "id": "autocomplete-short-prefix-rejected",
+      "tags": ["autocomplete", "negative"],
+      "request": {
+        "path": "/autocomplete",
+        "query": { "q": "s", "country_code": "au", "limit": "5" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_exists", "path": "results" }
+        ]
+      }
+    },
+    {
+      "id": "reverse-sydney-opera-house",
+      "tags": ["reverse"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-33.8568", "lon": "151.2153" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_contains_ci", "path": "address.state", "value": "new south wales" }
+        ]
+      }
+    },
+    {
+      "id": "reverse-melbourne-flinders",
+      "tags": ["reverse"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-37.8183", "lon": "144.9671" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_contains_ci", "path": "address.state", "value": "victoria" }
+        ]
+      }
+    },
+    {
+      "id": "reverse-baulkham-hills-postcode-from-gnaf",
+      "tags": ["reverse", "postcode", "gnaf"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-33.766", "lon": "150.992" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_equals", "path": "address.postcode", "value": "2153" }
+        ]
+      }
+    },
+    {
+      "id": "reverse-outside-au-coverage-returns-gracefully",
+      "tags": ["reverse", "coverage"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "40.7580", "lon": "-73.9855" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_exists", "path": "address" }
+        ]
+      }
+    },
+    {
+      "id": "validate-alysse-close-10",
+      "tags": ["validate", "gnaf"],
+      "request": {
+        "path": "/validate",
+        "query": {
+          "housenumber": "10",
+          "street": "Alysse Close",
+          "city": "Baulkham Hills",
+          "country_code": "au"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_exists", "path": "confidence" }
+        ]
+      }
+    },
+    {
+      "id": "autocomplete-country-filter-rejects-wrong-country",
+      "tags": ["autocomplete", "country-filter", "negative"],
+      "request": {
+        "path": "/autocomplete",
+        "query": { "q": "sydney", "country_code": "us", "limit": "5" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_exists", "path": "results" }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,171 @@
+{
+  "name": "au-roundtrip-addresses",
+  "description": "Round-trip tests: given a known address + ground-truth coord, assert our geocoder resolves within N metres. Seed set is hand-curated from well-known AU addresses and will be regenerated from OpenAddresses published data (or G-NAF sample) by a future fetch-test-data.sh step. Same expectation shape is used for any address-point-authoritative corpus — the schema is the interesting part, the row count grows with data sources.",
+  "defaults": { "auth_key": "REGRESSION_TEST_TOKEN" },
+  "cases": [
+    {
+      "id": "roundtrip-10-alysse-close-baulkham-hills",
+      "tags": ["roundtrip", "gnaf", "street-level"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "housenumber": "10",
+          "street": "Alysse Close",
+          "city": "Baulkham Hills",
+          "country_code": "au"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "results.0.address.house_number", "value": "10" },
+          { "kind": "json_path_equals", "path": "results.0.address.postcode", "value": "2153" },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": -33.73698,
+            "expected_lng": 150.97960,
+            "max_m": 100
+          }
+        ]
+      }
+    },
+    {
+      "id": "roundtrip-parliament-house-canberra-reverse",
+      "tags": ["roundtrip", "reverse", "landmark"],
+      "notes": "Parliament House isn't in our forward index (POI coverage gap, similar to Martin Place pre-fix). Reverse-only until POI indexing expands.",
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-35.3082", "lon": "149.1244" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_contains_ci", "path": "address.state", "value": "australian capital territory" }
+        ]
+      }
+    },
+    {
+      "id": "roundtrip-sydney-opera-house-reverse",
+      "tags": ["roundtrip", "reverse"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-33.8568", "lon": "151.2153" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_contains_ci", "path": "address.state", "value": "new south wales" }
+        ]
+      }
+    },
+    {
+      "id": "roundtrip-flinders-st-melbourne-reverse",
+      "tags": ["roundtrip", "reverse"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-37.8183", "lon": "144.9671" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_contains_ci", "path": "address.state", "value": "victoria" }
+        ]
+      }
+    },
+    {
+      "id": "roundtrip-brisbane-southbank-reverse",
+      "tags": ["roundtrip", "reverse"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-27.4747", "lon": "153.0209" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_contains_ci", "path": "address.state", "value": "queensland" }
+        ]
+      }
+    },
+    {
+      "id": "roundtrip-perth-cbd-reverse",
+      "tags": ["roundtrip", "reverse"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-31.9523", "lon": "115.8613" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_contains_ci", "path": "address.state", "value": "western australia" }
+        ]
+      }
+    },
+    {
+      "id": "roundtrip-adelaide-cbd-reverse",
+      "tags": ["roundtrip", "reverse"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-34.9285", "lon": "138.6007" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_contains_ci", "path": "address.state", "value": "south australia" }
+        ]
+      }
+    },
+    {
+      "id": "roundtrip-hobart-cbd-reverse",
+      "tags": ["roundtrip", "reverse"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-42.8821", "lon": "147.3272" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_contains_ci", "path": "address.state", "value": "tasmania" }
+        ]
+      }
+    },
+    {
+      "id": "roundtrip-darwin-cbd-reverse",
+      "tags": ["roundtrip", "reverse"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-12.4634", "lon": "130.8456" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_contains_ci", "path": "address.state", "value": "northern territory" }
+        ]
+      }
+    },
+    {
+      "id": "roundtrip-canberra-cbd-reverse",
+      "tags": ["roundtrip", "reverse"],
+      "request": {
+        "path": "/reverse",
+        "query": { "lat": "-35.2809", "lon": "149.1300" }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+          { "kind": "json_path_contains_ci", "path": "address.state", "value": "australian capital territory" }
+        ]
+      }
+    }
+  ]
+}

@@ -622,6 +622,15 @@ impl Forward {
         self.per_country.keys()
     }
 
+    /// Whether a monolithic (non-partitioned) fallback forward index is
+    /// loaded. When true, the service can serve any country covered by
+    /// the underlying build even if `countries()` is empty. Used by
+    /// `/healthz/indexes` so routing layers can distinguish
+    /// "per-country split loaded" from "only the default is loaded".
+    pub fn has_default(&self) -> bool {
+        self.default.is_some()
+    }
+
     /// Pick the index to query: per-country if we have a loaded index
     /// matching the caller's country hint, else the monolithic default,
     /// else `None` and the caller returns empty.

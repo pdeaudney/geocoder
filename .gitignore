@@ -4,3 +4,16 @@ test-output/
 *.osm.pbf
 data/
 *.lock
+
+# Packer per-env pkrvars files may contain bucket names / account IDs.
+# `example.pkrvars.hcl` is checked in as a template.
+packer/*.pkrvars.hcl
+!packer/example.pkrvars.hcl
+packer/manifest.json
+packer/packer_cache/
+
+# Regression runner outputs. Corpora are committed; reports aren't.
+tests/regression/reports/*.json
+
+# Test data downloaded by scripts/fetch-test-data.sh (not yet built).
+test-data/

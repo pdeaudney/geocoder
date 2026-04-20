@@ -1,13 +1,20 @@
-//! Build per-country FST-backed autocomplete indexes from the reverse
-//! binary index.
+//! Build FST-backed autocomplete indexes from the reverse binary index.
 //!
 //! Usage:
-//!   build-autocomplete-fst <reverse-index-dir> [--country cc,cc]
+//!   build-autocomplete-fst <reverse-index-dir>
+//!     [--country cc,cc]
+//!     [--layout per-country|unified|both]   (default: both)
 //!
-//! Emits `fst_<cc>.fst`, `fst_<cc>.bin`, `fst_<cc>_strings.bin` per
-//! country. Each FST is keyed on the normalised (lowercased, ASCII-folded,
-//! alphanumeric-only) name of a street or place, with the value being the
-//! index into the per-country entries file.
+//! Layouts:
+//! - **per-country**: one FST triple per country:
+//!   `fst_<cc>.fst`, `fst_<cc>.bin`, `fst_<cc>_strings.bin`.
+//!   Keys are the normalised (lowercased, ASCII-folded, alphanumeric-only)
+//!   name; the value is an index into the entries file. Lets you swap a
+//!   single country's FST independently.
+//! - **unified**: one FST across all countries — `fst_unified.fst`,
+//!   `.bin`, `_strings.bin`. Keys are `<cc[0]><cc[1]><normalised_name>`.
+//!   Runtime prefers this when present. Fewer fds, smaller metadata,
+//!   slightly smaller on disk due to shared string pool.
 //!
 //! Tiny compared to tantivy: a country with 500 K streets produces
 //! ~5–15 MB of FST + ~8 MB of entries + ~2 MB of strings. The whole
@@ -24,11 +31,18 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    PerCountry,
+    Unified,
+    Both,
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!(
-            "Usage: {} <reverse-index-dir> [--country cc,cc]",
+            "Usage: {} <reverse-index-dir> [--country cc,cc] [--layout per-country|unified|both]",
             args.first().map(String::as_str).unwrap_or("build-autocomplete-fst")
         );
         std::process::exit(2);
@@ -53,13 +67,46 @@ fn main() {
         })
         .filter(|s: &HashSet<_>| !s.is_empty());
 
-    if let Err(e) = run(&dir, country_filter.as_ref()) {
+    let layout = match args
+        .iter()
+        .position(|a| a == "--layout")
+        .and_then(|p| args.get(p + 1))
+        .map(String::as_str)
+    {
+        None | Some("both") => Layout::Both,
+        Some("per-country") => Layout::PerCountry,
+        Some("unified") => Layout::Unified,
+        Some(other) => {
+            eprintln!(
+                "unknown --layout value {other:?}; expected per-country|unified|both"
+            );
+            std::process::exit(2);
+        }
+    };
+
+    if let Err(e) = run(&dir, country_filter.as_ref(), layout) {
         eprintln!("build failed: {e}");
         std::process::exit(1);
     }
 }
 
-fn run(dir: &PathBuf, country_filter: Option<&HashSet<[u8; 2]>>) -> Result<(), String> {
+/// Per-country staging state. Lives at module scope so `emit_unified`
+/// can iterate it after `run` collects it.
+#[derive(Default)]
+struct PerCountry {
+    entries: Vec<AutocompleteEntry>,
+    strings: Vec<u8>,
+    /// interned string offset → previously-seen offset (for dedup)
+    intern_index: HashMap<String, u32>,
+    /// normalised key → entry_id, sorted for FST emit
+    keys: BTreeMap<String, u64>,
+}
+
+fn run(
+    dir: &PathBuf,
+    country_filter: Option<&HashSet<[u8; 2]>>,
+    layout: Layout,
+) -> Result<(), String> {
     let dir_str = dir
         .to_str()
         .ok_or_else(|| format!("non-utf8 path: {}", dir.display()))?;
@@ -69,17 +116,6 @@ fn run(dir: &PathBuf, country_filter: Option<&HashSet<[u8; 2]>>) -> Result<(), S
         DEFAULT_ADMIN_CELL_LEVEL,
         DEFAULT_SEARCH_DISTANCE,
     )?;
-
-    // Group entries by country. Each group gets its own FST / bin pair.
-    #[derive(Default)]
-    struct PerCountry {
-        entries: Vec<AutocompleteEntry>,
-        strings: Vec<u8>,
-        // interned string offset → previously-seen offset
-        intern_index: HashMap<String, u32>,
-        // normalised_key → entry_id, sorted for FST emit (BTreeMap)
-        keys: BTreeMap<String, u64>,
-    }
 
     let mut by_country: HashMap<[u8; 2], PerCountry> = HashMap::new();
 
@@ -94,13 +130,13 @@ fn run(dir: &PathBuf, country_filter: Option<&HashSet<[u8; 2]>>) -> Result<(), S
         off
     }
 
-    // Seed the empty string at offset 0 for each new country, matching
-    // how the runtime treats offset 0 as "".
-    fn ensure_seed(pc: &mut PerCountry) {
-        if pc.strings.is_empty() {
-            pc.strings.push(0);
-            pc.intern_index.insert(String::new(), 0);
-        }
+    /// Fresh per-country staging seeded with the empty string at offset 0
+    /// so the runtime can treat 0 as the sentinel for "no suburb".
+    fn fresh_per_country() -> PerCountry {
+        let mut pc = PerCountry::default();
+        pc.strings.push(0);
+        pc.intern_index.insert(String::new(), 0);
+        pc
     }
 
     fn add(
@@ -124,8 +160,7 @@ fn run(dir: &PathBuf, country_filter: Option<&HashSet<[u8; 2]>>) -> Result<(), S
             return;
         }
         let cc_lower = [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()];
-        let pc = by_country.entry(cc_lower).or_insert_with(PerCountry::default);
-        ensure_seed(pc);
+        let pc = by_country.entry(cc_lower).or_insert_with(fresh_per_country);
 
         let name_offset = intern(pc, name);
         let suburb_offset = match suburb.filter(|s| !s.is_empty()) {
@@ -226,58 +261,231 @@ fn run(dir: &PathBuf, country_filter: Option<&HashSet<[u8; 2]>>) -> Result<(), S
         );
     }
 
-    // Emit per country.
-    for (cc, pc) in &by_country {
-        if pc.entries.is_empty() {
-            continue;
+    // Deterministic ordering: sort country codes before emitting so
+    // rebuilds from identical input produce byte-identical .bin outputs
+    // (unified entry IDs depend on iteration order).
+    let mut ccs: Vec<[u8; 2]> = by_country.keys().copied().collect();
+    ccs.sort();
+
+    if matches!(layout, Layout::PerCountry | Layout::Both) {
+        for cc in &ccs {
+            let pc = by_country.get(cc).expect("cc came from by_country");
+            if pc.entries.is_empty() {
+                continue;
+            }
+            emit_per_country(dir, cc, pc)?;
         }
-        let prefix = format!("fst_{}{}", cc[0] as char, cc[1] as char);
+    }
 
-        let entries_path = dir.join(format!("{prefix}.bin"));
-        let mut f = BufWriter::new(
-            File::create(&entries_path).map_err(|e| format!("create {}: {}", entries_path.display(), e))?,
-        );
-        for entry in &pc.entries {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    entry as *const AutocompleteEntry as *const u8,
-                    std::mem::size_of::<AutocompleteEntry>(),
-                )
-            };
-            f.write_all(bytes)
-                .map_err(|e| format!("write {}: {}", entries_path.display(), e))?;
-        }
-        f.flush().map_err(|e| format!("flush: {e}"))?;
-
-        let strings_path = dir.join(format!("{prefix}_strings.bin"));
-        fs::write(&strings_path, &pc.strings)
-            .map_err(|e| format!("write {}: {}", strings_path.display(), e))?;
-
-        let fst_path = dir.join(format!("{prefix}.fst"));
-        let fst_file = File::create(&fst_path)
-            .map_err(|e| format!("create {}: {}", fst_path.display(), e))?;
-        let mut builder = MapBuilder::new(BufWriter::new(fst_file))
-            .map_err(|e| format!("fst builder: {e}"))?;
-        for (key, id) in &pc.keys {
-            builder
-                .insert(key, *id)
-                .map_err(|e| format!("fst insert {key:?}: {e}"))?;
-        }
-        builder
-            .finish()
-            .map_err(|e| format!("fst finish: {e}"))?;
-
-        eprintln!(
-            "  fst_{}{}: {} entries, {} keys, {} KB strings",
-            cc[0] as char,
-            cc[1] as char,
-            pc.entries.len(),
-            pc.keys.len(),
-            pc.strings.len() / 1024,
-        );
+    if matches!(layout, Layout::Unified | Layout::Both) {
+        emit_unified(dir, &ccs, &by_country)?;
     }
 
     Ok(())
+}
+
+fn emit_per_country(
+    dir: &std::path::Path,
+    cc: &[u8; 2],
+    pc: &PerCountry,
+) -> Result<(), String> {
+    let prefix = format!("fst_{}{}", cc[0] as char, cc[1] as char);
+    let entries_path = dir.join(format!("{prefix}.bin"));
+    let strings_path = dir.join(format!("{prefix}_strings.bin"));
+    let fst_path = dir.join(format!("{prefix}.fst"));
+
+    let entries_tmp = with_tmp_suffix(&entries_path);
+    let strings_tmp = with_tmp_suffix(&strings_path);
+    let fst_tmp = with_tmp_suffix(&fst_path);
+
+    // Write all three staging files first; if any fails, remove whatever
+    // we created and leave the previous set in place untouched.
+    let write_result = (|| -> Result<(), String> {
+        write_entries(&entries_tmp, &pc.entries)?;
+        fs::write(&strings_tmp, &pc.strings)
+            .map_err(|e| format!("write {}: {}", strings_tmp.display(), e))?;
+        write_fst(&fst_tmp, pc.keys.iter().map(|(k, v)| (k.as_bytes(), *v)))?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&entries_tmp);
+        let _ = fs::remove_file(&strings_tmp);
+        let _ = fs::remove_file(&fst_tmp);
+        return Err(e);
+    }
+
+    // Rename into place. Order matters: rename the .fst last so that if a
+    // crash splits the operation, a reader either (a) sees the old triple
+    // (pre-first-rename) or (b) sees the new triple; never a valid .fst
+    // pointing at stale .bin/.strings.
+    fs::rename(&strings_tmp, &strings_path)
+        .map_err(|e| format!("rename {}: {}", strings_path.display(), e))?;
+    fs::rename(&entries_tmp, &entries_path)
+        .map_err(|e| format!("rename {}: {}", entries_path.display(), e))?;
+    fs::rename(&fst_tmp, &fst_path)
+        .map_err(|e| format!("rename {}: {}", fst_path.display(), e))?;
+
+    eprintln!(
+        "  {}: {} entries, {} keys, {} KB strings",
+        prefix,
+        pc.entries.len(),
+        pc.keys.len(),
+        pc.strings.len() / 1024,
+    );
+    Ok(())
+}
+
+fn emit_unified(
+    dir: &std::path::Path,
+    ccs: &[[u8; 2]],
+    by_country: &HashMap<[u8; 2], PerCountry>,
+) -> Result<(), String> {
+    // Re-intern strings into one shared pool and build one array of
+    // entries so the FST value is an index into a single, unified table.
+    let mut unified_strings: Vec<u8> = vec![0];
+    let mut intern_index: HashMap<String, u32> = HashMap::new();
+    intern_index.insert(String::new(), 0);
+    let mut intern = |s: &str, strings: &mut Vec<u8>| -> u32 {
+        if let Some(&off) = intern_index.get(s) {
+            return off;
+        }
+        let off = strings.len() as u32;
+        strings.extend_from_slice(s.as_bytes());
+        strings.push(0);
+        intern_index.insert(s.to_owned(), off);
+        off
+    };
+
+    // Country codes arrive pre-sorted from `run`, so entry IDs and
+    // string-pool offsets are deterministic across rebuilds.
+    let mut all_entries: Vec<AutocompleteEntry> = Vec::new();
+    let mut keys: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+
+    for cc in ccs {
+        let Some(pc) = by_country.get(cc) else { continue };
+        for (key_str, per_country_id) in &pc.keys {
+            let Some(src) = pc.entries.get(*per_country_id as usize) else {
+                continue;
+            };
+            let name = read_cstr(&pc.strings, src.name_offset);
+            let suburb = read_cstr(&pc.strings, src.suburb_offset);
+
+            let new_entry = AutocompleteEntry {
+                lat: src.lat,
+                lng: src.lng,
+                name_offset: intern(name, &mut unified_strings),
+                suburb_offset: intern(suburb, &mut unified_strings),
+                kind: src.kind,
+                rank: src.rank,
+                pad: [0; 2],
+            };
+            let unified_id = all_entries.len() as u64;
+            all_entries.push(new_entry);
+
+            let mut prefixed = Vec::with_capacity(2 + key_str.len());
+            prefixed.push(cc[0].to_ascii_lowercase());
+            prefixed.push(cc[1].to_ascii_lowercase());
+            prefixed.extend_from_slice(key_str.as_bytes());
+            // Country codes differ, so prefixed keys never collide across
+            // countries; `insert` is safe.
+            keys.insert(prefixed, unified_id);
+        }
+    }
+
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let fst_path = dir.join("fst_unified.fst");
+    let entries_path = dir.join("fst_unified.bin");
+    let strings_path = dir.join("fst_unified_strings.bin");
+    let fst_tmp = with_tmp_suffix(&fst_path);
+    let entries_tmp = with_tmp_suffix(&entries_path);
+    let strings_tmp = with_tmp_suffix(&strings_path);
+
+    let write_result = (|| -> Result<(), String> {
+        write_fst(&fst_tmp, keys.iter().map(|(k, v)| (k.as_slice(), *v)))?;
+        write_entries(&entries_tmp, &all_entries)?;
+        fs::write(&strings_tmp, &unified_strings)
+            .map_err(|e| format!("write {}: {}", strings_tmp.display(), e))?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&fst_tmp);
+        let _ = fs::remove_file(&entries_tmp);
+        let _ = fs::remove_file(&strings_tmp);
+        return Err(e);
+    }
+
+    fs::rename(&strings_tmp, &strings_path)
+        .map_err(|e| format!("rename {}: {}", strings_path.display(), e))?;
+    fs::rename(&entries_tmp, &entries_path)
+        .map_err(|e| format!("rename {}: {}", entries_path.display(), e))?;
+    fs::rename(&fst_tmp, &fst_path)
+        .map_err(|e| format!("rename {}: {}", fst_path.display(), e))?;
+
+    eprintln!(
+        "fst_unified: {} entries across {} countries, {} keys, {} KB strings",
+        all_entries.len(),
+        ccs.len(),
+        keys.len(),
+        unified_strings.len() / 1024,
+    );
+    Ok(())
+}
+
+/// Append `.tmp` to a path's file name. Preserves the original stem + ext
+/// so operators can tell the staging file apart at a glance.
+fn with_tmp_suffix(p: &std::path::Path) -> PathBuf {
+    let mut tmp = p.as_os_str().to_owned();
+    tmp.push(".tmp");
+    PathBuf::from(tmp)
+}
+
+fn write_entries(
+    path: &std::path::Path,
+    entries: &[AutocompleteEntry],
+) -> Result<(), String> {
+    let mut f = BufWriter::new(
+        File::create(path).map_err(|e| format!("create {}: {}", path.display(), e))?,
+    );
+    for entry in entries {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                entry as *const AutocompleteEntry as *const u8,
+                std::mem::size_of::<AutocompleteEntry>(),
+            )
+        };
+        f.write_all(bytes)
+            .map_err(|e| format!("write {}: {}", path.display(), e))?;
+    }
+    f.flush().map_err(|e| format!("flush {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+fn write_fst<'a, I>(path: &std::path::Path, entries: I) -> Result<(), String>
+where
+    I: IntoIterator<Item = (&'a [u8], u64)>,
+{
+    let fst_file =
+        File::create(path).map_err(|e| format!("create {}: {}", path.display(), e))?;
+    let mut builder =
+        MapBuilder::new(BufWriter::new(fst_file)).map_err(|e| format!("fst builder: {e}"))?;
+    for (key, id) in entries {
+        builder
+            .insert(key, id)
+            .map_err(|e| format!("fst insert {:?}: {e}", key))?;
+    }
+    builder.finish().map_err(|e| format!("fst finish: {e}"))?;
+    Ok(())
+}
+
+/// Read a NUL-terminated string from a string pool at the given offset.
+fn read_cstr(pool: &[u8], offset: u32) -> &str {
+    let off = offset as usize;
+    let bytes = pool.get(off..).unwrap_or(&[]);
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    std::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
 fn normalise_fst_key(s: &str) -> String {

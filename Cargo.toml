@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "server",
+    "tools/regression-runner",
+]
+resolver = "2"

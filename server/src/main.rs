@@ -99,6 +99,121 @@ struct SearchParams {
     key: Option<String>,
 }
 
+/// Liveness probe. 200 + `{"status":"ok"}` whenever the process can
+/// accept HTTP — no auth, no rate limit, no dependencies touched.
+/// Suitable for ALB/NLB/k8s liveness checks.
+async fn healthz() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        r#"{"status":"ok"}"#,
+    )
+        .into_response()
+}
+
+/// Per-index health. Reports which optional indexes are loaded and,
+/// for the ones that are partitioned by country, which ISO 3166-1
+/// alpha-2 codes are covered. Clients can use this for granular
+/// traffic routing ("does this instance serve country X?") or for
+/// diagnostics. No auth; no rate limit — the shape is non-sensitive
+/// and the response is cheap to generate.
+async fn healthz_indexes(
+    index: axum::extract::Extension<LiveIndex>,
+    #[cfg(feature = "forward")] forward_idx: axum::extract::Extension<Option<Arc<Forward>>>,
+    autocomplete_idx: axum::extract::Extension<Option<Arc<Autocomplete>>>,
+    ip_db: axum::extract::Extension<Option<Arc<IpGeo>>>,
+) -> Response {
+    let snapshot = index.load();
+
+    let mut indexes = serde_json::Map::new();
+    indexes.insert(
+        "reverse".into(),
+        serde_json::json!({ "loaded": true }),
+    );
+    indexes.insert(
+        "postcode_lookup".into(),
+        serde_json::json!({
+            "loaded": snapshot.postcode_lookup.is_some(),
+            // AU-only by construction — advertise that explicitly so
+            // routing layers don't have to guess.
+            "countries": if snapshot.postcode_lookup.is_some() { vec!["au"] } else { vec![] },
+        }),
+    );
+    indexes.insert(
+        "gnaf".into(),
+        serde_json::json!({
+            "loaded": snapshot.gnaf.is_some(),
+            "countries": if snapshot.gnaf.is_some() { vec!["au"] } else { vec![] },
+        }),
+    );
+    indexes.insert(
+        "open_addresses".into(),
+        serde_json::json!({
+            "loaded": snapshot.open_addresses.is_some(),
+            "countries": snapshot
+                .open_addresses
+                .as_ref()
+                .map(|oa| oa.countries().map(cc_to_string).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        }),
+    );
+    indexes.insert(
+        "i18n_names".into(),
+        serde_json::json!({ "loaded": snapshot.i18n_names.is_some() }),
+    );
+
+    indexes.insert(
+        "autocomplete".into(),
+        serde_json::json!({
+            "loaded": autocomplete_idx.is_some(),
+            "countries": autocomplete_idx
+                .as_ref()
+                .map(|a| a.countries().iter().map(cc_to_string).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        }),
+    );
+
+    #[cfg(feature = "forward")]
+    indexes.insert(
+        "forward".into(),
+        serde_json::json!({
+            "loaded": forward_idx.is_some(),
+            "countries": forward_idx
+                .as_ref()
+                .map(|f| f.countries().map(cc_to_string).collect::<Vec<_>>())
+                .unwrap_or_default(),
+            // A monolithic fallback covers any country baked into the
+            // build, even when `countries` is empty. Routing layers can
+            // treat `default=true` as "serves everything this build has,
+            // but we can't enumerate it at runtime".
+            "default": forward_idx.as_ref().is_some_and(|f| f.has_default()),
+        }),
+    );
+    #[cfg(not(feature = "forward"))]
+    indexes.insert(
+        "forward".into(),
+        serde_json::json!({ "loaded": false, "compiled_out": true }),
+    );
+
+    indexes.insert(
+        "ip_geo".into(),
+        serde_json::json!({ "loaded": ip_db.is_some() }),
+    );
+
+    let body = serde_json::json!({
+        "status": "ok",
+        "indexes": indexes,
+    });
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+fn cc_to_string(cc: &[u8; 2]) -> String {
+    std::str::from_utf8(cc).unwrap_or("??").to_owned()
+}
+
 async fn reverse_geocode(
     Query(params): Query<QueryParams>,
     state: axum::extract::State<Arc<RwLock<auth::Db>>>,
@@ -817,7 +932,7 @@ async fn main() {
         Ok(Some(a)) => {
             eprintln!(
                 "Loaded FST autocomplete for {} countries",
-                a.countries().count()
+                a.countries().len()
             );
             Some(Arc::new(a))
         }
@@ -841,6 +956,8 @@ async fn main() {
     #[cfg(feature = "forward")]
     let app = {
         let mut app = Router::new()
+            .route("/healthz", get(healthz))
+            .route("/healthz/indexes", get(healthz_indexes))
             .route("/reverse", get(reverse_geocode))
             .route("/search", get(search))
             .route("/validate", get(validate_address))
@@ -858,6 +975,8 @@ async fn main() {
     };
     #[cfg(not(feature = "forward"))]
     let app = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/healthz/indexes", get(healthz_indexes))
         .route("/reverse", get(reverse_geocode))
         .route("/autocomplete", get(autocomplete))
         .route("/geocode/ip", get(ip_geocode))

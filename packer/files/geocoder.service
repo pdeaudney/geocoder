@@ -1,0 +1,40 @@
+[Unit]
+Description=Self-hosted geocoder (reverse, forward, autocomplete, validate, IP)
+Documentation=https://github.com/pdeaudney/traccar-geocoder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SERVICE_USER@
+Group=@SERVICE_USER@
+EnvironmentFile=/etc/default/geocoder
+ExecStart=@BINARY_PATH@ @INDEX_DIR@ ${BIND_ADDR}
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Sandbox. The service only needs to read its index dir; nothing else
+# on the filesystem should be writable from within the unit.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ReadOnlyPaths=@INDEX_DIR@
+
+# Capacity. Geocoder is mostly mmap'd reads + axum handlers; modest
+# limits are fine. The AMI operator can drop in an override.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
