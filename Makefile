@@ -1,4 +1,4 @@
-.PHONY: help ami ami-init ami-validate regression-au regression-au-debug regression-pelias-au regression-roundtrip-au pelias-refresh bench test
+.PHONY: help ami ami-init ami-validate regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au pelias-refresh bench test
 
 help:
 	@echo "Regression / testing:"
@@ -7,6 +7,8 @@ help:
 	@echo "  regression-au-debug   Same, but use the debug profile for faster iteration"
 	@echo "  bench                 Run criterion benches and refresh docs/performance/benchmarks.md"
 	@echo "  regression-pelias-au  Run the Pelias AU corpus (partial failures expected today)"
+	@echo "  regression-roundtrip-au  Ground-truth coord round-trips (reverse + housenumber)"
+	@echo "  regression-nominatim-au  Hand-translated Nominatim BDD scenarios"
 	@echo "  pelias-refresh        Re-fetch pelias/acceptance-tests and regenerate the AU subset"
 	@echo ""
 	@echo "AMI builds:"
@@ -31,6 +33,9 @@ regression-pelias-au:
 
 regression-roundtrip-au:
 	./scripts/run-regression.sh --corpus ./tests/regression/corpora/au-roundtrip-addresses.json
+
+regression-nominatim-au:
+	./scripts/run-regression.sh --corpus ./tests/regression/corpora/nominatim-bdd-au.json
 
 # Refresh the Pelias corpus from upstream (requires network + the
 # test-data clone).
