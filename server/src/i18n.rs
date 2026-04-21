@@ -60,7 +60,11 @@ impl I18nNames {
         Ok(Some(I18nNames { mmap }))
     }
 
-    fn records(&self) -> &[I18nRecord] {
+    /// Typed view over the mmap. Public so tooling (the DuckDB index
+    /// dumper in particular) can iterate records without copying or
+    /// parsing the file a second time. Hot-path callers go through
+    /// `lookup` instead.
+    pub fn records(&self) -> &[I18nRecord] {
         crate::as_typed_slice(&self.mmap)
     }
 

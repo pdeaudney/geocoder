@@ -1,4 +1,4 @@
-.PHONY: help ami ami-init ami-validate regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au pelias-refresh bench test
+.PHONY: help ami ami-init ami-validate regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au pelias-refresh bench inspect-dump test
 
 help:
 	@echo "Regression / testing:"
@@ -6,6 +6,7 @@ help:
 	@echo "  regression-au         Run the AU regression suite (release build)"
 	@echo "  regression-au-debug   Same, but use the debug profile for faster iteration"
 	@echo "  bench                 Run criterion benches and refresh docs/performance/benchmarks.md"
+	@echo "  inspect-dump          Dump the index to CSV under data/index/dump-csv/ for DuckDB"
 	@echo "  regression-pelias-au  Run the Pelias AU corpus (partial failures expected today)"
 	@echo "  regression-roundtrip-au  Ground-truth coord round-trips (reverse + housenumber)"
 	@echo "  regression-nominatim-au  Hand-translated Nominatim BDD scenarios"
@@ -49,6 +50,13 @@ pelias-refresh:
 
 bench:
 	./scripts/run-benchmarks.sh
+
+# Dump the mmap'd index to CSV under ./data/index/dump-csv/ so DuckDB
+# (or any SQL tool) can inspect streets, admin polygons, places, addr
+# points, and i18n names. See docs/inspection/README.md for recipes.
+inspect-dump:
+	cargo build --release -p index-dumper
+	./target/release/index-dumper ./data/index
 
 ami-init:
 	cd packer && packer init .

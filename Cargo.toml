@@ -2,5 +2,6 @@
 members = [
     "server",
     "tools/regression-runner",
+    "tools/index-dumper",
 ]
 resolver = "2"
