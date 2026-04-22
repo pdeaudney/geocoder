@@ -2,7 +2,7 @@
 
 Machine-generated. Do not hand-edit — re-run `scripts/run-benchmarks.sh` to refresh.
 
-- **Captured**:    2026-04-20T21:44:22Z
+- **Captured**:    2026-04-22T21:01:43Z
 - **Platform**:    Darwin 24.6.0
 - **CPU**:         Apple M1 Max
 - **RAM**:         64 GB
@@ -32,58 +32,58 @@ polygon index returns quickly) paths.
 
 | Fixture | Median | ±σ |
 |---------|-------:|---:|
-| `sydney_cbd` | 69.66 µs | 5.91 µs |
-| `melbourne_cbd` | 37.40 µs | 7.25 µs |
-| `brisbane_cbd` | 21.01 µs | 1.19 µs |
-| `perth_cbd` | 31.15 µs | 2.85 µs |
-| `adelaide_cbd` | 20.91 µs | 3.56 µs |
-| `sydney_parramatta` | 55.63 µs | 5.03 µs |
-| `melbourne_footscray` | 28.17 µs | 1.49 µs |
-| `brisbane_chermside` | 34.20 µs | 15.58 µs |
-| `regional_orange` | 16.81 µs | 3.49 µs |
-| `regional_mildura` | 14.35 µs | 2.38 µs |
-| `tasman_sea` | 2.01 µs | 1.52 µs |
-| `great_australian_bight` | 1.76 µs | 480 ns |
+| `sydney_cbd` | 66.53 µs | 1.27 µs |
+| `melbourne_cbd` | 35.07 µs | 3.12 µs |
+| `brisbane_cbd` | 20.00 µs | 184 ns |
+| `perth_cbd` | 29.12 µs | 462 ns |
+| `adelaide_cbd` | 19.73 µs | 379 ns |
+| `sydney_parramatta` | 51.83 µs | 1.19 µs |
+| `melbourne_footscray` | 26.59 µs | 490 ns |
+| `brisbane_chermside` | 31.10 µs | 522 ns |
+| `regional_orange` | 14.47 µs | 230 ns |
+| `regional_mildura` | 11.38 µs | 196 ns |
+| `tasman_sea` | 1.53 µs | 32 ns |
+| `great_australian_bight` | 1.53 µs | 19 ns |
 
 ### `reverse_geocode`
 
 | Fixture | Median | ±σ |
 |---------|-------:|---:|
-| `query_mixed` | 32.77 µs | 4.51 µs |
+| `query_mixed` | 27.17 µs | 649 ns |
 
 ### `find_admin`
 
 | Fixture | Median | ±σ |
 |---------|-------:|---:|
-| `sydney_cbd` | 57.41 µs | 10.35 µs |
-| `melbourne_cbd` | 35.16 µs | 3.50 µs |
-| `brisbane_cbd` | 18.75 µs | 2.21 µs |
-| `perth_cbd` | 29.74 µs | 7.66 µs |
-| `adelaide_cbd` | 17.55 µs | 1.62 µs |
-| `sydney_parramatta` | 48.70 µs | 5.11 µs |
-| `melbourne_footscray` | 23.83 µs | 36.67 µs |
-| `brisbane_chermside` | 31.86 µs | 2.65 µs |
-| `regional_orange` | 11.01 µs | 1.17 µs |
-| `regional_mildura` | 10.82 µs | 3.02 µs |
-| `tasman_sea` | 656 ns | 74 ns |
-| `great_australian_bight` | 669 ns | 81 ns |
+| `sydney_cbd` | 54.57 µs | 31.98 µs |
+| `melbourne_cbd` | 32.71 µs | 564 ns |
+| `brisbane_cbd` | 17.96 µs | 318 ns |
+| `perth_cbd` | 25.51 µs | 600 ns |
+| `adelaide_cbd` | 16.35 µs | 315 ns |
+| `sydney_parramatta` | 45.02 µs | 1.69 µs |
+| `melbourne_footscray` | 22.61 µs | 5.97 µs |
+| `brisbane_chermside` | 29.75 µs | 415 ns |
+| `regional_orange` | 10.17 µs | 90 ns |
+| `regional_mildura` | 8.96 µs | 1.44 µs |
+| `tasman_sea` | 612 ns | 12 ns |
+| `great_australian_bight` | 609 ns | 8 ns |
 
 ### `query_geo`
 
 | Fixture | Median | ±σ |
 |---------|-------:|---:|
-| `sydney_cbd` | 1.81 µs | 482 ns |
-| `melbourne_cbd` | 2.42 µs | 212 ns |
-| `brisbane_cbd` | 2.19 µs | 729 ns |
-| `perth_cbd` | 1.59 µs | 110 ns |
-| `adelaide_cbd` | 1.43 µs | 256 ns |
-| `sydney_parramatta` | 1.79 µs | 179 ns |
-| `melbourne_footscray` | 1.64 µs | 117 ns |
-| `brisbane_chermside` | 1.34 µs | 269 ns |
-| `regional_orange` | 1.33 µs | 198 ns |
-| `regional_mildura` | 1.36 µs | 370 ns |
-| `tasman_sea` | 1.09 µs | 173 ns |
-| `great_australian_bight` | 1.03 µs | 181 ns |
+| `sydney_cbd` | 1.51 µs | 109 ns |
+| `melbourne_cbd` | 2.15 µs | 34 ns |
+| `brisbane_cbd` | 1.80 µs | 51 ns |
+| `perth_cbd` | 1.55 µs | 144 ns |
+| `adelaide_cbd` | 1.30 µs | 29 ns |
+| `sydney_parramatta` | 1.59 µs | 24 ns |
+| `melbourne_footscray` | 1.57 µs | 279 ns |
+| `brisbane_chermside` | 1.21 µs | 13 ns |
+| `regional_orange` | 1.27 µs | 73 ns |
+| `regional_mildura` | 1.23 µs | 85 ns |
+| `tasman_sea` | 924 ns | 20 ns |
+| `great_australian_bight` | 927 ns | 15 ns |
 
 ## Notes
 
