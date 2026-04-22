@@ -1,4 +1,4 @@
-.PHONY: help ami ami-init ami-validate regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au pelias-refresh bench inspect-dump test
+.PHONY: help ami ami-init ami-validate regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-worldwide pelias-refresh pelias-full-refresh bench inspect-dump test
 
 help:
 	@echo "Regression / testing:"
@@ -10,7 +10,9 @@ help:
 	@echo "  regression-pelias-au  Run the Pelias AU corpus (partial failures expected today)"
 	@echo "  regression-roundtrip-au  Ground-truth coord round-trips (reverse + housenumber)"
 	@echo "  regression-nominatim-au  Hand-translated Nominatim BDD scenarios"
+	@echo "  regression-worldwide  Run full Pelias suite (AU+NZ+GB+CA+US) against data/index-worldwide"
 	@echo "  pelias-refresh        Re-fetch pelias/acceptance-tests and regenerate the AU subset"
+	@echo "  pelias-full-refresh   Regenerate per-country Pelias corpora (au, nz, gb, us, ca)"
 	@echo ""
 	@echo "AMI builds:"
 	@echo "  ami-init              Install Packer plugins (run once)"
@@ -37,6 +39,24 @@ regression-roundtrip-au:
 
 regression-nominatim-au:
 	./scripts/run-regression.sh --corpus ./tests/regression/corpora/nominatim-bdd-au.json
+
+# Full worldwide Pelias suite — assumes ./data/index-worldwide exists
+# (combined AU+NZ+GB+CA+US build) and the per-country pelias-*-full.json
+# corpora already live in tests/regression/corpora/.
+regression-worldwide:
+	./scripts/run-worldwide-regression.sh
+
+# Refresh the pelias-*-full.json corpora from upstream Pelias data
+# (assumes `./scripts/fetch-test-data.sh` has already cloned them).
+pelias-full-refresh:
+	python3 scripts/merge-pelias-corpus.py \
+	    test-data/pelias-acceptance-tests/test_cases > /tmp/pelias-combined.json
+	@for cc in au nz gb us ca; do \
+	    ./target/release/pelias-to-ours /tmp/pelias-combined.json \
+	        --country $$cc --name pelias-$$cc-full \
+	        > tests/regression/corpora/pelias-$$cc-full.json; \
+	done
+	@echo "refreshed pelias-{au,nz,gb,us,ca}-full.json"
 
 # Refresh the Pelias corpus from upstream (requires network + the
 # test-data clone).

@@ -1,0 +1,442 @@
+{
+  "name": "pelias-au-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "Henson Street"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-address_matching-6",
+      "notes": "postalcode matches should come first",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "22 HENSON STREET, NSW, 2204"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Deakin"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "Australian Capital Territory"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "Carrington Street"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-australian_addresses-1",
+      "notes": "Canberra Address",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "38 carrington st, deakin, ACT, australia"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Prahran"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "Victoria"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "Commercial Road"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-australian_addresses-2",
+      "notes": "Victoria, Australia address test",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "164 commercial rd, prahran, vic"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Rivett"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "Tristania Street"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-australian_addresses-3",
+      "notes": "General Australian suburb address test",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "41 Tristania St, rivett, ACT"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "Harbachs Road"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-australian_addresses-4",
+      "notes": "Tasmanian address",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "160 Harbachs Rd, Dysart, TAS 7030"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "Harbachs Road"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-australian_addresses-4.1",
+      "notes": "Tasmanian address",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "160 Harbachs Rd, Dysart, Tasmania 7030"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Bundaberg East"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "Bargara Road"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-australian_addresses-5",
+      "notes": "Queensland address",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "113 Bargara Road, Bundaberg East, QLD, AUS"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Bundaberg East"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "Bargara Road"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-australian_addresses-5.1",
+      "notes": "Queensland address",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "113 Bargara Road, Bundaberg East, QLD, AUS"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Sydney"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_address-1",
+      "notes": "popular address (Sydney Opera House) should be returned first",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "2 Macquarie Street Sydney AUS"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_postalcodes-9",
+      "notes": "postal code in Melbourne, Australia",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "3000"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_postalcodes-9.1",
+      "notes": "postal code in Melbourne, Australia with additional filters",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "3000"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Melbourne"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "St Kilda Road"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-0",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "553 St. Kilda Road Melbourne 3004"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Campbell"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-landmarks-15",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "au",
+          "q": "australian war memorial, canberra, australia"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}

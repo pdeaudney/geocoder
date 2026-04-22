@@ -1,0 +1,386 @@
+{
+  "name": "pelias-ca-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Vancouver"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-admin_lookup-19",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "5 West 4th Avenue Canada"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Toronto"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-admin_translations-25",
+      "notes": "Bengali for Toronto, Japanese for Ontario, Farsi/Persian for Canada",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "280 Bloor Street West টরোন্টো オンタリオ州 کانادا"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "Ontario"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_boundary_circle-1",
+      "notes": "test boundary circle with a query for london, and a point ner london, Ontario",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "london"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "Ontario"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_boundary_circle-2",
+      "notes": "test boundary circle with a large radius",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "london"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Ottawa"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "Sussex Drive"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-6",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "490 Sussex Drive Ottawa K1N 1G8"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Calgary"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "MacLeod Tr SE"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-12",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "615 MacLeod Trail S.E. 10th Floor Calgary T2G 4T8"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "Main Street"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-placeholder_geometric_filters-2",
+      "notes": "Fallback query should obey geometric filter",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "2000 main st, berlin"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Toronto"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_city_country-21",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "toronto, ca"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Toronto"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_iso2_to_iso3-4",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "22 Lloyd George Ave, Toronto Ontario CA"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_countries-2",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "Canada"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "Newfoundland and Labrador"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_regions-3",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "Newfoundland and Labrador"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "Prince Edward Island"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_regions-4",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ca",
+          "q": "Prince Edward Island"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}
