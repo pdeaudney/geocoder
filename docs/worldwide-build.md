@@ -165,6 +165,45 @@ The `both` layout emits per-country FSTs (legacy, swappable one at a
 time) and the unified FST (Radar-style, country-prefix automaton).
 Server prefers unified at query time.
 
+### Who's on First country-polygon fallback
+
+Geofabrik's country extracts (`great-britain-latest.osm.pbf`,
+`us-latest.osm.pbf`) don't ship their own `admin_level=2` country
+boundary relation — the relation references ways outside the extract
+window, so it's omitted. Consequence: OSM-only admin lookups return
+no `country_code` for GB or US coords, which cascades into the
+autocomplete FST dropping those countries entirely and per-country
+filtering in tantivy misfiring.
+
+Fix (adopted from Pelias, scoped to country level only):
+
+```bash
+# 1. Fetch per-country WoF admin SQLite files (one per country, ~175–840 MB
+#    bz2 each). scripts/fetch-test-data.sh handles the download + bzip2
+#    decompression and places the .db files under test-data/.
+WOF_COUNTRIES="au nz gb ca us" ./scripts/fetch-test-data.sh
+
+# 2. Import country polygons into the index dir. Produces
+#    wof_countries.bin + wof_countries_vertices.bin + wof_countries_strings.bin.
+make wof-import WOF_INDEX_DIR=./data/index-worldwide
+# or directly:
+./target/release/wof-importer ./test-data ./data/index-worldwide
+```
+
+The importer pulls only `placetype='country'` rows from WoF, so the
+on-disk footprint is small (~8 MB of vertex data for 5 countries;
+~30 MB for all ~250 countries worldwide). At query time
+`find_admin` first consults the OSM admin hierarchy; when that
+returns no `country_code` the WoF polygons are scanned. That lookup
+adds microseconds on the happy path (OSM already has cc packed) and
+~50 µs on the fallback.
+
+This is best done **before** rebuilding the forward + autocomplete
+indexes, because both read the country_code through `find_admin` at
+build time. If you skip this step the indexes will be missing
+coverage for any country whose extract omitted the country-level
+relation.
+
 ### Optional: G-NAF (Australia only)
 
 G-NAF is Australia's authoritative address dataset — swaps street

@@ -3,5 +3,6 @@ members = [
     "server",
     "tools/regression-runner",
     "tools/index-dumper",
+    "tools/wof-importer",
 ]
 resolver = "2"

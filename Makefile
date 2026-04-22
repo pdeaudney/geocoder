@@ -1,4 +1,4 @@
-.PHONY: help ami ami-init ami-validate regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-worldwide pelias-refresh pelias-full-refresh bench inspect-dump test
+.PHONY: help ami ami-init ami-validate regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-worldwide pelias-refresh pelias-full-refresh bench inspect-dump wof-import test
 
 help:
 	@echo "Regression / testing:"
@@ -7,6 +7,7 @@ help:
 	@echo "  regression-au-debug   Same, but use the debug profile for faster iteration"
 	@echo "  bench                 Run criterion benches and refresh docs/performance/benchmarks.md"
 	@echo "  inspect-dump          Dump the index to CSV under data/index/dump-csv/ for DuckDB"
+	@echo "  wof-import            Import WoF country polygons into WOF_INDEX_DIR (default data/index-worldwide)"
 	@echo "  regression-pelias-au  Run the Pelias AU corpus (partial failures expected today)"
 	@echo "  regression-roundtrip-au  Ground-truth coord round-trips (reverse + housenumber)"
 	@echo "  regression-nominatim-au  Hand-translated Nominatim BDD scenarios"
@@ -70,6 +71,17 @@ pelias-refresh:
 
 bench:
 	./scripts/run-benchmarks.sh
+
+# Import Who's on First country-level polygons as a fallback for
+# Geofabrik extracts that miss their own admin_level=2 relation
+# (typical of great-britain-latest and us-latest). Expects
+# whosonfirst-data-admin-*.db files under test-data/ (fetched by
+# scripts/fetch-test-data.sh). Writes wof_countries_*.bin into the
+# given index dir — defaults to data/index-worldwide.
+WOF_INDEX_DIR ?= ./data/index-worldwide
+wof-import:
+	cargo build --release -p wof-importer
+	./target/release/wof-importer ./test-data $(WOF_INDEX_DIR)
 
 # Dump the mmap'd index to CSV under ./data/index/dump-csv/ so DuckDB
 # (or any SQL tool) can inspect streets, admin polygons, places, addr

@@ -21,6 +21,7 @@ pub mod i18n;
 pub mod ip_geo;
 pub mod openaddresses;
 pub mod postcode;
+pub mod wof_countries;
 
 #[cfg(feature = "grpc")]
 pub mod grpc_service;
@@ -161,6 +162,13 @@ pub struct Index {
     /// it to override the default name for a given entity when the
     /// caller passes `lang=`.
     pub i18n_names: Option<I18nNames>,
+    /// Optional Who's on First country-level polygon fallback. When
+    /// present, `find_admin` consults it after the OSM admin scan
+    /// to fill in a `country_code` that would otherwise be missing
+    /// (common for Geofabrik country extracts that don't include
+    /// the `admin_level=2` relation — Great Britain, USA). See
+    /// [`wof_countries`] for the on-disk layout.
+    pub wof_countries: Option<crate::wof_countries::WofCountries>,
 }
 
 // Typed views over the record-array mmaps. Reconstructed once per query at
@@ -233,6 +241,7 @@ impl Index {
         let gnaf = Gnaf::open(Path::new(dir))?;
         let open_addresses = OpenAddresses::open(Path::new(dir))?;
         let i18n_names = I18nNames::open(Path::new(dir))?;
+        let wof_countries = crate::wof_countries::WofCountries::open(Path::new(dir))?;
         Ok(Index {
             geo_cells: mmap_file(&format!("{}/geo_cells.bin", dir))?,
             street_entries: mmap_file(&format!("{}/street_entries.bin", dir))?,
@@ -259,6 +268,7 @@ impl Index {
             gnaf,
             open_addresses,
             i18n_names,
+            wof_countries,
         })
     }
 
@@ -501,6 +511,23 @@ impl Index {
                     (poly.country_code >> 8) as u8,
                     (poly.country_code & 0xFF) as u8,
                 ]);
+            }
+        }
+
+        // Fallback: when OSM didn't produce a country_code (either no
+        // admin_level=2 polygon covered the point, or the polygon
+        // carried no packed cc — typical of Geofabrik country extracts
+        // that omit the global boundary relation), consult the
+        // Who's on First country polygons. Lifted from Pelias's
+        // admin-lookup architecture, scoped to country level only.
+        if result.country_code.is_none() {
+            if let Some(wof) = self.wof_countries.as_ref() {
+                if let Some(m) = wof.find_country(lat, lng) {
+                    result.country_code = Some(m.country_code);
+                    if result.country.is_none() {
+                        result.country = Some(m.name);
+                    }
+                }
             }
         }
 
