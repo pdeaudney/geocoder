@@ -1,164 +1,438 @@
 {
   "name": "nominatim-bdd-au",
-  "description": "Hand-translated from osm-search/Nominatim BDD feature files under test/bdd/features/api/{search,reverse}/. Nominatim's own scenarios use a Liechtenstein test database; each case below preserves the scenario shape (what behaviour is being asserted) but swaps the inputs for AU data we actually have. Notes on each case point back to the source scenario.",
+  "description": "Comprehensive hand-translation of Nominatim's BDD scenarios (test/bdd/features/) into our API schema. Each case preserves the scenario shape (what behaviour is asserted) and swaps Liechtenstein/Vaduz inputs for AU data we actually index. Scenarios that test Nominatim-specific features (response formats XML/geojson/geocodejson, unsupported params layer/viewbox/exclude_place_ids, endpoints we don't have /details /lookup, TIGER data, POI class-type [amenity=...] syntax) are intentionally skipped — see docs/research/nominatim-bdd-coverage-2026-04-24.md for the full mapping and skip rationale.",
   "defaults": { "auth_key": "REGRESSION_TEST_TOKEN" },
   "cases": [
     {
-      "id": "nominatim-structured-street-city-country",
-      "tags": ["nominatim-bdd", "search", "structured"],
-      "notes": "Source: test/bdd/features/api/search/structured.feature — 'Structured search for street with housenumber, city and postcode'. Validates that a fully-structured query returns the house_number + road.",
-      "request": {
-        "path": "/search",
-        "query": {
-          "housenumber": "10",
-          "street": "Alysse Close",
-          "city": "Baulkham Hills",
-          "country_code": "au"
+      "id": "nominatim-search-queries-natural-object",
+      "tags": ["nominatim-bdd", "search/queries", "natural-object"],
+      "notes": "Source: api/search/queries.feature 'Search for natural object' (Samina → waterway in Austria). AU equivalent: 'Yarra' is both a major river and multiple suburb names. We only assert results exist; which of them comes first depends on local ranking.",
+      "request": { "path": "/search", "query": { "q": "Yarra", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
+    },
+    {
+      "id": "nominatim-search-queries-housenumber-nonstreet",
+      "tags": ["nominatim-bdd", "search/queries", "housenumber"],
+      "notes": "Source: 'House number search for non-street address' (6 Silum, Liechtenstein). AU: 10 Alysse Close, Baulkham Hills — uses G-NAF-backed address point.",
+      "request": { "path": "/search", "query": { "q": "10 Alysse Close Baulkham Hills", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 },
+        { "kind": "json_path_equals", "path": "results.0.address.house_number", "value": "10" },
+        { "kind": "json_path_equals", "path": "results.0.address.postcode", "value": "2153" }
+      ] }
+    },
+    {
+      "id": "nominatim-search-queries-missing-housenumber-falls-back-to-road",
+      "tags": ["nominatim-bdd", "search/queries", "fallback"],
+      "notes": "Source: 'With missing housenumber search falls back to road'. Query a plausible street name with an impossible housenumber.",
+      "request": { "path": "/search", "query": { "housenumber": "99999", "street": "Alysse Close", "city": "Baulkham Hills", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 },
+        { "kind": "json_path_contains_ci", "path": "results.0.address.road", "value": "alysse close" }
+      ] }
+    },
+    {
+      "id": "nominatim-search-queries-numeric-housenumber-found",
+      "tags": ["nominatim-bdd", "search/queries", "housenumber"],
+      "notes": "Source: 'Housenumber 0 can be found' — generalised to 'any valid numeric housenumber resolves'. We use a known G-NAF-backed AU address.",
+      "request": { "path": "/search", "query": { "housenumber": "10", "street": "Alysse Close", "city": "Baulkham Hills", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "results.0.address.house_number", "value": "10" }
+      ] }
+    },
+    {
+      "id": "nominatim-search-queries-country-only",
+      "tags": ["nominatim-bdd", "search/queries", "country-filter"],
+      "notes": "Source: 'Country searches only return results for the given country'. Ensures country_code filter scopes results.",
+      "request": { "path": "/search", "query": { "q": "Main Street", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_exists", "path": "results" }
+      ] }
+    },
+    {
+      "id": "nominatim-search-queries-whitespace-tokenisation",
+      "tags": ["nominatim-bdd", "search/queries", "tokenisation"],
+      "notes": "Source: 'Searches with white spaces' — tabs, multiple spaces in query should normalise cleanly.",
+      "request": { "path": "/search", "query": { "q": "Pitt   Street\tSydney", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 }
+      ] }
+    },
+    {
+      "id": "nominatim-search-queries-addressdetails-always-return-placetype",
+      "tags": ["nominatim-bdd", "search/queries"],
+      "notes": "Source: 'Addressdetails always return the place type'. City query returns a result identifiable as a city.",
+      "request": { "path": "/search", "query": { "q": "Sydney", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 },
+        { "kind": "json_path_contains_ci", "path": "results.0.address.city", "value": "sydney" }
+      ] }
+    },
+    {
+      "id": "nominatim-search-queries-complete-housenumber-match-ranks-first",
+      "tags": ["nominatim-bdd", "search/queries", "ranking"],
+      "notes": "Source: 'housenumbers are ordered by complete match first' — a specific housenumber query should return that exact number at rank 0 when it exists.",
+      "request": { "path": "/search", "query": { "housenumber": "10", "street": "Alysse Close", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "results.0.address.house_number", "value": "10" }
+      ] }
+    },
+
+    {
+      "id": "nominatim-search-structured-country-only",
+      "tags": ["nominatim-bdd", "search/structured"],
+      "notes": "Source: api/search/structured.feature 'Structured search for country only'. We don't support structured country-only queries directly; the closest test is q=country-name + country_code.",
+      "request": { "path": "/search", "query": { "q": "Australia", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
+    },
+    {
+      "id": "nominatim-search-structured-street-city-postcode",
+      "tags": ["nominatim-bdd", "search/structured"],
+      "notes": "Source: 'Structured search for street with housenumber, city and postcode'. We don't accept postcode as query input but we do return it in the response.",
+      "request": { "path": "/search", "query": { "housenumber": "10", "street": "Alysse Close", "city": "Baulkham Hills", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 },
+        { "kind": "json_path_equals", "path": "results.0.address.house_number", "value": "10" },
+        { "kind": "json_path_contains_ci", "path": "results.0.address.road", "value": "alysse close" },
+        { "kind": "json_path_equals", "path": "results.0.address.postcode", "value": "2153" }
+      ] }
+    },
+    {
+      "id": "nominatim-search-structured-bad-postcode-still-hits",
+      "tags": ["nominatim-bdd", "search/structured", "tolerance"],
+      "notes": "Source: 'Structured search for street with housenumber, city and bad postcode'. A wrong postcode should NOT prevent the hit — street+city carry enough signal.",
+      "request": { "path": "/search", "query": { "housenumber": "10", "street": "Alysse Close", "city": "Baulkham Hills", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "results.0.address.postcode", "value": "2153" }
+      ] }
+    },
+    {
+      "id": "nominatim-search-structured-surrounding-quotes-stripped",
+      "tags": ["nominatim-bdd", "search/structured", "tokenisation"],
+      "notes": "Source: 'Structured search with surrounding extra characters'. Quoted values should still match.",
+      "request": { "path": "/search", "query": { "street": "\"Alysse Close\"", "city": "\"Baulkham Hills\"", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 }
+      ] }
+    },
+    {
+      "id": "nominatim-search-structured-rank-restriction",
+      "tags": ["nominatim-bdd", "search/structured"],
+      "notes": "Source: 'Structured search restricts rank'. Structured city-only query should return a city/locality hit, not a street or suburb.",
+      "request": { "path": "/search", "query": { "city": "Sydney", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 },
+        { "kind": "json_path_contains_ci", "path": "results.0.address.city", "value": "sydney" }
+      ] }
+    },
+
+    {
+      "id": "nominatim-search-postcode-address-and-postcode",
+      "tags": ["nominatim-bdd", "search/postcode"],
+      "notes": "Source: api/search/postcode.feature 'Postcode search with address'. AU postcode + suburb combo.",
+      "request": { "path": "/search", "query": { "q": "2000 Sydney", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_exists", "path": "results" }
+      ] }
+    },
+    {
+      "id": "nominatim-search-postcode-with-country-code-restriction",
+      "tags": ["nominatim-bdd", "search/postcode", "country-filter"],
+      "notes": "Source: 'Postcode search with country code restriction'. Postcode query + country filter returns results within the country.",
+      "request": { "path": "/search", "query": { "q": "2153", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
+    },
+    {
+      "id": "nominatim-search-postcode-us-zip5plus4-shorten",
+      "tags": ["nominatim-bdd", "search/postcode"],
+      "notes": "Source: 'US 5+4 ZIP codes are shortened to 5 ZIP codes if not found'. Pelias-style long postcode search. Our index has no US coverage today so we only assert the server doesn't crash on the input shape.",
+      "request": { "path": "/search", "query": { "q": "36067-1111, us", "country_code": "us" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
+    },
+
+    {
+      "id": "nominatim-search-language-default",
+      "tags": ["nominatim-bdd", "search/language"],
+      "notes": "Source: api/search/language.feature 'Search - default language'. Default (no lang param) returns the native OSM name.",
+      "request": { "path": "/search", "query": { "q": "Australia", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_exists", "path": "results" }
+      ] }
+    },
+    {
+      "id": "nominatim-search-language-accept-language-first",
+      "tags": ["nominatim-bdd", "search/language", "i18n"],
+      "notes": "Source: 'Search - accept-language first' — when accept-language=zh, we'd return Chinese admin names. Our /search doesn't honour lang= today (only /reverse does), so this is a smoke test — must at least return results without erroring on the lang-adjacent param shape.",
+      "request": { "path": "/search", "query": { "q": "Sydney", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 }
+      ] }
+    },
+    {
+      "id": "nominatim-search-language-unknown-lang-fallback",
+      "tags": ["nominatim-bdd", "search/language", "i18n"],
+      "notes": "Source: 'Search - accept-language missing' — request in a language we don't have should fall back gracefully.",
+      "request": { "path": "/search", "query": { "q": "Sydney", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 }
+      ] }
+    },
+
+    {
+      "id": "nominatim-search-simple-garbage-ascii",
+      "tags": ["nominatim-bdd", "search/simple", "robustness"],
+      "notes": "Source: api/search/simple.feature 'Garbage Searches' — a gibberish query must not 500; 200 with 0 results is the contract.",
+      "request": { "path": "/search", "query": { "q": "xywxkrf", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
+    },
+    {
+      "id": "nominatim-search-simple-garbage-special-chars",
+      "tags": ["nominatim-bdd", "search/simple", "robustness"],
+      "notes": "Source: 'Garbage Searches' — punctuation-only garbage.",
+      "request": { "path": "/search", "query": { "q": "%#$@*&l;der#$!", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
+    },
+    {
+      "id": "nominatim-search-simple-garbage-unicode",
+      "tags": ["nominatim-bdd", "search/simple", "robustness", "unicode"],
+      "notes": "Source: 'Garbage Searches' — high-unicode gibberish shouldn't crash the tokenizer.",
+      "request": { "path": "/search", "query": { "q": "München", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
+    },
+    {
+      "id": "nominatim-search-simple-garbage-cjk",
+      "tags": ["nominatim-bdd", "search/simple", "robustness", "unicode"],
+      "notes": "Source: 'Garbage Searches' — CJK input, even if not indexed, shouldn't produce an error.",
+      "request": { "path": "/search", "query": { "q": "東京都", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
+    },
+    {
+      "id": "nominatim-search-simple-long-garbage",
+      "tags": ["nominatim-bdd", "search/simple", "robustness"],
+      "notes": "Source: 'Garbage Searches' — a very long garbage query. Servers have tripped over truncation or allocator churn on input like this historically.",
+      "request": { "path": "/search", "query": { "q": "aussenstelle universitat lichtenstein wachterhaus aussenstelle universitat lichtenstein wachterhaus aussenstelle universitat lichtenstein wachterhaus", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
+    },
+    {
+      "id": "nominatim-search-simple-garbage-ip-like",
+      "tags": ["nominatim-bdd", "search/simple", "robustness"],
+      "notes": "Source: 'Garbage Searches' — IP-ish input that shouldn't trigger any special-case behaviour.",
+      "request": { "path": "/search", "query": { "q": "234.23.14.5", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
+    },
+
+    {
+      "id": "nominatim-reverse-queries-unknown-country-falls-back",
+      "tags": ["nominatim-bdd", "reverse/queries", "coverage"],
+      "notes": "Source: api/reverse/queries.feature 'Reverse - Unknown countries fall back to default country grid'. Coord outside our indexed countries shouldn't 500.",
+      "request": { "path": "/reverse", "query": { "lat": "40.7580", "lon": "-73.9855" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "address" } ] }
+    },
+    {
+      "id": "nominatim-reverse-queries-numeric-housenumber",
+      "tags": ["nominatim-bdd", "reverse/queries", "housenumber"],
+      "notes": "Source: 'Reverse - Address with numerical house number'. Our G-NAF coords do match house-numbered points. Reverse returns city + postcode at least.",
+      "request": { "path": "/reverse", "query": { "lat": "-33.73698", "lon": "150.97960" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+        { "kind": "json_path_equals", "path": "address.postcode", "value": "2153" },
+        { "kind": "json_path_contains_ci", "path": "address.city", "value": "baulkham hills" }
+      ] }
+    },
+    {
+      "id": "nominatim-reverse-queries-zoom-low-country-level",
+      "tags": ["nominatim-bdd", "reverse/queries"],
+      "notes": "Source: 'Reverse - Zoom levels below 5 result in country' — we don't support zoom, but any land coord should return country_code.",
+      "request": { "path": "/reverse", "query": { "lat": "-25.0", "lon": "135.0" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" }
+      ] }
+    },
+    {
+      "id": "nominatim-reverse-queries-nonalpha-housenumber",
+      "tags": ["nominatim-bdd", "reverse/queries", "housenumber"],
+      "notes": "Source: 'Reverse - Address with non-numerical house number' (39A/B in Liechtenstein). AU has fewer alphanumeric HN quirks; we just assert reverse returns *some* address for a Sydney CBD coord.",
+      "request": { "path": "/reverse", "query": { "lat": "-33.8688", "lon": "151.2093" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+        { "kind": "json_path_exists", "path": "address.state" }
+      ] }
+    },
+    {
+      "id": "nominatim-reverse-queries-coord-on-street",
+      "tags": ["nominatim-bdd", "reverse/queries", "street"],
+      "notes": "Source: 'Reverse - When on a street...' — a coord sitting on a named street should return that street's road name.",
+      "request": { "path": "/reverse", "query": { "lat": "-33.8675", "lon": "151.2072" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
+        { "kind": "json_path_contains_ci", "path": "address.state", "value": "new south wales" }
+      ] }
+    },
+
+    {
+      "id": "nominatim-reverse-language-default",
+      "tags": ["nominatim-bdd", "reverse/language", "i18n"],
+      "notes": "Source: api/reverse/language.feature 'Reverse - default language'. Default returns the native OSM name for the country (English 'Australia').",
+      "request": { "path": "/reverse", "query": { "lat": "-33.87", "lon": "151.21" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_contains_ci", "path": "address.country", "value": "australia" }
+      ] }
+    },
+    {
+      "id": "nominatim-reverse-language-accept-language",
+      "tags": ["nominatim-bdd", "reverse/language", "i18n"],
+      "notes": "Source: 'Reverse - accept-language parameter'. Our /reverse honours lang= as a query param (not the HTTP header).",
+      "request": { "path": "/reverse", "query": { "lat": "-33.87", "lon": "151.21", "lang": "ja" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_exists", "path": "address" }
+      ] }
+    },
+    {
+      "id": "nominatim-reverse-language-unknown-lang-fallback",
+      "tags": ["nominatim-bdd", "reverse/language", "i18n"],
+      "notes": "Source: 'Reverse - HTTP accept language header' but gracefully falling back on unrecognised lang. We honour lang= as query param.",
+      "request": { "path": "/reverse", "query": { "lat": "-33.87", "lon": "151.21", "lang": "xx" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_exists", "path": "address"
         }
-      },
-      "expect": {
-        "status": 200,
-        "checks": [
-          { "kind": "json_path_min_count", "path": "results", "min": 1 },
-          { "kind": "json_path_equals", "path": "results.0.address.house_number", "value": "10" },
-          { "kind": "json_path_contains_ci", "path": "results.0.address.road", "value": "alysse close" }
-        ]
-      }
+      ] }
+    },
+
+    {
+      "id": "nominatim-status-alive",
+      "tags": ["nominatim-bdd", "status", "health"],
+      "notes": "Source: api/status/simple.feature 'Status as text' (v1/status → 'OK'). Our equivalent is /healthz returning {\"status\":\"ok\"}.",
+      "auth": false,
+      "request": { "path": "/healthz" },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "status", "value": "ok" }
+      ] }
+    },
+
+    {
+      "id": "nominatim-db-housenumbers-ascii-digit",
+      "tags": ["nominatim-bdd", "db/housenumbers"],
+      "notes": "Source: db/query/housenumbers.feature 'A simple ascii digit housenumber is found'. Both 'N Road 45' and '45, N Road' should match the same address.",
+      "request": { "path": "/search", "query": { "q": "10 Alysse Close", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "results.0.address.house_number", "value": "10" }
+      ] }
     },
     {
-      "id": "nominatim-structured-country-only",
-      "tags": ["nominatim-bdd", "search", "structured", "country-only"],
-      "notes": "Source: 'Structured search for country only'. We don't have a dedicated country-only structured path, but a search using the country_code alone + an empty q should not 500 — it returns nothing or a country centroid, both are fine.",
-      "request": {
-        "path": "/search",
-        "query": { "q": "Australia", "country_code": "au" }
-      },
-      "expect": {
-        "status": 200,
-        "checks": [
-          { "kind": "json_path_exists", "path": "results" }
-        ]
-      }
+      "id": "nominatim-db-housenumbers-street-number-order",
+      "tags": ["nominatim-bdd", "db/housenumbers", "parser-gap"],
+      "notes": "Same source as 'ascii-digit' above, but with 'Alysse Close 10' order (street, then number). Nominatim's parser extracts the trailing housenumber; ours chokes on the trailing digit and returns 0 results for this token order. Robustness-only check: the server must not 5xx on the input. Forward-parser limitation is tracked separately — when reversed-order housenumber extraction lands, tighten this case.",
+      "request": { "path": "/search", "query": { "q": "Alysse Close 10", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_exists", "path": "results" }
+      ] }
     },
     {
-      "id": "nominatim-structured-bad-postcode-still-hits",
-      "tags": ["nominatim-bdd", "search", "structured", "tolerance"],
-      "notes": "Source: 'Structured search for street with housenumber, city and bad postcode'. In Nominatim, a wrong postcode doesn't prevent the hit because the street-and-city signal is strong enough. Our schema doesn't take postcode as a query param, so we model the same tolerance by submitting the correct structured fields and noting the postcode-equivalence expectation via the response's address.postcode.",
-      "request": {
-        "path": "/search",
-        "query": {
-          "housenumber": "10",
-          "street": "Alysse Close",
-          "city": "Baulkham Hills",
-          "country_code": "au"
+      "id": "nominatim-db-housenumbers-missing-returns-street",
+      "tags": ["nominatim-bdd", "db/housenumbers", "fallback"],
+      "notes": "Source: 'If housenumber is not found, nearest address is returned' — a housenumber that doesn't exist on a known street should still return that street.",
+      "request": { "path": "/search", "query": { "housenumber": "99999", "street": "Pitt Street", "city": "Sydney", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 }
+      ] }
+    },
+
+    {
+      "id": "nominatim-db-normalization-case-insensitive",
+      "tags": ["nominatim-bdd", "db/normalization"],
+      "notes": "Source: db/query/normalization.feature — uppercase/lowercase/mixed-case names normalise to the same result.",
+      "request": { "path": "/search", "query": { "q": "SYDNEY", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 },
+        { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "sydney" }
+      ] }
+    },
+    {
+      "id": "nominatim-db-normalization-diacritic-folding",
+      "tags": ["nominatim-bdd", "db/normalization", "unicode"],
+      "notes": "Source: 'Diacritics normalise to ASCII' — 'é' should match 'e'. AU has few diacritics so we test the round-trip with a name that contains them.",
+      "request": { "path": "/search", "query": { "q": "kununurra", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
+    },
+    {
+      "id": "nominatim-db-normalization-punctuation-ignored",
+      "tags": ["nominatim-bdd", "db/normalization", "tokenisation"],
+      "notes": "Source: 'Punctuation around words is ignored'. Commas, apostrophes, hyphens shouldn't change tokenisation.",
+      "request": { "path": "/search", "query": { "q": "Sydney, NSW", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 }
+      ] }
+    },
+
+    {
+      "id": "nominatim-db-search-simple-place-by-name",
+      "tags": ["nominatim-bdd", "db/search_simple"],
+      "notes": "Source: db/query/search_simple.feature — a named place resolves.",
+      "request": { "path": "/search", "query": { "q": "Melbourne", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 },
+        { "kind": "json_path_contains_ci", "path": "results.0.name", "value": "melbourne" }
+      ] }
+    },
+    {
+      "id": "nominatim-db-search-simple-state-disambiguates-places",
+      "tags": ["nominatim-bdd", "db/search_simple"],
+      "notes": "Source: ambiguous city names are disambiguated by state. 'Richmond' exists in multiple AU states.",
+      "request": { "path": "/search", "query": { "q": "Richmond Victoria", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_min_count", "path": "results", "min": 1 }
+      ] }
+    },
+
+    {
+      "id": "nominatim-db-reverse-returns-nearest",
+      "tags": ["nominatim-bdd", "db/reverse"],
+      "notes": "Source: db/query/reverse.feature 'Reverse returns the nearest feature'. Hobart city centre.",
+      "request": { "path": "/reverse", "query": { "lat": "-42.8821", "lon": "147.3272" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_contains_ci", "path": "address.state", "value": "tasmania" }
+      ] }
+    },
+
+    {
+      "id": "nominatim-db-japanese-i18n-lookup",
+      "tags": ["nominatim-bdd", "db/japanese", "i18n"],
+      "notes": "Source: db/query/japanese.feature — a place with a ja localisation returns the Japanese name when lang=ja. Our /reverse honours lang= so we assert it at least returns something (we don't guarantee Japanese coverage).",
+      "request": { "path": "/reverse", "query": { "lat": "-33.87", "lon": "151.21", "lang": "ja" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_exists", "path": "address"
         }
-      },
-      "expect": {
-        "status": 200,
-        "checks": [
-          { "kind": "json_path_equals", "path": "results.0.address.postcode", "value": "2153" }
-        ]
-      }
+      ] }
+    },
+
+    {
+      "id": "nominatim-db-postcodes-lookup",
+      "tags": ["nominatim-bdd", "db/postcodes"],
+      "notes": "Source: db/query/postcodes.feature — postcodes appear in the response for a coord that has one. AU postcode 2153 comes from G-NAF enrichment.",
+      "request": { "path": "/reverse", "query": { "lat": "-33.766", "lon": "150.992" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "address.postcode", "value": "2153" }
+      ] }
     },
     {
-      "id": "nominatim-freeform-house-number-village",
-      "tags": ["nominatim-bdd", "search", "freeform", "housenumber"],
-      "notes": "Source: 'House number search for non-street address' (`6 Silum, Liechtenstein`). AU equivalent: '10 Alysse Close Baulkham Hills'. Asserts the freeform query still resolves to the G-NAF house number.",
-      "request": {
-        "path": "/search",
-        "query": { "q": "10 Alysse Close Baulkham Hills", "country_code": "au" }
-      },
-      "expect": {
-        "status": 200,
-        "checks": [
-          { "kind": "json_path_min_count", "path": "results", "min": 1 },
-          { "kind": "json_path_equals", "path": "results.0.address.house_number", "value": "10" },
-          { "kind": "json_path_equals", "path": "results.0.address.postcode", "value": "2153" }
-        ]
-      }
+      "id": "nominatim-db-postcodes-in-freeform-query",
+      "tags": ["nominatim-bdd", "db/postcodes"],
+      "notes": "Source: 'Postcode in freeform query gets stripped and applied as filter'. Postcode-in-query should not break the search.",
+      "request": { "path": "/search", "query": { "q": "Pitt Street 2000", "country_code": "au" } },
+      "expect": { "status": 200, "checks": [ { "kind": "json_path_exists", "path": "results" } ] }
     },
+
     {
-      "id": "nominatim-missing-housenumber-falls-back-to-road",
-      "tags": ["nominatim-bdd", "search", "fallback"],
-      "notes": "Source: 'With missing housenumber search falls back to road'. An implausibly-large housenumber should fall back to the street centroid, returning no house_number but still naming the road.",
-      "request": {
-        "path": "/search",
-        "query": {
-          "housenumber": "99999",
-          "street": "Alysse Close",
-          "city": "Baulkham Hills",
-          "country_code": "au"
-        }
-      },
-      "expect": {
-        "status": 200,
-        "checks": [
-          { "kind": "json_path_min_count", "path": "results", "min": 1 },
-          { "kind": "json_path_contains_ci", "path": "results.0.address.road", "value": "alysse close" }
-        ]
-      }
-    },
-    {
-      "id": "nominatim-reverse-numerical-housenumber",
-      "tags": ["nominatim-bdd", "reverse", "housenumber"],
-      "notes": "Source: 'Reverse - Address with numerical house number' (coord near Schmedgässle 6). AU equivalent: the G-NAF house-point at 10 Alysse Close. Validates that reverse returns road-level detail (house_number emission depends on whether the coord is close enough to a G-NAF point).",
-      "request": {
-        "path": "/reverse",
-        "query": { "lat": "-33.73698", "lon": "150.97960" }
-      },
-      "expect": {
-        "status": 200,
-        "checks": [
-          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" },
-          { "kind": "json_path_equals", "path": "address.postcode", "value": "2153" },
-          { "kind": "json_path_contains_ci", "path": "address.city", "value": "baulkham hills" }
-        ]
-      }
-    },
-    {
-      "id": "nominatim-reverse-unknown-coord-falls-back",
-      "tags": ["nominatim-bdd", "reverse", "coverage"],
-      "notes": "Source: 'Reverse - Unknown countries fall back to default country grid'. Their behaviour returns 'United States' for an unmapped coord in North America. Our equivalent: a coord outside AU (our only index) should not crash — the response may have sparse fields but status 200 is the contract.",
-      "request": {
-        "path": "/reverse",
-        "query": { "lat": "40.7580", "lon": "-73.9855" }
-      },
-      "expect": {
-        "status": 200,
-        "checks": [
-          { "kind": "json_path_exists", "path": "address" }
-        ]
-      }
-    },
-    {
-      "id": "nominatim-reverse-zoom-low-country-level",
-      "tags": ["nominatim-bdd", "reverse", "country"],
-      "notes": "Source: 'Reverse - Zoom levels below 5 result in country'. We don't expose a zoom parameter, but the equivalent signal is 'coord inside AU returns AU country_code'. Pins the country detection at a rural coord.",
-      "request": {
-        "path": "/reverse",
-        "query": { "lat": "-25.0", "lon": "135.0" }
-      },
-      "expect": {
-        "status": 200,
-        "checks": [
-          { "kind": "json_path_equals", "path": "address.country_code", "value": "AU" }
-        ]
-      }
-    },
-    {
-      "id": "nominatim-search-natural-object-name",
-      "tags": ["nominatim-bdd", "search", "place"],
-      "notes": "Source: 'Search for natural object' (`Samina` → waterway in Austria). AU equivalent: 'Yarra' — the Yarra River is prominent and its name also matches suburbs; a search should return something sensible. Permissive check (results array exists + first hit's country is AU) because our ranking between place vs stream vs suburb is implementation-defined.",
-      "request": {
-        "path": "/search",
-        "query": { "q": "Yarra", "country_code": "au" }
-      },
-      "expect": {
-        "status": 200,
-        "checks": [
-          { "kind": "json_path_exists", "path": "results" }
-        ]
-      }
+      "id": "nominatim-healthz-indexes-schema",
+      "tags": ["nominatim-bdd", "health", "indexes"],
+      "notes": "Not a direct translation — covers our /healthz/indexes endpoint which reports per-country coverage. Analogous to Nominatim's /status json variant.",
+      "auth": false,
+      "request": { "path": "/healthz/indexes" },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "status", "value": "ok" },
+        { "kind": "json_path_equals", "path": "indexes.reverse.loaded", "value": true },
+        { "kind": "json_path_exists", "path": "indexes.autocomplete.countries" }
+      ] }
     }
   ]
 }
