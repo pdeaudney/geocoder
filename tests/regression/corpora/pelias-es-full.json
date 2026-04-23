@@ -1,0 +1,159 @@
+{
+  "name": "pelias-es-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Madrid"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-3",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "es",
+          "q": "Calle de Serrano 75 28006 Madrid"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Toledo"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_city_country-11",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "es",
+          "q": "toledo, spain"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Barcelona"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_street_centroids-8",
+      "notes": "single omitted word in street name should still allow match",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "es",
+          "q": "Carrer Balmes 1, barcelona, barcelona"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "Leon"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_localadmins-1",
+      "notes": "chosen for diacriticals. space at the end of the name",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "es",
+          "q": "Villares De Órbigo, Spain"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_macroregions-2",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "es",
+          "q": "Comunidad Foral De Navarra, ES"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}

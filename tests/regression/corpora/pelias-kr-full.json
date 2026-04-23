@@ -1,0 +1,180 @@
+{
+  "name": "pelias-kr-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "서울특별시"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_addresses-6",
+      "notes": "existing address in new format",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "kr",
+          "q": "독서당로39길 22"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "서울특별시"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_admin-2",
+      "notes": "Yongsan-gu (county)",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "kr",
+          "q": "용산구"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "경기도"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_venues-5",
+      "notes": "input is Gwangmyeong Sung Ae Hospital",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "kr",
+          "q": "광명성애병원"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_venues-6",
+      "notes": "input is Youngpoong Book, it's a chain so just check for venue layer and name",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "kr",
+          "q": "영풍문고"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_alphanumeric_housenumber-8",
+      "notes": "Korean address, there are multiple units at 35-* but none at 35",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "kr",
+          "q": "봉화로167번길 35-7"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_alphanumeric_housenumber-8.1",
+      "notes": "As above, query is for 35 without unit suffix. Sorting is arbitrary.",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "kr",
+          "q": "봉화로167번길 35"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}

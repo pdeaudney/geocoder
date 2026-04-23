@@ -1,0 +1,624 @@
+{
+  "name": "pelias-fr-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Rennes"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-1",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "7 Rue Pointeau du Ronceray Rennes"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Paris"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-2",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "20 Boulevard Saint-Martin, Paris"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Paris"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-2-no-hyphen-correct-format",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "Boulevard Saint Martin 20, Paris"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Paris"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-2-abbrev",
+      "notes": "Missing synonyms",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "20 bd saint-martin paris"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Paris"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-3",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "Avenue du Maine Paris"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Paris"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-3-abbrev",
+      "notes": "Missing synonyms",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "av du maine paris"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Rennes"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-4",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "Boulevard de la Liberte, Rennes"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Saint-Germain-lès-Arpajon"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-5",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "st germain les arpajon"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Saint-Germain-lès-Arpajon"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-6",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "14 impasse du parc st germain les arpajon "
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Bagneux"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-9",
+      "notes": "Missing synonyms and split on hyphen",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "160 avenue aristide briand bagneux"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Bordeaux"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-10",
+      "notes": "determiner in street name",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "40 Rue De L'arsenal, Bordeaux, France"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Paris"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-french_addresses-11",
+      "notes": "address without hyphens",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "20 boulevard saint germain, paris, france"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Paris"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.road",
+            "value": "avenue Gabriel"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-4",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "2 avenue Gabriel 75008 Paris"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Saint-Sauveur"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-placeholder_geometric_filters-1",
+      "notes": "Should obey geometric filter",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "57, ROUTE DE POITIERS 79300 SAINT SAUVEUR"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Paris"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_city_country-3",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "Paris France"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Paris"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_city_country-4",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "Paris France"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Paris"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_iso2_to_iso3-3",
+      "notes": "Fails only due to av/avenue abbreviation handling",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "23 Avenue Duquesne, 75007 Paris, Fr"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_postalcodes-5",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "03100"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "Pyrénées-Atlantiques"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_counties-4",
+      "notes": "chosen because France and complicated hierarchy. This county exists but should be deduped with the localadmin of the same name",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "Arzacq-Arraziguet"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_macroregions-3",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "fr",
+          "q": "Île-De-France, France"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}

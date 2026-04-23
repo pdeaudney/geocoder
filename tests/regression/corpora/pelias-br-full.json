@@ -1,0 +1,71 @@
+{
+  "name": "pelias-br-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "São Paulo"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-1",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "br",
+          "q": "Rua Henri Dunant 500 04709-110 São Paulo"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Recife"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-11",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "br",
+          "q": "Rua Gonçalves Maia 163 – Boa Vista 50070-060 Recife"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}

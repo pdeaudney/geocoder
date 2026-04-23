@@ -1,0 +1,144 @@
+{
+  "name": "pelias-eg-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Cairo"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_city_country-10",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "eg",
+          "q": "Cairo, EGY"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-venue_translations-0",
+      "notes": "venue with multiple translations should return default translation with no lang param",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "eg",
+          "q": "عمرو إبن العاص, cairo, egypt"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-venue_translations-1",
+      "notes": "venue with multiple translations should return english translation with lang param",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "eg",
+          "q": "عمرو إبن العاص, cairo, egypt"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-venue_translations-2",
+      "notes": "venue with multiple translations should return spanish translation with lang param",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "eg",
+          "q": "عمرو إبن العاص, cairo, egypt"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-venue_translations-3",
+      "notes": "venue with multiple translations should return arabic translation with lang param",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "eg",
+          "q": "عمرو إبن العاص, cairo, egypt"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}

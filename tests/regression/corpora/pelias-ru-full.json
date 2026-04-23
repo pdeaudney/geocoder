@@ -1,0 +1,71 @@
+{
+  "name": "pelias-ru-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Saint Petersburg City"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-9",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ru",
+          "q": "15 Фурштатская улица Saint Petersburg 191028"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Vladivostok"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_city_country-19",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "ru",
+          "q": "Vladivostok, russia"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}

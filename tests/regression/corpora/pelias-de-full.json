@@ -1,0 +1,599 @@
+{
+  "name": "pelias-de-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-admin_translations-22",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "Germa"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Berlin"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_postalcodes-14",
+      "notes": "postal code in Berlin, Germany",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "10437"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Berlin"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_postalcodes-15",
+      "notes": "postal code in Berlin, Germany",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "14059"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Wipfratal"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_postalcodes-16",
+      "notes": "postal code in Wipfratal, Germany",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "99310"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Wipfratal"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_postalcodes-17",
+      "notes": "postal code in Wipfratal, Germany",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "99310"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_street_centroids-2",
+      "notes": "road segement divided in the middle by a park",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "grolmanstr, berlin"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_street_fallback-1",
+      "notes": "text only query will only return street",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "grolmanstr, berlin"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Berlin"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-fallback-1",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "grolmanstraße 51, berlin"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Berlin"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-fallback-2",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "grolmanstraße, berlin"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Berlin"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-fallback-4",
+      "notes": "query for a nonexistent street in a city returns that city, rather than instances of that street in other cities",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "california avenue, berlin, germany"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Berlin"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-2",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "Clayallee 170 14191 Berlin"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Berlin"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_iso2_to_iso3-2",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "grolmanstraße 51, berlin, de"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Berlin"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_postalcodes-14",
+      "notes": "postal code in Berlin, Germany",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "10437"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Berlin"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_postalcodes-15",
+      "notes": "postal code in Berlin, Germany",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "14059"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Wipfratal"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_postalcodes-16",
+      "notes": "postal code in Wipfratal, Germany",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "99310"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Wipfratal"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_postalcodes-17",
+      "notes": "postal code in Wipfratal, Germany",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "99310"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_street_centroids-2",
+      "notes": "road segement divided in the middle by a park",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "grolmanstr, berlin"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_street_fallback-1",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "grolmanstraße, berlin, germany"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_countries-5",
+      "notes": "placeholder supports alpha3 and alpha2 country codes",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "DEU"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "North Rhine-Westphalia"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_localities-10",
+      "notes": "chosen for diacriticals + Münster Rebellion... YOLO!",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "de",
+          "q": "Münster, DE"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}

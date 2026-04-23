@@ -209,7 +209,17 @@ fn main() -> ExitCode {
 
         if let Some(filter) = args.filter_country.as_deref() {
             let filter_lc = filter.to_ascii_lowercase();
-            if expected_cc.as_deref() != Some(&filter_lc) {
+            if filter_lc == "none" {
+                // `--country none` means "cross-cutting cases only":
+                // entries whose expected country_a is missing or
+                // doesn't resolve to a known alpha-2. These test
+                // autocomplete mechanics, schema, admin-hierarchy
+                // behaviour independent of specific country data.
+                if expected_cc.is_some() {
+                    skipped += 1;
+                    continue;
+                }
+            } else if expected_cc.as_deref() != Some(&filter_lc) {
                 skipped += 1;
                 continue;
             }
@@ -301,23 +311,82 @@ fn main() -> ExitCode {
 }
 
 fn alpha3_to_alpha2(alpha3: &str) -> Option<String> {
-    // Minimal mapping — extend as more corpora come in. Covers the
-    // countries that Pelias acceptance-tests reference by country_a.
+    // ISO 3166-1 alpha-3 → alpha-2. Covers every country Pelias's
+    // acceptance-tests corpus refers to, plus every country we ship
+    // a server-side index for. Adding a new region usually means
+    // adding a line here, regenerating the corpora via
+    // `make pelias-full-refresh`, and rerunning the worldwide suite.
     let cc = match alpha3.to_ascii_uppercase().as_str() {
         "AUS" => "au",
-        "USA" => "us",
-        "CAN" => "ca",
-        "GBR" => "gb",
-        "NZL" => "nz",
-        "FRA" => "fr",
-        "DEU" => "de",
-        "NLD" => "nl",
-        "ESP" => "es",
-        "ITA" => "it",
+        "AUT" => "at",
+        "ARG" => "ar",
+        "BEL" => "be",
+        "BGR" => "bg",
         "BRA" => "br",
-        "JPN" => "jp",
+        "CAN" => "ca",
+        "CHE" => "ch",
+        "CHL" => "cl",
+        "CHN" => "cn",
+        "COL" => "co",
+        "CRI" => "cr",
+        "CZE" => "cz",
+        "DEU" => "de",
+        "DNK" => "dk",
+        "DOM" => "do",
+        "ECU" => "ec",
+        "EGY" => "eg",
+        "ESP" => "es",
+        "EST" => "ee",
+        "FIN" => "fi",
+        "FRA" => "fr",
+        "GBR" => "gb",
+        "GRC" => "gr",
+        "HKG" => "hk",
+        "HRV" => "hr",
+        "HUN" => "hu",
+        "IDN" => "id",
         "IND" => "in",
+        "IRL" => "ie",
+        "IRN" => "ir",
+        "ISL" => "is",
+        "ISR" => "il",
+        "ITA" => "it",
+        "JAM" => "jm",
+        "JPN" => "jp",
+        "KEN" => "ke",
+        "KOR" => "kr",
+        "LKA" => "lk",
+        "LTU" => "lt",
+        "LUX" => "lu",
+        "LVA" => "lv",
+        "MAR" => "ma",
         "MEX" => "mx",
+        "MYS" => "my",
+        "NGA" => "ng",
+        "NLD" => "nl",
+        "NOR" => "no",
+        "NZL" => "nz",
+        "PAK" => "pk",
+        "PER" => "pe",
+        "PHL" => "ph",
+        "POL" => "pl",
+        "PRT" => "pt",
+        "ROU" => "ro",
+        "RUS" => "ru",
+        "SAU" => "sa",
+        "SGP" => "sg",
+        "SVK" => "sk",
+        "SVN" => "si",
+        "SWE" => "se",
+        "THA" => "th",
+        "TUR" => "tr",
+        "TWN" => "tw",
+        "UKR" => "ua",
+        "URY" => "uy",
+        "USA" => "us",
+        "VEN" => "ve",
+        "VNM" => "vn",
+        "ZAF" => "za",
         _ => return None,
     };
     Some(cc.to_string())

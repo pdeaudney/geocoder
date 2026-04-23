@@ -1,0 +1,149 @@
+{
+  "name": "pelias-hu-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Budapest"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_alphanumeric_housenumber-1",
+      "notes": "hungarian address written the localized way",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "hu",
+          "q": "Eszék utca 14a budapest hungary"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Budapest"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_alphanumeric_housenumber-1.1",
+      "notes": "hungarian address written the 'American' way",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "hu",
+          "q": "14a Eszék utca budapest hungary"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_macroregions-1",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "hu",
+          "q": "Észak-Alföld"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_macroregions-4",
+      "notes": "seems to be a data issue, country is set to Europe",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "hu",
+          "q": "Dél-Dunántúl, HU"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_macroregions-6",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "hu",
+          "q": "Közép-Magyarország, Hungary"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}

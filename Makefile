@@ -50,15 +50,36 @@ regression-worldwide:
 
 # Refresh the pelias-*-full.json corpora from upstream Pelias data
 # (assumes `./scripts/fetch-test-data.sh` has already cloned them).
+# Iterates every alpha-2 our adapter can map from Pelias's
+# country_a column, plus emits a `pelias-global-full.json` for
+# cross-cutting cases that don't carry a country_a (autocomplete
+# mechanics, schema, wof hierarchy — independent of geography).
+# Empty outputs (countries with no cases in the Pelias corpus) are
+# skipped automatically so we don't commit dozens of placeholder
+# JSON files.
+PELIAS_COUNTRIES := au nz gb us ca fr de nl es it br jp in mx ar at be bg ch cl cn co cr cz dk do ec eg ee fi gr hk hr hu id ie il ir is jm ke kr lk lt lu lv ma my ng no pe ph pl pt ro ru sa sg sk si se th tr tw ua uy ve vn za
 pelias-full-refresh:
 	python3 scripts/merge-pelias-corpus.py \
 	    test-data/pelias-acceptance-tests/test_cases > /tmp/pelias-combined.json
-	@for cc in au nz gb us ca; do \
+	@for cc in $(PELIAS_COUNTRIES); do \
+	    out=tests/regression/corpora/pelias-$$cc-full.json; \
+	    tmp=$$(mktemp); \
 	    ./target/release/pelias-to-ours /tmp/pelias-combined.json \
 	        --country $$cc --name pelias-$$cc-full \
-	        > tests/regression/corpora/pelias-$$cc-full.json; \
+	        > $$tmp 2>/dev/null; \
+	    n=$$(python3 -c "import json,sys; print(len(json.load(open('$$tmp'))['cases']))" 2>/dev/null || echo 0); \
+	    if [ "$$n" -gt 0 ]; then \
+	        mv $$tmp $$out; \
+	        echo "  refreshed pelias-$$cc-full.json ($$n cases)"; \
+	    else \
+	        rm -f $$tmp $$out; \
+	    fi; \
 	done
-	@echo "refreshed pelias-{au,nz,gb,us,ca}-full.json"
+	@./target/release/pelias-to-ours /tmp/pelias-combined.json \
+	    --country none --name pelias-global-full \
+	    > tests/regression/corpora/pelias-global-full.json 2>/dev/null; \
+	n=$$(python3 -c "import json; print(len(json.load(open('tests/regression/corpora/pelias-global-full.json'))['cases']))"); \
+	echo "  refreshed pelias-global-full.json ($$n cross-cutting cases)"
 
 # Refresh the Pelias corpus from upstream (requires network + the
 # test-data clone).

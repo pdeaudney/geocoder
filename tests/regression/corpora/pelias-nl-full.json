@@ -1,0 +1,180 @@
+{
+  "name": "pelias-nl-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_postalcodes-10",
+      "notes": "postal code in Amsterdam, Netherlands",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "nl",
+          "q": "1011HB"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_postalcodes-10.1",
+      "notes": "postal code in Amsterdam, Netherlands with additional filters",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "nl",
+          "q": "1011HB"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Amsterdam"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_alphanumeric_housenumber-6",
+      "notes": "Dutch address in a building with housenumbers like 175A, 175B, 175C, etc. Without proper sorting the desired result can easily be drowned out",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "nl",
+          "q": "kinkerstraat 175F, amsterdam"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Amersfoort"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_alphanumeric_housenumber-7",
+      "notes": "Dutch address in a building with housenumbers like 175A, 175B, 175C, etc. Without proper sorting the desired result can easily be drowned out",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "nl",
+          "q": "Vanadiumweg 11C, Amersfoort"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.city",
+            "value": "Amersfoort"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_alphanumeric_housenumber-7.1",
+      "notes": "Expect the housenumber 11 (with no unit suffix) to appear before those with a unit suffix",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "nl",
+          "q": "Vanadiumweg 11, Amersfoort"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_countries-3",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "nl",
+          "q": "Netherlands"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}

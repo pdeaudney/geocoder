@@ -1,0 +1,71 @@
+{
+  "name": "pelias-in-full",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "defaults": {
+    "auth_key": "REGRESSION_TEST_TOKEN"
+  },
+  "cases": [
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "Telangana"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_neighbourhoods-4",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "in",
+          "q": "Gaddiannaram, India"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "kind": "json_path_min_count",
+            "min": 1,
+            "path": "results"
+          },
+          {
+            "kind": "json_path_contains_ci",
+            "path": "results.0.address.state",
+            "value": "Dadra and Nagar Haveli"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_regions-5",
+      "notes": "while it's a region, the region should be deduped with the county of the same name",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "in",
+          "q": "Dadra and Nagar Haveli, IN"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ]
+    }
+  ]
+}
