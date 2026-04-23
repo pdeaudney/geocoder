@@ -63,8 +63,6 @@ independent page caches per pod.
 
 ## Why not `ReadOnlyMany` over a shared EBS volume?
 
-The question people always ask first, answered in one table:
-
 | Option | Verdict | Why |
 |---|---|---|
 | gp3 `ReadOnlyMany` | ❌ impossible | EBS gp3/gp2 are single-attach at the block-device level. CSI can't expose them to multiple nodes. |
@@ -73,11 +71,11 @@ The question people always ask first, answered in one table:
 | Mountpoint-S3 (FUSE) | ❌ wrong tool | Streaming-read optimized, not mmap. FUSE page-cache semantics are driver-specific; cold path is slow. |
 | **Per-pod PVC from snapshot** | ✅ **recommended** | Native block device, full kernel page cache, AZ-isolated attachment, standard k8s StatefulSet pattern. Cost is just N × index-size × $0.08/GB/month. |
 
-The mmap insight: our server memory-maps the `.bin` files and
+Our server memory-maps the `.bin` files and
 counts on the kernel page cache to serve repeated reads. That
 caching is only free on local block storage. Any network-filesystem
 path adds serialisation, close-to-open consistency flushes, and
-inconsistent page-cache semantics — all invisible on a benchmark,
+inconsistent page-cache semantics. Those are all invisible on a benchmark,
 painful in production p99.
 
 ## Prerequisites
@@ -562,6 +560,234 @@ Usually overkill for this workload.
 | `VolumeSnapshot` stuck in `readyToUse: false` | EBS CSI driver is still taking the snapshot. Large volumes (> 100 GB) take 5–10 minutes. If > 30 minutes, check the driver's controller pod logs. |
 | Pods ready but queries return no country_code for a known country | Index was built without the WoF country fallback. Rebuild the worldwide index with `wof-importer` before FST; see [`worldwide-build.md`](worldwide-build.md). |
 | Inconsistent results across pods | Pods born from different snapshots. Force a StatefulSet rollout once the canonical `geocoder-index-current` snapshot is updated. |
+
+## ArgoCD-native deployment
+
+If your cluster is already GitOps-managed with ArgoCD, the pattern
+above maps cleanly but the **snapshot-name rotation** is the one
+piece that doesn't fit pure declarative sync. The rest (Service,
+Ingress, StatefulSet, StorageClass, VolumeSnapshotClass, HPA) is
+ordinary application manifests Argo tracks without fuss.
+
+### Repo layout
+
+Standard app-of-apps with the geocoder components split so sync
+order is obvious:
+
+```
+gitops-repo/
+├── apps/
+│   └── geocoder.yaml              # Argo Application pointing at manifests/
+└── manifests/geocoder/
+    ├── namespace.yaml
+    ├── storage.yaml               # StorageClass + VolumeSnapshotClass
+    ├── service.yaml
+    ├── ingress.yaml
+    ├── statefulset.yaml           # references snapshot via kustomize overlay
+    ├── hpa.yaml
+    ├── refresh-cronjob.yaml       # in-cluster snapshot refresh pipeline
+    └── kustomization.yaml
+```
+
+### The `Application` manifest
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: geocoder
+  namespace: argocd
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/my-org/gitops.git
+    path: manifests/geocoder
+    targetRevision: HEAD
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: geocoder
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true
+    - RespectIgnoreDifferences=true
+  # The snapshot's dataSource field is rotated by a CronJob (not git).
+  # Tell Argo to ignore drift there so selfHeal doesn't fight the
+  # refresh pipeline.
+  ignoreDifferences:
+  - group: apps
+    kind: StatefulSet
+    jqPathExpressions:
+    - '.spec.volumeClaimTemplates[0].spec.dataSource'
+    - '.spec.volumeClaimTemplates[0].spec.dataSourceRef'
+```
+
+`ignoreDifferences` is the key bit: the rotation pipeline
+mutates `spec.volumeClaimTemplates[0].spec.dataSource` outside of
+git, and without an ignore entry Argo's self-heal would
+continuously revert to the stale snapshot reference.
+
+### Sync waves for the refresh pipeline
+
+Three phases, coordinated with sync-wave annotations:
+
+```yaml
+# Wave 0 — VolumeSnapshotClass + StorageClass (pre-existing or first sync)
+annotations:
+  argocd.argoproj.io/sync-wave: "0"
+---
+# Wave 5 — the refresh CronJob itself.
+annotations:
+  argocd.argoproj.io/sync-wave: "5"
+---
+# Wave 10 — StatefulSet. Comes up only after the snapshot
+# named `geocoder-index-current` exists (either pre-bootstrapped
+# or produced by the first manual run of the refresh Job).
+annotations:
+  argocd.argoproj.io/sync-wave: "10"
+```
+
+For the very first rollout, seed `geocoder-index-current` manually
+(kubectl apply a VolumeSnapshot pointing at a one-off
+`geocoder-index-builder` PVC hydrated from S3), then let Argo
+take over.
+
+### Snapshot rotation — the one awkward bit
+
+Argo is declarative; snapshot rotation is imperative. Two
+patterns that play nicely with ArgoCD:
+
+**Pattern A: Argo Workflows for the refresh, Argo CD for the app.**
+Wire the in-cluster refresh pipeline as an Argo Workflow that:
+
+1. Provisions a builder PVC.
+2. Runs `aws s3 sync` against the upstream S3 prefix.
+3. Snapshots the PVC as `geocoder-index-YYYY-MM-DD`.
+4. Patches the live StatefulSet's `volumeClaimTemplates.dataSource.name`
+   to point at the new snapshot (via `kubectl patch`).
+5. Annotates the Argo Application with
+   `argocd.argoproj.io/refresh: hard` so Argo picks up the drift.
+
+A `CronWorkflow` runs this on a schedule (daily poll for S3
+changes, noop if the `SHA256SUMS` hash matches the last applied
+one). Requires Argo Workflows to be installed alongside Argo CD,
+but since most teams running Argo CD already want workflows for
+similar reasons this is usually a small addition.
+
+**Pattern B: ApplicationSet with a snapshot-name generator.**
+If you don't want Argo Workflows, use an ApplicationSet with a
+List or Plugin generator that reads the "current snapshot" from a
+ConfigMap maintained by the refresh Job:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: geocoder
+spec:
+  generators:
+  - plugin:
+      configMapRef:
+        name: geocoder-snapshot-plugin
+  template:
+    metadata:
+      name: geocoder-{{.region}}
+    spec:
+      source:
+        repoURL: https://github.com/my-org/gitops.git
+        path: manifests/geocoder
+        targetRevision: HEAD
+        kustomize:
+          patches:
+          - target:
+              kind: StatefulSet
+              name: geocoder
+            patch: |
+              - op: replace
+                path: /spec/volumeClaimTemplates/0/spec/dataSource/name
+                value: {{.snapshot_name}}
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: geocoder
+```
+
+The plugin is a tiny HTTP service in-cluster that the Job updates
+after each successful snapshot. When the plugin returns a new
+`snapshot_name`, ApplicationSet re-renders the Application and
+Argo sees a diff on the StatefulSet's `dataSource`, rolling the
+pods one at a time.
+
+Of the two, **pattern A (Argo Workflows) is the recommended
+flow** because it keeps the snapshot refresh and the application
+sync as separate controllers — you can fail, inspect, and retry
+the refresh independently of the serving pods. Pattern B is only
+worth it if you've committed to never running Argo Workflows.
+
+### Rolling over existing pods onto a new snapshot
+
+A subtle point on StatefulSet behaviour: changing
+`volumeClaimTemplates[0].dataSource` on a StatefulSet does **not**
+cause existing pods' PVCs to reprovision. The dataSource is only
+consulted when a PVC is created; existing PVCs are unaffected.
+
+To actually roll the fleet onto the new snapshot you need to
+delete each pod's PVC (which causes the StatefulSet controller
+to recreate it from the new dataSource on pod recreation). A
+one-pod-at-a-time script or an Argo Workflow step does this:
+
+```bash
+# Per-pod rollover, ordered, with a 60 s bake time between each.
+for i in $(seq 0 $((REPLICAS-1))); do
+    kubectl delete pvc index-geocoder-$i --wait=false
+    kubectl delete pod geocoder-$i --wait=true
+    kubectl rollout status statefulset/geocoder --timeout=5m
+    sleep 60
+done
+```
+
+Wrap that in an Argo Workflow step that runs after the new
+snapshot is ready, and you have the full refresh → snapshot →
+rolling-restart pipeline in one Workflow.
+
+### Image tag updates (ArgoCD Image Updater)
+
+Separate from the snapshot pipeline: the `query-server` container
+image is updated via ordinary CI and [Argo CD Image Updater](https://argocd-image-updater.readthedocs.io/)
+works out of the box. Annotation pattern:
+
+```yaml
+metadata:
+  annotations:
+    argocd-image-updater.argoproj.io/image-list: geocoder=ghcr.io/pdeaudney/geocoder
+    argocd-image-updater.argoproj.io/geocoder.update-strategy: semver
+    argocd-image-updater.argoproj.io/write-back-method: git
+```
+
+Image updater writes the new tag back to git; ordinary Argo CD
+sync picks it up; StatefulSet does a rolling pod replacement
+(existing PVCs carry over — no snapshot churn, just the binary
+updates). This is the cheap path for most releases; the
+snapshot pipeline only fires when the underlying data changes.
+
+### Rollback
+
+Two planes, two rollback flows:
+
+- **Binary-only rollback** (bad release of `query-server`):
+  `git revert` the image-updater commit; Argo reconciles; pods
+  roll onto the previous image using the same PVCs.
+- **Data rollback** (new index introduced bad geocodes): point
+  `geocoder-index-current` at a prior timestamped snapshot via
+  `kubectl patch` (or a `rollback` Argo Workflow that takes the
+  target snapshot name as a parameter); run the per-pod rollover
+  script. We keep `deletionPolicy: Retain` on the
+  VolumeSnapshotClass specifically to support this — rolling back
+  a month of index drift is a one-command operation.
 
 ## What's NOT covered here
 
