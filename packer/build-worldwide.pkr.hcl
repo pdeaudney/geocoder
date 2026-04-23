@@ -79,17 +79,16 @@ variable "wof_scope" {
   description = "Whose on First admin scope. `planet` fetches the single ~8.6 GB combined SQLite. Otherwise treated as a space-separated list of ISO 3166-1 alpha-2 codes (e.g. `au nz gb`) and per-country SQLite files are fetched instead."
 }
 
-variable "openaddresses_api_token" {
-  type        = string
-  default     = ""
-  description = "OpenAddresses API bearer token. When set, the build fetches per-source cache.zip artifacts via scripts/fetch-openaddresses.sh and runs build-openaddresses-index. Free token from https://batch.openaddresses.io/. Leave empty to skip OA; OSM + WoF still give full country-level coverage worldwide."
-  sensitive   = true
+variable "openaddresses_enabled" {
+  type        = bool
+  default     = true
+  description = "Whether to fetch + index OpenAddresses data. Uses the build instance's IAM role (no additional token needed) to read from s3://v2.openaddresses.io/ which is Requester-Pays. Egress costs ~$1-6 for the global scope depending on region. Set to false to skip OA entirely."
 }
 
 variable "openaddresses_sources" {
   type        = string
   default     = "all"
-  description = "Space-separated list of OA source prefixes (typically ISO 3166-1 alpha-2 codes like 'au gb us'), or 'all' for the full global collection (~66 GB + S3 egress costs). Ignored when openaddresses_api_token is empty."
+  description = "Space-separated list of OA source prefixes (typically ISO 3166-1 alpha-2 codes like 'au gb us'), or 'all' for the full global collection (~66 GB, ~$1-6 egress). Ignored when openaddresses_enabled is false."
 }
 
 variable "gnaf_archive_url" {
@@ -250,7 +249,7 @@ build {
       "WOF_SCOPE=${var.wof_scope}",
       "MAXMIND_LICENSE_KEY=${var.maxmind_license_key}",
       "GNAF_ARCHIVE_URL=${var.gnaf_archive_url}",
-      "OPENADDRESSES_API_TOKEN=${var.openaddresses_api_token}",
+      "OPENADDRESSES_ENABLED=${var.openaddresses_enabled}",
       "OPENADDRESSES_SOURCES=${var.openaddresses_sources}",
     ]
     inline = [
@@ -268,10 +267,13 @@ build {
       "else",
       "    WOF_COUNTRIES=\"$WOF_SCOPE\" ./scripts/fetch-test-data.sh --all-corpora",
       "fi",
-      // OpenAddresses — gated behind user's API token. Skips cleanly
-      // when the token is empty (the common case for first builds).
-      "OPENADDRESSES_API_TOKEN=\"$OPENADDRESSES_API_TOKEN\" OA_SOURCES=\"$OPENADDRESSES_SOURCES\" \\",
-      "    OA_OUTPUT_DIR=./data/openaddresses ./scripts/fetch-openaddresses.sh",
+      // OpenAddresses — uses the build instance's IAM role to read
+      // from s3://v2.openaddresses.io/ (Requester-Pays). No extra
+      // tokens or signup steps needed; we're already on EC2.
+      "if [ \"$OPENADDRESSES_ENABLED\" = \"true\" ]; then",
+      "    OA_SOURCES=\"$OPENADDRESSES_SOURCES\" OA_OUTPUT_DIR=./data/openaddresses \\",
+      "        ./scripts/fetch-openaddresses.sh",
+      "fi",
       "touch /tmp/fetch-complete",
     ]
   }
@@ -283,7 +285,6 @@ build {
     environment_vars = [
       "OSM_REGION=${var.osm_region}",
       "GNAF_ARCHIVE_URL=${var.gnaf_archive_url}",
-      "OPENADDRESSES_API_TOKEN=${var.openaddresses_api_token}",
     ]
     inline = [
       "set -e",
