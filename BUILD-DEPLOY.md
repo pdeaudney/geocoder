@@ -5,6 +5,11 @@ internal load balancer. This doc focuses on the AWS-specific pieces;
 for architecture, see [`ARCHITECTURE.md`](ARCHITECTURE.md). For the
 AMI builder specifically, see [`packer/README.md`](packer/README.md).
 
+**Already running Kubernetes?** See
+[`docs/kubernetes-deployment.md`](docs/kubernetes-deployment.md) for
+the EBS-snapshot-per-pod pattern that slots into existing EKS / GKE
+infrastructure without running an AMI pipeline.
+
 ## Architecture at a glance
 
 ```
