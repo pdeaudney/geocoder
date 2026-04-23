@@ -1,4 +1,4 @@
-.PHONY: help ami ami-init ami-validate regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-worldwide pelias-refresh pelias-full-refresh bench inspect-dump wof-import test
+.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-worldwide pelias-refresh pelias-full-refresh bench inspect-dump wof-import test
 
 help:
 	@echo "Regression / testing:"
@@ -18,7 +18,8 @@ help:
 	@echo "AMI builds:"
 	@echo "  ami-init              Install Packer plugins (run once)"
 	@echo "  ami-validate          Validate the Packer config without building"
-	@echo "  ami                   Build the AMI (requires PKRVARS=path/to/vars.hcl)"
+	@echo "  ami                   Build the serving AMI (requires PKRVARS=path/to/vars.hcl)"
+	@echo "  ami-worldwide-build   Build the worldwide index on EC2 r8g.16xlarge (~18-24h, ~$$30-80)"
 
 test:
 	cargo test
@@ -100,3 +101,13 @@ ami-validate:
 ami:
 	@if [ -z "$(PKRVARS)" ]; then echo "Set PKRVARS=path/to/your.pkrvars.hcl" >&2; exit 2; fi
 	cd packer && packer build -var-file=$(abspath $(PKRVARS)) geocoder.pkr.hcl
+
+# One-shot worldwide-index build on EC2. Launches r8g.16xlarge
+# (Graviton 4, 512 GB RAM), downloads planet PBF + planet WoF admin,
+# runs the full build pipeline, uploads the resulting index files to
+# S3, terminates. Expect ~18–24 h wall-time, ~$30–80 in compute.
+# Required: PKRVARS pointing at a worldwide.pkrvars.hcl with
+# output_s3_prefix + build_instance_profile set.
+ami-worldwide-build:
+	@if [ -z "$(PKRVARS)" ]; then echo "Set PKRVARS=path/to/your.pkrvars.hcl" >&2; exit 2; fi
+	cd packer && packer build -var-file=$(abspath $(PKRVARS)) build-worldwide.pkr.hcl

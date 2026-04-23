@@ -1,6 +1,39 @@
 # AMI builder
 
-Build an immutable Ubuntu 24.04 LTS AMI pre-loaded with the geocoder
+Two Packer configs, deliberately split:
+
+- **`geocoder.pkr.hcl`** — the **serving AMI**. Assembles a ready-to-run
+  Ubuntu 24.04 image: copies a pre-built `query-server` binary from
+  S3, syncs an existing index from S3, installs the systemd unit.
+  Fast (~5 min bake), tiny blast radius on failure. This is what you
+  use for every normal deploy.
+
+- **`build-worldwide.pkr.hcl`** — a **one-shot index build job** that
+  runs on a large-memory Graviton 4 instance (`r8g.16xlarge`, 512 GB
+  RAM, 64 vCPU), downloads the planet OSM + planet WoF admin data,
+  runs the full build pipeline (reverse index → forward index → FST
+  → WoF fallback → optional G-NAF / OpenAddresses), and uploads the
+  resulting `.bin` files to S3 under a timestamped prefix. Slow
+  (~18–24 h wall-time) and expensive (~$30–80 per build). Run this
+  when the index needs refreshing — not on every deploy.
+
+The two configs share no state: the worldwide-build AMI's output
+lives in S3, and the serving AMI pulls from that same S3 prefix.
+You can rebuild the serving AMI ten times a day against the same
+S3 index; you only rebuild the index itself when OSM data has
+meaningfully changed.
+
+**Binary compatibility**: the `.bin` files produced by the worldwide
+build are fully portable between x86_64 and aarch64 serving hosts
+(all are little-endian; our struct layouts are `#[repr(C)]` with no
+`usize`/`isize`). You can build on `r8g.16xlarge` and serve from
+`c6i.large` or `r7g.medium` without any repackaging. See
+[`docs/binary-format.md`](../docs/binary-format.md) for the on-disk
+format reference.
+
+## Serving AMI (normal deploys)
+
+Builds an immutable Ubuntu 24.04 LTS AMI pre-loaded with the geocoder
 binary and its mmap-backed index files. Single-region build,
 copied to N additional regions via `ami_regions`.
 
@@ -86,6 +119,39 @@ To override the bind address post-deploy without rebuilding the AMI:
 sudo sed -i 's|^BIND_ADDR=.*|BIND_ADDR=0.0.0.0:8080|' /etc/default/geocoder
 sudo systemctl restart geocoder
 ```
+
+## Worldwide index build job
+
+```bash
+cd packer
+cp worldwide.pkrvars.example.hcl worldwide.pkrvars.hcl
+# edit worldwide.pkrvars.hcl — bucket prefix, IAM profile, region
+make -C .. ami-worldwide-build PKRVARS=packer/worldwide.pkrvars.hcl
+```
+
+What happens:
+
+1. Packer launches an `r8g.16xlarge` (or whatever `instance_type`
+   you set) with a 1 TB gp3 root EBS.
+2. Stage-by-stage provisioners install toolchain, clone the repo,
+   build the C++ + Rust binaries, fetch the planet PBF (~75 GB) +
+   planet WoF admin (~8.6 GB bz2), and run the full build
+   pipeline.
+3. The resulting `data/index-worldwide/` directory is uploaded to
+   S3 under `${output_s3_prefix}${timestamp}/` plus a
+   `${output_s3_prefix}latest/` alias.
+4. SHA-256 checksums are emitted as `SHA256SUMS` in the uploaded
+   tree so serving-side sync can verify integrity.
+5. The AMI is snapshotted for audit and the build instance
+   terminates.
+
+The IAM instance profile needs `s3:PutObject` (and `s3:DeleteObject`
+if you want the `latest/` alias to replace old files cleanly) on
+`${output_s3_prefix}*`, plus `s3:ListBucket` on the parent bucket.
+
+After the worldwide build lands, run the serving AMI build pointed
+at the fresh S3 prefix (typical flow: weekly or monthly worldwide
+rebuild → dozens of serving AMIs per week from the same S3 index).
 
 ## Updating the index
 
