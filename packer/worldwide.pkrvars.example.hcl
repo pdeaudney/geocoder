@@ -34,7 +34,8 @@ wof_scope  = "planet"
 // Optional license-gated sources. Leave unset to skip.
 // gnaf_archive_url    = "https://data.gov.au/data/dataset/.../FILE.zip"
 // maxmind_license_key = "XXXXXXXXXXXXX"
-openaddresses_enabled = false  // not wired yet; flip once the fetch script lands
+// openaddresses_api_token = "xxxx"          // Bearer token from batch.openaddresses.io (free signup). Leave empty to skip OA (OSM + WoF still give full country-level coverage worldwide).
+// openaddresses_sources = "all"               // or "au gb us fr de" for a narrower subset. Ignored when token is empty.
 
 // Hardware.
 instance_type  = "r8g.16xlarge"   // Graviton 4: 64 vCPU / 512 GB
