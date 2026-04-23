@@ -237,21 +237,25 @@ build {
   provisioner "shell" {
     inline = [
       "set -e",
-      // Find NVMe devices that are NOT the root EBS volume. The root
-      // is the one currently mounted at /. Instance-store devices
-      // expose as nvme1n1, nvme2n1, ... and are freshly zeroed on
-      // every boot so formatting is always safe.
-      "ROOT_DEV=$(findmnt -n -o SOURCE / | sed 's|/dev/||; s|p[0-9]*$||')",
-      "EPHEMERAL_DEVS=$(lsblk -nd -o NAME | grep '^nvme' | grep -v \"^$ROOT_DEV$\" | head -4)",
+      // Detect ephemeral NVMe by model string rather than "not the
+      // root". On AWS Nitro both EBS and instance-store volumes
+      // appear as /dev/nvme*, but only instance-store reports
+      // `Amazon EC2 NVMe Instance Storage` in the model field. This
+      // correctly picks up ALL ephemeral drives regardless of count
+      // (r8gd.16xlarge has 2 × 1.9 TB, r8gd.24xlarge has 4 × 1.4 TB,
+      // r8gd.48xlarge has 8 × 1.7 TB, etc.) and ignores any extra
+      // EBS volumes the user might have attached.
+      "EPHEMERAL_DEVS=$(lsblk -dnr -o NAME,MODEL | awk '/Amazon EC2 NVMe Instance Storage/ {print $1}')",
       "if [ -n \"$EPHEMERAL_DEVS\" ]; then",
-      "    echo 'detected NVMe instance store:' $EPHEMERAL_DEVS",
-      "    # Striped LVM across whatever ephemeral devices we find.",
-      "    # For r8gd.16xlarge that's 2 x 1.9 TB = 3.8 TB usable.",
+      "    NPV=$(echo \"$EPHEMERAL_DEVS\" | wc -l | tr -d ' ')",
+      "    echo \"detected $NPV ephemeral NVMe device(s):\" $EPHEMERAL_DEVS",
       "    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends lvm2",
       "    for d in $EPHEMERAL_DEVS; do sudo pvcreate -y -ff /dev/$d; done",
       "    sudo vgcreate scratch $(echo \"$EPHEMERAL_DEVS\" | sed 's|^|/dev/|g' | tr '\\n' ' ')",
-      "    # -i N stripes across N PVs for aggregate bandwidth.",
-      "    NPV=$(echo \"$EPHEMERAL_DEVS\" | wc -l | tr -d ' ')",
+      // -i N stripes across every PV for aggregate bandwidth; with
+      // 8 × ~25 Gbps NVMe drives on r8gd.48xlarge this keeps the
+      // builder fed at ~200 Gbps sustained which swamps any
+      // realistic downstream bottleneck.
       "    sudo lvcreate -l 100%FREE -n build -i \"$NPV\" scratch || sudo lvcreate -l 100%FREE -n build scratch",
       "    sudo mkfs.ext4 -F -E nodiscard /dev/scratch/build",
       "    sudo mkdir -p /mnt/nvme",
