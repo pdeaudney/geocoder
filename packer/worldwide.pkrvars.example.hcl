@@ -43,6 +43,12 @@ wof_scope  = "planet"
 // openaddresses_sources = "all"     // or "au gb us fr de" for a narrower subset. Ignored when openaddresses_enabled is false.
 
 // Hardware.
-instance_type  = "r8g.16xlarge"   // Graviton 4: 64 vCPU / 512 GB
+// Default is r8gd.16xlarge — Graviton 4 with 3.8 TB local NVMe.
+// NVMe eats the EBS I/O bottleneck we hit during the 5-country
+// profiling run (node_locations.tmp churn). If your region /
+// account doesn't have r8gd capacity, r8g.16xlarge falls back to
+// EBS-only and takes roughly 2x as long — bump volume_size_gb to
+// 1024 if you use the r8g fallback.
+instance_type  = "r8gd.16xlarge"
 architecture   = "arm64"
-volume_size_gb = 1024
+volume_size_gb = 200

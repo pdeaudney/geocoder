@@ -9,13 +9,19 @@ Two Packer configs, deliberately split:
   use for every normal deploy.
 
 - **`build-worldwide.pkr.hcl`** — a **one-shot index build job** that
-  runs on a large-memory Graviton 4 instance (`r8g.16xlarge`, 512 GB
-  RAM, 64 vCPU), downloads the planet OSM + planet WoF admin data,
-  runs the full build pipeline (reverse index → forward index → FST
-  → WoF fallback → optional G-NAF / OpenAddresses), and uploads the
+  runs on a large-memory Graviton 4 instance with local NVMe
+  (`r8gd.16xlarge` by default — 512 GB RAM, 64 vCPU, 3.8 TB NVMe),
+  downloads the planet OSM + planet WoF admin data, runs the full
+  build pipeline (reverse index → forward index → FST → WoF
+  fallback → optional G-NAF / OpenAddresses), and uploads the
   resulting `.bin` files to S3 under a timestamped prefix. Slow
-  (~18–24 h wall-time) and expensive (~$30–80 per build). Run this
-  when the index needs refreshing — not on every deploy.
+  (~10–12 h on r8gd; ~18–24 h on the r8g fallback) and expensive
+  (~$30–80 per build). Run this when the index needs refreshing —
+  not on every deploy. The `d` suffix matters: profiling the
+  5-country build showed 30–40 % of wall-time in EBS I/O wait
+  while osmium's node-location cache churned. Local NVMe
+  eliminates that wall; plain `r8g` (no NVMe) falls back to
+  EBS-only and runs about 2× slower.
 
 The two configs share no state: the worldwide-build AMI's output
 lives in S3, and the serving AMI pulls from that same S3 prefix.

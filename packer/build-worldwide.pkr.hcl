@@ -1,12 +1,19 @@
 // Packer config: one-shot EC2 job that builds the worldwide geocoder
 // index from source and uploads the resulting .bin files to S3.
 //
-// The instance is a large-memory Graviton box because libosmium's
-// single-threaded handler is the bottleneck and the planet build
-// needs ~256 GB RAM peak (we profiled 15 GB RSS + 23 GB file-backed
-// node cache for a 20 GB 5-country PBF set; planet is 75 GB, scales
-// super-linearly from there — see docs/research/libosmium-parallelisation.md
-// for why we can't just add more build threads).
+// The instance is a large-memory Graviton-4 box with local NVMe:
+//
+// - RAM (>= 256 GB): libosmium's single-threaded handler is the
+//   CPU-side bottleneck (see docs/research/libosmium-parallelisation.md),
+//   but holding the full in-memory accumulators for planet-scale OSM
+//   needs real memory. We profiled 15 GB RSS + 23 GB file-backed
+//   node cache for a 20 GB 5-country PBF set; planet is ~75 GB and
+//   scales super-linearly from there.
+// - Local NVMe: we profiled the 5-country build spending 30–40 %
+//   of wall-time in I/O wait while the osmium node-location cache
+//   churned on EBS gp3. Putting that cache on ephemeral NVMe
+//   (`r8gd` variant has 3.8 TB of it) cuts build wall-time roughly
+//   in half. The default instance_type reflects this.
 //
 // Index files are `#[repr(C)]` structs with no usize/isize and
 // native-endian primitives; since all modern EC2 instances (Graviton
@@ -109,8 +116,8 @@ variable "maxmind_license_key" {
 
 variable "instance_type" {
   type        = string
-  default     = "r8g.16xlarge"
-  description = "Build instance type. Defaults to Graviton 4 r8g.16xlarge: 64 vCPU / 512 GB RAM / aarch64. The RAM headroom matters more than CPU count because libosmium serializes handler dispatch. r7g.16xlarge works too and is slightly cheaper."
+  default     = "r8gd.16xlarge"
+  description = "Build instance type. Defaults to Graviton 4 r8gd.16xlarge: 64 vCPU / 512 GB RAM / 3.8 TB local NVMe / aarch64. The `d` (disk) variant matters more than the CPU tier here: profiling showed the 5-country build spending significant time in I/O wait while osmium's node-location cache churned on EBS; putting the cache on local NVMe cuts wall-time roughly in half. If your account/region doesn't have r8gd capacity, r8g.16xlarge works (slower) — the first provisioner will detect the missing NVMe and fall back to EBS-only."
 }
 
 variable "architecture" {
@@ -125,8 +132,8 @@ variable "architecture" {
 
 variable "volume_size_gb" {
   type        = number
-  default     = 1024
-  description = "Root EBS size. Planet build: ~75 GB PBF + ~1.7 TB transient osmium node cache + ~200 GB final index. 1 TB gp3 is the sane minimum; bump to 2 TB if you're doing planet + WoF + OA + G-NAF concurrently."
+  default     = 200
+  description = "Root EBS size. Only needs to fit the OS (~6 GB) + toolchain install (~5 GB) + some headroom for apt caches etc. All build scratch (PBF, node_locations.tmp, index output) goes on local NVMe when available — see the r8gd.* default. When NVMe isn't available (e.g. r8g.* fallback), bump this to 1024 so the build still fits."
 }
 
 // --- AMI metadata ---
@@ -220,8 +227,49 @@ build {
     ]
   }
 
+  // Stage 1b: mount local NVMe instance-store volumes at /mnt/nvme
+  // and stage the whole build tree there. On r8gd.16xlarge this is
+  // 3.8 TB of local NVMe — far faster than EBS gp3 and removes the
+  // node_locations.tmp I/O wall we observed on the 5-country build.
+  // When no instance-store device is present (e.g. plain r8g without
+  // the `d` suffix), we symlink /mnt/nvme → $HOME as a graceful
+  // fallback so subsequent stages don't need to know the difference.
+  provisioner "shell" {
+    inline = [
+      "set -e",
+      // Find NVMe devices that are NOT the root EBS volume. The root
+      // is the one currently mounted at /. Instance-store devices
+      // expose as nvme1n1, nvme2n1, ... and are freshly zeroed on
+      // every boot so formatting is always safe.
+      "ROOT_DEV=$(findmnt -n -o SOURCE / | sed 's|/dev/||; s|p[0-9]*$||')",
+      "EPHEMERAL_DEVS=$(lsblk -nd -o NAME | grep '^nvme' | grep -v \"^$ROOT_DEV$\" | head -4)",
+      "if [ -n \"$EPHEMERAL_DEVS\" ]; then",
+      "    echo 'detected NVMe instance store:' $EPHEMERAL_DEVS",
+      "    # Striped LVM across whatever ephemeral devices we find.",
+      "    # For r8gd.16xlarge that's 2 x 1.9 TB = 3.8 TB usable.",
+      "    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends lvm2",
+      "    for d in $EPHEMERAL_DEVS; do sudo pvcreate -y -ff /dev/$d; done",
+      "    sudo vgcreate scratch $(echo \"$EPHEMERAL_DEVS\" | sed 's|^|/dev/|g' | tr '\\n' ' ')",
+      "    # -i N stripes across N PVs for aggregate bandwidth.",
+      "    NPV=$(echo \"$EPHEMERAL_DEVS\" | wc -l | tr -d ' ')",
+      "    sudo lvcreate -l 100%FREE -n build -i \"$NPV\" scratch || sudo lvcreate -l 100%FREE -n build scratch",
+      "    sudo mkfs.ext4 -F -E nodiscard /dev/scratch/build",
+      "    sudo mkdir -p /mnt/nvme",
+      "    sudo mount -o noatime,nodiratime /dev/scratch/build /mnt/nvme",
+      "    sudo chown ubuntu:ubuntu /mnt/nvme",
+      "    df -h /mnt/nvme",
+      "else",
+      "    echo 'no ephemeral NVMe — falling back to EBS (slower; consider r8gd.*)'",
+      "    mkdir -p $HOME/nvme-fallback",
+      "    sudo ln -sfn $HOME/nvme-fallback /mnt/nvme",
+      "fi",
+    ]
+  }
+
   // Stage 2: clone + build. Build takes ~10 min; failures here are
   // cheap compared to waiting 15 hr before noticing a compile error.
+  // Cloned onto /mnt/nvme so the subsequent data fetch + build stages
+  // read/write fast local storage by default.
   provisioner "shell" {
     environment_vars = [
       "GIT_REPO=${var.git_repo_url}",
@@ -229,13 +277,14 @@ build {
     ]
     inline = [
       "set -e",
-      "cd $HOME",
+      "cd /mnt/nvme",
       "git clone --depth 1 --branch $GIT_REF $GIT_REPO geocoder",
       "cd geocoder",
       "mkdir -p build",
       "cd build && cmake ../builder && make -j$(nproc)",
       "cd ..",
       "source $HOME/.cargo/env",
+      // Build artifacts (~GB of cargo target/) also land on the NVMe.
       "cargo build --release -p query-server --bin build-forward-index --bin build-autocomplete-fst --bin build-gnaf-index --bin build-postcode-lookup --bin build-openaddresses-index",
       "cargo build --release -p wof-importer",
     ]
@@ -254,7 +303,7 @@ build {
     ]
     inline = [
       "set -e",
-      "cd $HOME/geocoder",
+      "cd /mnt/nvme/geocoder",
       "mkdir -p data/pbf test-data",
       "./scripts/download-region.sh $OSM_REGION ./data/pbf",
       // WoF: planet uses the single combined admin file; otherwise
@@ -288,7 +337,7 @@ build {
     ]
     inline = [
       "set -e",
-      "cd $HOME/geocoder",
+      "cd /mnt/nvme/geocoder",
       "mkdir -p data/index-worldwide",
       // Reverse index. Using all available PBFs in ./data/pbf/.
       "echo '=== build-index (reverse) ==='",
@@ -341,7 +390,7 @@ build {
     ]
     inline = [
       "set -e",
-      "cd $HOME/geocoder",
+      "cd /mnt/nvme/geocoder",
       "echo '=== computing checksums ==='",
       "(cd data/index-worldwide && find . -type f -not -name SHA256SUMS | sort | xargs shasum -a 256) > data/index-worldwide/SHA256SUMS",
       "echo '=== uploading to s3 ==='",
@@ -360,8 +409,13 @@ build {
   // uses `packer/geocoder.pkr.hcl`).
   provisioner "shell" {
     inline = [
-      "sudo rm -rf /home/ubuntu/geocoder/data/pbf",
-      "sudo rm -rf /home/ubuntu/geocoder/test-data",
+      // The build tree lives on /mnt/nvme which is ephemeral and
+      // evaporates on instance termination anyway — but we still
+      // drop heavy dirs before snapshot so the resulting AMI
+      // doesn't snapshot stale caches if anything happened to
+      // be on the EBS root.
+      "sudo rm -rf /mnt/nvme/geocoder/data/pbf",
+      "sudo rm -rf /mnt/nvme/geocoder/test-data",
       "sudo apt-get clean",
       "sudo rm -rf /var/lib/apt/lists/*",
       "sudo fstrim -av || true",
