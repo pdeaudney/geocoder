@@ -75,8 +75,11 @@ Fix paths (future work, not blocking):
 ## How to reproduce
 
 ```bash
-# 1. Once: download WoF per-country SQLite files.
-WOF_COUNTRIES="au nz gb ca us" ./scripts/fetch-test-data.sh
+# 1. Once: download the whole-planet WoF admin SQLite (~8.6 GB bz2).
+#    WOF_COUNTRIES defaults to "planet" — covers every country
+#    globally. Override only if you deliberately want a narrow
+#    dev subset (e.g. WOF_COUNTRIES="au gb us").
+./scripts/fetch-test-data.sh
 
 # 2. Import country polygons into an existing combined index.
 make wof-import WOF_INDEX_DIR=./data/index-worldwide
@@ -90,8 +93,9 @@ make wof-import WOF_INDEX_DIR=./data/index-worldwide
 make regression-worldwide
 ```
 
-End-to-end adds ~15 min on top of a pre-existing worldwide build
-(import: <3 s; forward rebuild: ~4 min; FST rebuild: ~4 min).
+End-to-end adds ~20 min on top of a pre-existing worldwide build
+(planet WoF download ~10 min on typical broadband; import <30 s;
+forward rebuild ~4 min; FST rebuild ~4 min).
 
 ## What went into making it fast
 

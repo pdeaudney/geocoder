@@ -178,10 +178,12 @@ filtering in tantivy misfiring.
 Fix (adopted from Pelias, scoped to country level only):
 
 ```bash
-# 1. Fetch per-country WoF admin SQLite files (one per country, ~175–840 MB
-#    bz2 each). scripts/fetch-test-data.sh handles the download + bzip2
-#    decompression and places the .db files under test-data/.
-WOF_COUNTRIES="au nz gb ca us" ./scripts/fetch-test-data.sh
+# 1. Fetch the whole-planet WoF admin SQLite. ~8.6 GB bz2 → ~30 GB
+#    uncompressed, covers every country in WoF (Eurasia, Africa,
+#    Americas, Oceania, all polities). `planet` is the default
+#    scope; set WOF_COUNTRIES="au gb us" only if you deliberately
+#    want a narrow dev set.
+./scripts/fetch-test-data.sh
 
 # 2. Import country polygons into the index dir. Produces
 #    wof_countries.bin + wof_countries_vertices.bin + wof_countries_strings.bin.
@@ -190,13 +192,13 @@ make wof-import WOF_INDEX_DIR=./data/index-worldwide
 ./target/release/wof-importer ./test-data ./data/index-worldwide
 ```
 
-The importer pulls only `placetype='country'` rows from WoF, so the
-on-disk footprint is small (~8 MB of vertex data for 5 countries;
-~30 MB for all ~250 countries worldwide). At query time
-`find_admin` first consults the OSM admin hierarchy; when that
-returns no `country_code` the WoF polygons are scanned. That lookup
-adds microseconds on the happy path (OSM already has cc packed) and
-~50 µs on the fallback.
+The importer pulls only `placetype='country'` rows from WoF. After
+Douglas-Peucker simplification, the on-disk footprint is ~30 MB for
+every country globally. At query time `find_admin` first consults
+the OSM admin hierarchy; when that returns no `country_code` the
+WoF polygons are scanned (pre-computed sorted bboxes make this
+~5–10 µs on a miss). Happy path — coords inside an OSM-indexed
+country — incurs zero extra cost.
 
 This is best done **before** rebuilding the forward + autocomplete
 indexes, because both read the country_code through `find_admin` at

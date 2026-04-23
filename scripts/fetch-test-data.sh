@@ -86,29 +86,54 @@ fi
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# Who's on First per-country admin SQLite — country-level fallback polygons
-# used when Geofabrik extracts miss their own `admin_level=2` relation
-# (the common case for great-britain and us). Downloads are ~175–840 MB
-# compressed per country; skip with --no-wof if you're offline or don't
-# need the fallback.
+# Who's on First admin SQLite — country-level fallback polygons used when
+# Geofabrik extracts miss their own `admin_level=2` relation (common for
+# great-britain and us).
+#
+# WOF_COUNTRIES env var selects scope:
+#   - "planet" (default): fetch the single combined admin SQLite (~8.6 GB
+#     bz2) covering every country in WoF. Recommended for worldwide
+#     deployments — Eurasia, Africa, Americas, Oceania, every polity.
+#   - "none": skip WoF entirely.
+#   - space-separated list of ISO 3166-1 alpha-2 codes (e.g. "au gb us"):
+#     fetch per-country SQLite files only. Useful for narrow dev setups
+#     where a ~200 MB-per-country download is cheaper than pulling the
+#     whole planet.
 # -----------------------------------------------------------------------------
 
-WOF_COUNTRIES="${WOF_COUNTRIES:-au nz gb ca us}"
-if [ "$WOF_COUNTRIES" != "none" ]; then
-    for cc in $WOF_COUNTRIES; do
-        db="$TEST_DATA_DIR/whosonfirst-data-admin-${cc}-latest.db"
-        if [ -f "$db" ]; then
-            continue
+WOF_COUNTRIES="${WOF_COUNTRIES:-planet}"
+case "$WOF_COUNTRIES" in
+    planet)
+        db="$TEST_DATA_DIR/whosonfirst-data-admin-planet-latest.db"
+        if [ ! -f "$db" ]; then
+            echo "==> fetching whole-planet WoF admin SQLite (~8.6 GB bz2)"
+            tmp_bz2="$TEST_DATA_DIR/.wof-planet.db.bz2"
+            curl -fSL -o "$tmp_bz2" \
+                "https://data.geocode.earth/wof/dist/sqlite/whosonfirst-data-admin-latest.db.bz2"
+            bzip2 -d "$tmp_bz2"
+            mv "${tmp_bz2%.bz2}" "$db"
+            echo "    wrote $db ($(du -h "$db" | cut -f1))"
         fi
-        echo "==> fetching WoF admin SQLite for $cc"
-        tmp_bz2="$TEST_DATA_DIR/.wof-${cc}.db.bz2"
-        curl -fsSL -o "$tmp_bz2" \
-            "https://data.geocode.earth/wof/dist/sqlite/whosonfirst-data-admin-${cc}-latest.db.bz2"
-        bzip2 -d "$tmp_bz2"
-        mv "${tmp_bz2%.bz2}" "$db"
-        echo "    wrote $db ($(du -h "$db" | cut -f1))"
-    done
-fi
+        ;;
+    none)
+        echo "==> skipping WoF (WOF_COUNTRIES=none)"
+        ;;
+    *)
+        for cc in $WOF_COUNTRIES; do
+            db="$TEST_DATA_DIR/whosonfirst-data-admin-${cc}-latest.db"
+            if [ -f "$db" ]; then
+                continue
+            fi
+            echo "==> fetching WoF admin SQLite for $cc"
+            tmp_bz2="$TEST_DATA_DIR/.wof-${cc}.db.bz2"
+            curl -fsSL -o "$tmp_bz2" \
+                "https://data.geocode.earth/wof/dist/sqlite/whosonfirst-data-admin-${cc}-latest.db.bz2"
+            bzip2 -d "$tmp_bz2"
+            mv "${tmp_bz2%.bz2}" "$db"
+            echo "    wrote $db ($(du -h "$db" | cut -f1))"
+        done
+        ;;
+esac
 
 if [ -n "${MAXMIND_LICENSE_KEY:-}" ]; then
     MMDB="$TEST_DATA_DIR/GeoLite2-City.mmdb"
