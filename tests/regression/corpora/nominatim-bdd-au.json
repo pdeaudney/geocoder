@@ -320,11 +320,11 @@
     },
     {
       "id": "nominatim-db-housenumbers-street-number-order",
-      "tags": ["nominatim-bdd", "db/housenumbers", "parser-gap"],
-      "notes": "Same source as 'ascii-digit' above, but with 'Alysse Close 10' order (street, then number). Nominatim's parser extracts the trailing housenumber; ours chokes on the trailing digit and returns 0 results for this token order. Robustness-only check: the server must not 5xx on the input. Forward-parser limitation is tracked separately — when reversed-order housenumber extraction lands, tighten this case.",
+      "tags": ["nominatim-bdd", "db/housenumbers"],
+      "notes": "Same source as 'ascii-digit' above. 'Alysse Close 10' (street, then number) must return the same hit as '10 Alysse Close'. Handled by the trailing-digit rule in parse_freeform_query — 1–3 digit and 5-digit trailing tokens resolve to house_number when not already set.",
       "request": { "path": "/search", "query": { "q": "Alysse Close 10", "country_code": "au" } },
       "expect": { "status": 200, "checks": [
-        { "kind": "json_path_exists", "path": "results" }
+        { "kind": "json_path_equals", "path": "results.0.address.house_number", "value": "10" }
       ] }
     },
     {

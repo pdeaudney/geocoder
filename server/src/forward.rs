@@ -1147,18 +1147,30 @@ pub fn parse_freeform_query(input: &str) -> ParsedQuery {
     let mut parsed = ParsedQuery::default();
     let mut rest: Vec<String> = Vec::with_capacity(tokens.len());
 
+    let last_idx = tokens.len().saturating_sub(1);
     for (i, tok) in tokens.iter().enumerate() {
-        // Leading pure-digits: house_number if it's the first token OR a
-        // trailing 4-digit cluster at the end: postcode. Anything in between
-        // stays as-is.
-        let all_digits = tok.chars().all(|c| c.is_ascii_digit());
+        let all_digits = !tok.is_empty() && tok.chars().all(|c| c.is_ascii_digit());
         if all_digits {
+            // Leading pure-digit token → house_number.
             if i == 0 {
                 parsed.house_number = Some(tok.clone());
                 continue;
             }
-            if i == tokens.len() - 1 && tok.len() == 4 {
+            // Trailing 4-digit token → AU-style postcode.
+            if i == last_idx && tok.len() == 4 {
                 parsed.postcode = Some(tok.clone());
+                continue;
+            }
+            // Trailing short digit group (1–3 digits, or 5 digits for
+            // US-style ZIP-that-looks-like-housenumber) → house_number
+            // if we don't already have one. Handles `"Alysse Close 10"`
+            // and other street-then-number token orders that otherwise
+            // fall into the word bag and get tokenised out of existence.
+            if i == last_idx
+                && parsed.house_number.is_none()
+                && (tok.len() <= 3 || tok.len() == 5)
+            {
+                parsed.house_number = Some(tok.clone());
                 continue;
             }
         }

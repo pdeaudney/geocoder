@@ -69,6 +69,59 @@ fn parse_freeform_handles_bare_state_abbreviations() {
     assert_eq!(p.state.as_deref(), Some("Queensland"));
 }
 
+#[test]
+fn parse_freeform_trailing_short_digits_are_housenumber() {
+    // Street-then-number order ("Alysse Close 10") — Nominatim's BDD
+    // db/query/housenumbers.feature covers this explicitly. Without
+    // the trailing-digit rule, "10" falls into the word bag and the
+    // tantivy search returns 0 results.
+    let p = parse_freeform_query("alysse close 10");
+    assert_eq!(p.house_number.as_deref(), Some("10"));
+    assert_eq!(p.rest, vec!["alysse", "close"]);
+    assert_eq!(p.postcode, None);
+}
+
+#[test]
+fn parse_freeform_trailing_4_digit_still_postcode() {
+    // 4-digit trailing stays postcode, not housenumber — AU postcodes
+    // always win at that length.
+    let p = parse_freeform_query("alysse close 2153");
+    assert_eq!(p.house_number, None);
+    assert_eq!(p.postcode.as_deref(), Some("2153"));
+    assert_eq!(p.rest, vec!["alysse", "close"]);
+}
+
+#[test]
+fn parse_freeform_leading_housenumber_still_wins() {
+    // Regression guard: when both orders would extract a housenumber,
+    // the leading position takes precedence.
+    let p = parse_freeform_query("10 alysse close");
+    assert_eq!(p.house_number.as_deref(), Some("10"));
+    assert_eq!(p.rest, vec!["alysse", "close"]);
+}
+
+#[test]
+fn parse_freeform_trailing_5_digit_also_housenumber() {
+    // Some AU addresses have 5-digit housenumbers (e.g. rural property
+    // addressing, hwy milepost). Keep these as housenumber, not
+    // postcode — AU postcodes are always 4 digits.
+    let p = parse_freeform_query("main road 12345");
+    assert_eq!(p.house_number.as_deref(), Some("12345"));
+}
+
+#[test]
+fn parse_freeform_street_number_order_does_not_swallow_interior_digits() {
+    // Digits in the middle of a query (not leading, not trailing) must
+    // stay in the rest bag — not be promoted to housenumber. Example:
+    // someone might query "Route 66 Flagstaff" where "66" is part of
+    // the street name.
+    let p = parse_freeform_query("route 66 flagstaff");
+    // Leading is non-digit so the "66" mid-token stays in rest.
+    // Housenumber extraction only fires on position 0 or last.
+    assert_eq!(p.house_number, None);
+    assert!(p.rest.contains(&"66".to_string()));
+}
+
 // --- Integration tests (require index) ---
 
 #[test]
