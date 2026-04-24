@@ -104,13 +104,22 @@ The server starts on `0.0.0.0:3000` (REST) and `0.0.0.0:3001` (gRPC) by default.
 
 ### Storage sizing
 
-| Deployment | OSM index | Tantivy | FST | G-NAF (AU) | Total |
-|---|---:|---:|---:|---:|---:|
-| Single country (AU) | 620 MB | 42 MB | 16 MB | 488 MB | **~1.2 GB** |
-| EU-only (10 countries) | ~6 GB | ~400 MB | ~100 MB | n/a | **~6.5 GB** |
-| Planet | ~20 GB | ~2 GB | ~600 MB | n/a | **~22 GB** |
+Each data source drops files in the same index directory and is loaded independently at startup — leave any component out and the server degrades gracefully.
 
-The full planet index wants ≥16 GB of RAM or fast NVMe. Single-country deployments fit a `t4g.medium` class instance fine.
+| Component | AU (single country) | Planet |
+|---|---:|---:|
+| OSM reverse index (geo, addr, admin, place, street, interp, strings, i18n) | ~620 MB | ~20 GB |
+| Tantivy forward index (per-country + unified) | ~80 MB | ~2–3 GB |
+| FST autocomplete (per-country + unified) | ~25 MB | ~600 MB |
+| G-NAF address points (AU only) | ~490 MB | — |
+| OpenAddresses per-country (~60 countries; AU skipped when G-NAF present) | — | ~4–8 GB |
+| Who's on First admin fallback (per-country or planet) | ~50 MB | ~500 MB |
+| Postcode lookup (AU only) | <1 MB | <1 MB |
+| **Built index total** | **~1.4 GB** | **~28–33 GB** |
+
+Source data needed during the build is substantially larger — the raw PBF, OpenAddresses global batch (~66 GB), and WoF planet SQLite (~8.6 GB) all sit on scratch disk until ingestion finishes. Point the build at local NVMe (the `r8gd.*` packer default) if you're running worldwide.
+
+RAM guidance: AU-only fits a `t4g.medium` class instance; planet wants ≥16 GB at query time for a warm mmap working set, and ≥256 GB during **build** because libosmium's single-threaded pass holds the node cache in memory.
 
 ## HTTP API
 
