@@ -298,14 +298,43 @@ static std::vector<std::pair<S2CellId, bool>> cover_polygon(const std::vector<st
     return result;
 }
 
-// Approximate polygon area in square degrees
+// Approximate polygon area in square degrees. Uses the planar shoelace
+// formula on lat/lng treated as a Cartesian plane. This is a rough
+// approximation but the value is only used for ranking sibling
+// polygons at the same admin_level, so absolute accuracy doesn't
+// matter — only that larger polygons compare larger.
+//
+// Antimeridian-crossing polygons (Fiji, Russia-Far-East, the Aleutians)
+// are the classic break case: planar shoelace over {..., 179, -179, ...}
+// treats the crossing as a ~360° span and returns a huge bogus area.
+// We detect the crossing by looking for any edge whose longitude delta
+// exceeds 180° and, when we see one, normalise the ring by shifting
+// the western half east by 360° before the shoelace. Pure-ranking use
+// means the absolute value is still approximate but now monotonic.
 static float polygon_area(const std::vector<std::pair<double,double>>& vertices) {
-    double area = 0;
     size_t n = vertices.size();
+    if (n < 3) return 0.0f;
+
+    bool crosses_antimeridian = false;
     for (size_t i = 0; i < n; i++) {
         size_t j = (i + 1) % n;
-        area += vertices[i].first * vertices[j].second;
-        area -= vertices[j].first * vertices[i].second;
+        if (std::fabs(vertices[i].second - vertices[j].second) > 180.0) {
+            crosses_antimeridian = true;
+            break;
+        }
+    }
+
+    auto lng_at = [&](size_t i) -> double {
+        double lng = vertices[i].second;
+        if (crosses_antimeridian && lng < 0.0) lng += 360.0;
+        return lng;
+    };
+
+    double area = 0;
+    for (size_t i = 0; i < n; i++) {
+        size_t j = (i + 1) % n;
+        area += vertices[i].first * lng_at(j);
+        area -= vertices[j].first * lng_at(i);
     }
     return static_cast<float>(std::fabs(area) / 2.0);
 }
@@ -683,7 +712,25 @@ public:
         const char* country_code = (admin_level == 2)
             ? area.tags()["ISO3166-1:alpha2"]
             : nullptr;
-        // Extract outer ring vertices
+        // Extract outer ring vertices. Inner rings (holes) are counted
+        // but not written to the index: the on-disk format has no
+        // hole-exclusion flag, and PIP'ing a point that lies inside a
+        // hole would currently return "inside the outer polygon" — a
+        // wrong admin attribution.
+        //
+        // The practical impact is small in almost all cases:
+        //  1. Enclave countries (Lesotho inside ZA, Vatican inside IT)
+        //     have their own admin_level=2 polygon with a smaller area,
+        //     and the reader's area-ranking already prefers the smaller
+        //     polygon. So enclaves resolve correctly despite the hole.
+        //  2. Pure geographic holes (a national-park polygon with a
+        //     valley cut out) can still mis-attribute queries inside
+        //     the hole. This is rare and we accept it as a known bug;
+        //     fixing it requires a format bump (either store holes as
+        //     a separate file or flag them with a new field).
+        //
+        // The inner-ring count is printed in the summary so an operator
+        // can tell how much of their build is affected.
         for (const auto& outer_ring : area.outer_rings()) {
             std::vector<std::pair<double,double>> vertices;
             for (const auto& node_ref : outer_ring) {
@@ -698,6 +745,10 @@ public:
                     collect_i18n_names(area.tags(), /*type=*/0, poly_id);
                 }
             }
+            for (const auto& inner_ring : area.inner_rings(outer_ring)) {
+                (void)inner_ring;
+                inner_ring_count_++;
+            }
         }
 
         admin_count_++;
@@ -710,12 +761,14 @@ public:
     uint64_t building_addr_count() const { return building_addr_count_; }
     uint64_t interp_count() const { return interp_count_; }
     uint64_t admin_count() const { return admin_count_; }
+    uint64_t inner_ring_count() const { return inner_ring_count_; }
 
 private:
     uint64_t way_count_ = 0;
     uint64_t building_addr_count_ = 0;
     uint64_t interp_count_ = 0;
     uint64_t admin_count_ = 0;
+    uint64_t inner_ring_count_ = 0;
 
     void process_building_address(const osmium::Way& way, const char* housenumber, const char* street) {
         const auto& wnodes = way.nodes();
@@ -746,9 +799,26 @@ private:
         const char* street = way.tags()["addr:street"];
         if (!street) return;
 
+        // Canonical addr:interpolation values we honour:
+        //   "even" → step 2, even numbers only (reader uses type 1)
+        //   "odd"  → step 2, odd numbers only  (reader uses type 2)
+        //   "all"  → step 1, every number      (reader uses type 0, default)
+        //   missing → step 1 (inferred, treated as "all")
+        //
+        // We reject alphabetic schemes (letter-range interpolation like
+        // "A"–"F") and arbitrary numeric-step values (e.g. "3") because
+        // the on-disk format has no way to carry them. Silently treating
+        // them as "all" would emit wrong house-numbers along the edge
+        // — better to drop the interpolation way than lie about its
+        // range.
         uint8_t interp_type = 0;
         if (std::strcmp(interpolation, "even") == 0) interp_type = 1;
         else if (std::strcmp(interpolation, "odd") == 0) interp_type = 2;
+        else if (std::strcmp(interpolation, "all") == 0) interp_type = 0;
+        else {
+            // Unknown scheme (alphabetic, numeric-step, typo). Skip.
+            return;
+        }
 
         uint32_t interp_id = checked_u32(interp_ways.size(), "interp_ways id");
         uint32_t node_offset = checked_u32(interp_nodes.size(), "interp_nodes offset");
@@ -1239,6 +1309,12 @@ static int run_build(int argc, char* argv[]) {
     std::cerr << "  " << handler.interp_count() << " interpolation ways" << std::endl;
     std::cerr << "  " << handler.admin_count() << " admin/postcode boundaries ("
               << admin_polygons.size() << " polygon rings)" << std::endl;
+    if (handler.inner_ring_count() > 0) {
+        std::cerr << "  " << handler.inner_ring_count()
+                  << " inner rings (holes) seen; not indexed — area ranking"
+                  << " resolves enclaves, pure hole attribution is a known"
+                  << " limitation" << std::endl;
+    }
     std::cerr << "  " << place_count_total << " place=* points" << std::endl;
 
     std::cerr << "Resolving interpolation endpoints..." << std::endl;
