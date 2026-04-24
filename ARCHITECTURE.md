@@ -547,6 +547,13 @@ solving different problems:
   our 20K QPS/core is uniform AU reverse — we haven't load-tested
   global freeform.
 
+For the per-commit detail of how these numbers got there — the
+specific allocation removals, double-call dedupes, and
+cache-locality wins, with criterion and k6 before/after for each
+— see [`docs/performance/`](docs/performance/). The tip-of-tree
+read-path snapshot is
+[`readpath-optimisations-2026-04-25.md`](docs/performance/readpath-optimisations-2026-04-25.md).
+
 ### What we'd still adopt if the scope grew
 
 1. **Unified FST with country-prefix automaton** — Radar's documented
