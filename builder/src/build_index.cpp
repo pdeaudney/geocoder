@@ -1095,6 +1095,75 @@ static void write_cell_index(
     }
 }
 
+// --- Sort addr_points by S2 cell to make per-cell ID ranges
+//     cache-contiguous on the read path ---
+//
+// `cell_to_addrs[c] = [ids]` is a per-cell list of indices into
+// `addr_points.bin`. Currently those indices reflect ingestion order
+// of the input PBF, which is essentially random with respect to
+// geography. The runtime's hot path is `Index::query_geo`: walk 9
+// cells, dereference each id into `all_points[id]`. Random ids = a
+// pointer chase across the whole 64 MB+ addr_points file, every read
+// missing L2 cache.
+//
+// Sorting addr_points by S2 cell makes the per-cell id ranges
+// contiguous (and cache-line friendly): the 9 cells the runtime walks
+// touch ~9 small ranges of adjacent records instead of 9 random
+// scatters across the file. Estimated 10–30 % off /reverse on dense
+// urban queries; bigger on cold caches.
+//
+// Memory cost: a remap vector and a duplicate addr_points array, both
+// `addr_points.size()` long. Planet sees ~1 B addresses → ~32 GB peak
+// during this step; the builder pipeline already sizes for ≥256 GB
+// (see Packer config).
+static void sort_addr_points_by_cell() {
+    if (addr_points.empty()) return;
+
+    std::vector<uint64_t> sorted_cells;
+    sorted_cells.reserve(cell_to_addrs.size());
+    for (const auto& [c, _] : cell_to_addrs) sorted_cells.push_back(c);
+    std::sort(sorted_cells.begin(), sorted_cells.end());
+
+    // Build the old_id → new_id remap by walking cells in sorted order.
+    std::vector<uint32_t> remap(addr_points.size(), UINT32_MAX);
+    uint32_t next_new_id = 0;
+    for (uint64_t c : sorted_cells) {
+        auto it = cell_to_addrs.find(c);
+        if (it == cell_to_addrs.end()) continue;
+        for (uint32_t old_id : it->second) {
+            if (old_id >= remap.size()) continue;
+            if (remap[old_id] == UINT32_MAX) {
+                remap[old_id] = next_new_id++;
+            }
+        }
+    }
+    // Any addr_point not referenced by any cell (shouldn't happen given
+    // the ingestion path, but guard against it) goes to the tail in
+    // ingestion order so we don't drop records or corrupt indexing.
+    for (uint32_t i = 0; i < remap.size(); i++) {
+        if (remap[i] == UINT32_MAX) {
+            remap[i] = next_new_id++;
+        }
+    }
+
+    // Materialise the new addr_points layout.
+    std::vector<AddrPoint> reordered(addr_points.size());
+    for (uint32_t old_id = 0; old_id < addr_points.size(); old_id++) {
+        reordered[remap[old_id]] = addr_points[old_id];
+    }
+    addr_points = std::move(reordered);
+
+    // Rewrite cell_to_addrs to point at the new ids and re-sort within
+    // each cell so the entries file's per-cell run is monotonic.
+    for (auto& [_, ids] : cell_to_addrs) {
+        for (auto& id : ids) id = remap[id];
+        std::sort(ids.begin(), ids.end());
+    }
+
+    std::cerr << "Sorted " << addr_points.size()
+              << " addr_points by S2 cell for cache locality" << std::endl;
+}
+
 // --- Write all index files ---
 
 static void write_index(const std::string& output_dir) {
@@ -1326,6 +1395,10 @@ static int run_build(int argc, char* argv[]) {
     deduplicate(cell_to_interps);
     deduplicate(cell_to_admin);
     deduplicate(cell_to_places);
+
+    // Reorder addr_points so that per-cell ids are contiguous in the
+    // file — cache-locality win on the reverse-geocode hot path.
+    sort_addr_points_by_cell();
 
     std::cerr << "Writing index files to " << output_dir << "..." << std::endl;
     write_index(output_dir);
