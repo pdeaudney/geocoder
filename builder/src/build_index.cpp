@@ -2,12 +2,15 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <osmium/handler.hpp>
@@ -97,6 +100,34 @@ struct I18nName {
 static const uint32_t INTERIOR_FLAG = 0x80000000u;
 static const uint32_t ID_MASK = 0x7FFFFFFFu;
 
+// --- On-disk layout pins ------------------------------------------------
+// The runtime reader (server/src/lib.rs + server/tests/struct_layout.rs)
+// mmaps these structs as `&[T]` and expects exact byte layouts. A silent
+// drift in a C++ `sizeof` would serve garbled records. These asserts
+// catch it at compile time on both sides of the bridge.
+static_assert(sizeof(WayHeader)    == 12, "on-disk layout drift: WayHeader");
+static_assert(sizeof(AddrPoint)    == 16, "on-disk layout drift: AddrPoint");
+static_assert(sizeof(InterpWay)    == 24, "on-disk layout drift: InterpWay");
+static_assert(sizeof(AdminPolygon) == 24, "on-disk layout drift: AdminPolygon");
+static_assert(sizeof(NodeCoord)    == 8,  "on-disk layout drift: NodeCoord");
+static_assert(sizeof(PlacePoint)   == 16, "on-disk layout drift: PlacePoint");
+static_assert(sizeof(I18nName)     == 16, "on-disk layout drift: I18nName");
+
+// --- uint32 offset guards ----------------------------------------------
+// Every on-disk offset field is u32; planet-scale builds can legitimately
+// push cumulative sizes toward 4 GB. Hitting that limit silently wraps
+// the offset and serves corrupt data. These helpers throw with a clear
+// message when we're about to wrap, so an operator sees "need to widen
+// the on-disk format" instead of "server randomly returns junk".
+template <typename T>
+[[nodiscard]] static uint32_t checked_u32(T v, const char* what) {
+    if (static_cast<uint64_t>(v) > static_cast<uint64_t>(UINT32_MAX)) {
+        throw std::runtime_error(std::string("overflow: ") + what +
+            " exceeds u32; widen the on-disk format or split the build");
+    }
+    return static_cast<uint32_t>(v);
+}
+
 // --- String interning ---
 
 class StringPool {
@@ -106,7 +137,11 @@ public:
         if (it != index_.end()) {
             return it->second;
         }
-        uint32_t offset = static_cast<uint32_t>(data_.size());
+        // Guard against the string pool growing past 4 GB. On planet-scale
+        // inputs with all name:<lang> tags kept this is within reach; the
+        // offset field in every *_id is a u32, so we must refuse to mint
+        // one that would truncate.
+        uint32_t offset = checked_u32(data_.size(), "strings.bin offset");
         index_[s] = offset;
         data_.insert(data_.end(), s.begin(), s.end());
         data_.push_back('\0');
@@ -432,7 +467,7 @@ static uint8_t place_rank(const char* place) {
 // OSM tag list into `collect_i18n_names` to capture localized name:xx.
 static uint32_t add_place_point(double lat, double lng, uint8_t rank, const char* name) {
     if (!name || !*name) return UINT32_MAX;
-    uint32_t place_id = static_cast<uint32_t>(place_points.size());
+    uint32_t place_id = checked_u32(place_points.size(), "place_points id");
     place_points.push_back({
         static_cast<float>(lat),
         static_cast<float>(lng),
@@ -470,7 +505,7 @@ static uint32_t parse_house_number(const char* s) {
 static uint64_t addr_count_total = 0;
 
 static void add_addr_point(double lat, double lng, const char* housenumber, const char* street) {
-    uint32_t addr_id = static_cast<uint32_t>(addr_points.size());
+    uint32_t addr_id = checked_u32(addr_points.size(), "addr_points id");
     addr_points.push_back({
         static_cast<float>(lat),
         static_cast<float>(lng),
@@ -500,8 +535,8 @@ static uint32_t add_admin_polygon(const std::vector<std::pair<double,double>>& v
     auto simplified = simplify_polygon(vertices, 500);
     if (simplified.size() < 3) return UINT32_MAX;
 
-    uint32_t poly_id = static_cast<uint32_t>(admin_polygons.size());
-    uint32_t vertex_offset = static_cast<uint32_t>(admin_vertices.size());
+    uint32_t poly_id = checked_u32(admin_polygons.size(), "admin_polygon id");
+    uint32_t vertex_offset = checked_u32(admin_vertices.size(), "admin_vertices offset");
 
     for (const auto& [lat, lng] : simplified) {
         admin_vertices.push_back({static_cast<float>(lat), static_cast<float>(lng)});
@@ -715,8 +750,8 @@ private:
         if (std::strcmp(interpolation, "even") == 0) interp_type = 1;
         else if (std::strcmp(interpolation, "odd") == 0) interp_type = 2;
 
-        uint32_t interp_id = static_cast<uint32_t>(interp_ways.size());
-        uint32_t node_offset = static_cast<uint32_t>(interp_nodes.size());
+        uint32_t interp_id = checked_u32(interp_ways.size(), "interp_ways id");
+        uint32_t node_offset = checked_u32(interp_nodes.size(), "interp_nodes offset");
 
         for (const auto& nr : wnodes) {
             interp_nodes.push_back({
@@ -761,8 +796,8 @@ private:
             if (!nr.location().valid()) return;
         }
 
-        uint32_t way_id = static_cast<uint32_t>(ways.size());
-        uint32_t node_offset = static_cast<uint32_t>(street_nodes.size());
+        uint32_t way_id = checked_u32(ways.size(), "street_ways id");
+        uint32_t node_offset = checked_u32(street_nodes.size(), "street_nodes offset");
 
         for (const auto& nr : wnodes) {
             street_nodes.push_back({
@@ -871,19 +906,85 @@ static void deduplicate(Map& cell_map) {
 
 static const uint32_t NO_DATA = 0xFFFFFFFFu;
 
-// Write entries file and return offset map
+// Open a file for writing with exceptions enabled. An `ofstream` that
+// silently fails on disk-full is not an uptime-compatible default; every
+// caller must learn about the failure.
+static std::ofstream open_out(const std::string& path) {
+    std::ofstream f;
+    f.exceptions(std::ios::failbit | std::ios::badbit);
+    f.open(path, std::ios::binary | std::ios::trunc);
+    return f;
+}
+
+// Atomic-write helper. Every output file is written to `<final>.tmp`
+// and only renamed into place after the entire build succeeds, so a
+// killed build or a mid-write exception leaves the live index files
+// untouched. The runtime reader also rejects length-truncated files
+// (see server/src/lib.rs::mmap_records), but the best defence is
+// preventing the torn file from ever becoming the live path.
+class IndexWriter {
+public:
+    explicit IndexWriter(std::string dir) : dir_(std::move(dir)) {}
+
+    // Returns the .tmp path to write to. The <tmp, final> pair is
+    // tracked so commit_all() can rename it at the end.
+    std::string tmp_for(const std::string& name) {
+        std::string final_path = dir_ + "/" + name;
+        std::string tmp_path = final_path + ".tmp";
+        pending_.emplace_back(tmp_path, final_path);
+        return tmp_path;
+    }
+
+    // Rename every tmp → final. Called once at the end of write_index
+    // after every byte has been flushed successfully. POSIX rename()
+    // is atomic on same-filesystem paths, so partial commits can only
+    // happen if the filesystem itself fails.
+    void commit_all() {
+        for (const auto& [tmp, final_path] : pending_) {
+            std::filesystem::rename(tmp, final_path);
+        }
+        pending_.clear();
+    }
+
+    // Destructor rollback: remove any .tmp files that weren't committed.
+    // Runs during exception unwinding, so never throws.
+    ~IndexWriter() {
+        std::error_code ec;
+        for (const auto& [tmp, _] : pending_) {
+            std::filesystem::remove(tmp, ec);
+        }
+    }
+
+    IndexWriter(const IndexWriter&) = delete;
+    IndexWriter& operator=(const IndexWriter&) = delete;
+
+private:
+    std::string dir_;
+    std::vector<std::pair<std::string, std::string>> pending_;
+};
+
+// Convenience: open an AtomicFile stream scoped to a single write block.
+// Caller passes `iw.tmp_for("foo.bin")`; the stream writes to foo.bin.tmp.
+static std::ofstream open_tmp_out(IndexWriter& iw, const std::string& name) {
+    return open_out(iw.tmp_for(name));
+}
+
+// Write entries file and return offset map. Uses u64 for `current` so
+// crossing the 4 GB mark on planet-scale street_entries raises a clean
+// overflow error instead of wrapping silently.
 static std::unordered_map<uint64_t, uint32_t> write_entries(
-    const std::string& path,
+    IndexWriter& iw,
+    const std::string& name,
     const std::vector<uint64_t>& sorted_cells,
     const std::unordered_map<uint64_t, std::vector<uint32_t>>& cell_map
 ) {
     std::unordered_map<uint64_t, uint32_t> offsets;
-    std::ofstream f(path, std::ios::binary);
-    uint32_t current = 0;
+    std::ofstream f = open_tmp_out(iw, name);
+    uint64_t current = 0;
     for (uint64_t cell_id : sorted_cells) {
         auto it = cell_map.find(cell_id);
         if (it == cell_map.end()) continue;
-        offsets[cell_id] = current;
+        offsets[cell_id] = checked_u32(current, (name + " cell offset").c_str());
         uint16_t count = static_cast<uint16_t>(std::min(it->second.size(), size_t(65535)));
         f.write(reinterpret_cast<const char*>(&count), sizeof(count));
         f.write(reinterpret_cast<const char*>(it->second.data()), it->second.size() * sizeof(uint32_t));
@@ -893,8 +994,9 @@ static std::unordered_map<uint64_t, uint32_t> write_entries(
 }
 
 static void write_cell_index(
-    const std::string& cells_path,
-    const std::string& entries_path,
+    IndexWriter& iw,
+    const std::string& cells_name,
+    const std::string& entries_name,
     const std::unordered_map<uint64_t, std::vector<uint32_t>>& cell_map
 ) {
     std::vector<std::pair<uint64_t, std::vector<uint32_t>>> sorted(
@@ -902,18 +1004,20 @@ static void write_cell_index(
     std::sort(sorted.begin(), sorted.end());
 
     {
-        std::ofstream f(cells_path, std::ios::binary);
-        uint32_t current_offset = 0;
+        std::ofstream f = open_tmp_out(iw, cells_name);
+        uint64_t current_offset = 0;
         for (const auto& [cell_id, ids] : sorted) {
+            uint32_t offset_u32 = checked_u32(current_offset, (cells_name + " cell offset").c_str());
             f.write(reinterpret_cast<const char*>(&cell_id), sizeof(cell_id));
-            f.write(reinterpret_cast<const char*>(&current_offset), sizeof(current_offset));
+            f.write(reinterpret_cast<const char*>(&offset_u32), sizeof(offset_u32));
             current_offset += sizeof(uint16_t) + ids.size() * sizeof(uint32_t);
         }
     }
 
     {
-        std::ofstream f(entries_path, std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, entries_name);
         for (const auto& [cell_id, ids] : sorted) {
+            (void)cell_id;
             uint16_t count = static_cast<uint16_t>(std::min(ids.size(), size_t(65535)));
             f.write(reinterpret_cast<const char*>(&count), sizeof(count));
             f.write(reinterpret_cast<const char*>(ids.data()), ids.size() * sizeof(uint32_t));
@@ -924,6 +1028,11 @@ static void write_cell_index(
 // --- Write all index files ---
 
 static void write_index(const std::string& output_dir) {
+    // Everything is written to <name>.bin.tmp and renamed into place
+    // only after every output succeeds. A mid-build crash / OOM / SIGKILL
+    // therefore never leaves a half-written file as the live index.
+    IndexWriter iw(output_dir);
+
     // Merged geo cell index for streets, addresses, and interpolation
     std::set<uint64_t> all_geo_cells;
     for (const auto& [id, _] : cell_to_ways) all_geo_cells.insert(id);
@@ -931,12 +1040,12 @@ static void write_index(const std::string& output_dir) {
     for (const auto& [id, _] : cell_to_interps) all_geo_cells.insert(id);
     std::vector<uint64_t> sorted_geo_cells(all_geo_cells.begin(), all_geo_cells.end());
 
-    auto street_offsets = write_entries(output_dir + "/street_entries.bin", sorted_geo_cells, cell_to_ways);
-    auto addr_offsets = write_entries(output_dir + "/addr_entries.bin", sorted_geo_cells, cell_to_addrs);
-    auto interp_offsets = write_entries(output_dir + "/interp_entries.bin", sorted_geo_cells, cell_to_interps);
+    auto street_offsets = write_entries(iw, "street_entries.bin", sorted_geo_cells, cell_to_ways);
+    auto addr_offsets   = write_entries(iw, "addr_entries.bin",   sorted_geo_cells, cell_to_addrs);
+    auto interp_offsets = write_entries(iw, "interp_entries.bin", sorted_geo_cells, cell_to_interps);
 
     {
-        std::ofstream f(output_dir + "/geo_cells.bin", std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, "geo_cells.bin");
         for (uint64_t cell_id : sorted_geo_cells) {
             f.write(reinterpret_cast<const char*>(&cell_id), sizeof(cell_id));
             auto write_offset = [&](const std::unordered_map<uint64_t, uint32_t>& offsets) {
@@ -955,21 +1064,21 @@ static void write_index(const std::string& output_dir) {
               << addr_points.size() << " addrs, "
               << interp_ways.size() << " interps)" << std::endl;
 
-    write_cell_index(output_dir + "/admin_cells.bin", output_dir + "/admin_entries.bin", cell_to_admin);
+    write_cell_index(iw, "admin_cells.bin", "admin_entries.bin", cell_to_admin);
     std::cerr << "admin index: " << cell_to_admin.size() << " cells, " << admin_polygons.size() << " polygons" << std::endl;
 
-    write_cell_index(output_dir + "/place_cells.bin", output_dir + "/place_entries.bin", cell_to_places);
+    write_cell_index(iw, "place_cells.bin", "place_entries.bin", cell_to_places);
     std::cerr << "place index: " << cell_to_places.size() << " cells, " << place_points.size() << " points" << std::endl;
 
     {
-        std::ofstream f(output_dir + "/place_points.bin", std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, "place_points.bin");
         f.write(reinterpret_cast<const char*>(place_points.data()), place_points.size() * sizeof(PlacePoint));
     }
 
     // Localized names — sorted by (entity_type, entity_id, lang_code) so
-    // the runtime does a single binary search per reverse query. Leave the
-    // file as zero bytes when no name:xx tags exist — the runtime treats
-    // missing/empty as "no i18n available".
+    // the runtime does a single binary search per reverse query. Leave
+    // the file as zero bytes when no name:xx tags exist — the runtime
+    // treats missing/empty as "no i18n available".
     {
         std::sort(i18n_names.begin(), i18n_names.end(), [](const I18nName& a, const I18nName& b) {
             if (a.entity_type != b.entity_type) return a.entity_type < b.entity_type;
@@ -985,67 +1094,72 @@ static void write_index(const std::string& output_dir) {
                     && a.entity_id == b.entity_id
                     && a.lang_code == b.lang_code;
             }), i18n_names.end());
-        std::ofstream f(output_dir + "/i18n_names.bin", std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, "i18n_names.bin");
         f.write(reinterpret_cast<const char*>(i18n_names.data()),
                 i18n_names.size() * sizeof(I18nName));
         std::cerr << "i18n names: " << i18n_names.size() << " (name:xx entries)" << std::endl;
     }
 
-    // Street ways
     {
-        std::ofstream f(output_dir + "/street_ways.bin", std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, "street_ways.bin");
         f.write(reinterpret_cast<const char*>(ways.data()), ways.size() * sizeof(WayHeader));
     }
-
-    // Street nodes
     {
-        std::ofstream f(output_dir + "/street_nodes.bin", std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, "street_nodes.bin");
         f.write(reinterpret_cast<const char*>(street_nodes.data()), street_nodes.size() * sizeof(NodeCoord));
     }
-
-    // Address points
     {
-        std::ofstream f(output_dir + "/addr_points.bin", std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, "addr_points.bin");
         f.write(reinterpret_cast<const char*>(addr_points.data()), addr_points.size() * sizeof(AddrPoint));
     }
-
-    // Interpolation ways
     {
-        std::ofstream f(output_dir + "/interp_ways.bin", std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, "interp_ways.bin");
         f.write(reinterpret_cast<const char*>(interp_ways.data()), interp_ways.size() * sizeof(InterpWay));
     }
-
-    // Interpolation nodes
     {
-        std::ofstream f(output_dir + "/interp_nodes.bin", std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, "interp_nodes.bin");
         f.write(reinterpret_cast<const char*>(interp_nodes.data()), interp_nodes.size() * sizeof(NodeCoord));
     }
-
-    // Admin polygons
     {
-        std::ofstream f(output_dir + "/admin_polygons.bin", std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, "admin_polygons.bin");
         f.write(reinterpret_cast<const char*>(admin_polygons.data()), admin_polygons.size() * sizeof(AdminPolygon));
     }
-
-    // Admin vertices
     {
-        std::ofstream f(output_dir + "/admin_vertices.bin", std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, "admin_vertices.bin");
         f.write(reinterpret_cast<const char*>(admin_vertices.data()), admin_vertices.size() * sizeof(NodeCoord));
     }
-
-    // Strings
     {
-        std::ofstream f(output_dir + "/strings.bin", std::ios::binary);
+        std::ofstream f = open_tmp_out(iw, "strings.bin");
         f.write(strings.data().data(), strings.data().size());
         std::cerr << "strings.bin: " << strings.data().size() << " bytes" << std::endl;
     }
 
-
+    // Every .tmp has been written successfully; atomically swap them
+    // into the live names. Destructor would remove them if this throws.
+    iw.commit_all();
 }
 
 // --- Main ---
 
+static int run_build(int argc, char* argv[]);
+
 int main(int argc, char* argv[]) {
+    // Catch-all top-level handler. A stray osmium::pbf_error /
+    // std::bad_alloc / IO exception otherwise becomes
+    // "terminate called after throwing..." with no context and
+    // exit status 134; operators need a grep-friendly line.
+    try {
+        return run_build(argc, argv);
+    } catch (const std::exception& e) {
+        std::cerr << "build failed: " << e.what() << std::endl;
+        return 2;
+    } catch (...) {
+        std::cerr << "build failed: unknown exception" << std::endl;
+        return 2;
+    }
+}
+
+static int run_build(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "Usage: build-index <output-dir> <input.osm.pbf> [input2.osm.pbf ...] [--street-level N] [--admin-level N]" << std::endl;
         return 1;
@@ -1091,6 +1205,22 @@ int main(int argc, char* argv[]) {
 
         std::string tmp_path = output_dir + "/node_locations.tmp";
         int fd = open(tmp_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0600);
+        if (fd == -1) {
+            throw std::runtime_error("open " + tmp_path + ": " + std::strerror(errno));
+        }
+        // RAII cleanup: close fd + remove temp file even if osmium::apply
+        // throws. Without this, a partial build leaks the tmp file and
+        // (on some filesystems) the fd, blocking the next build run.
+        struct NodeLocationsCleanup {
+            int fd;
+            std::string path;
+            ~NodeLocationsCleanup() {
+                if (fd >= 0) close(fd);
+                std::error_code ec;
+                std::filesystem::remove(path, ec);
+            }
+        } cleanup{fd, tmp_path};
+
         index_type index{fd};
         location_handler_type location_handler{index};
 
@@ -1100,8 +1230,6 @@ int main(int argc, char* argv[]) {
             osmium::apply(buffer, handler);
         }));
         reader2.close();
-        close(fd);
-        std::remove(tmp_path.c_str());
     }
 
     std::cerr << "Done reading:" << std::endl;
