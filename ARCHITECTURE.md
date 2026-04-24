@@ -35,16 +35,18 @@ model.
 
                      ┌─────────────────────┐
                      │  query-server       │   Rust + axum + tantivy
-                     │  (single binary)    │
+                     │  (single binary)    │   REST on :3000, gRPC on :3001
                      └───────┬─────────────┘
-                             │  mmap all files, serve HTTP on :3000
+                             │  mmap all files, serve HTTP + gRPC
                              ▼
-                   /reverse, /search, auth routes
+          /reverse  /search  /validate  /autocomplete  /geocode/ip
+                   /healthz  /healthz/indexes
 ```
 
 Everything on the left of `query-server` is offline build work. The
 server itself is stateless — give it a directory of binaries, it serves
-queries.
+queries. The REST surface is unauthenticated; gate at the network layer
+for internal-only deployments.
 
 ## On-disk format
 
@@ -80,6 +82,11 @@ arithmetic operation over pre-sorted arrays indexed by S2 cell.
 | `oa_<cc>_*.bin` | `build-openaddresses-index` | Per-country OpenAddresses address points |
 | `postcode_lookup.bin`, `postcode_lookup_strings.bin` | `build-postcode-lookup` | Suburb-modal postcode lookup (AU G-NAF) |
 | `i18n_names.bin` | emitted by `build-index` from `name:<lang>` OSM tags | Localised admin names keyed on (entity_type, entity_id, lang_code); used when `/reverse?lang=...` is set |
+| `wof_countries.bin`, `wof_countries_vertices.bin`, `wof_countries_strings.bin` | `wof-importer` (tools/) | Who's on First country polygons. Fallback for `find_admin` when an extract lacks the OSM `admin_level=2` relation (common on per-country Geofabrik extracts). |
+
+**Not on disk**: H3 cell IDs are computed at query time from the response
+coord via the `h3o` crate when the caller passes `h3_res=...`. No file
+is produced, so no rebuild path to worry about.
 
 ### Spatial indexing
 
@@ -122,6 +129,7 @@ Index {
   gnaf: Option<Gnaf>                          // G-NAF AU authoritative
   open_addresses: Option<OpenAddresses>        // Per-country OA
   i18n_names: Option<I18nNames>                // name:<lang> OSM tag lookup
+  wof_countries: Option<WofCountries>          // Country-level polygon fallback
 }
 
 Forward {
@@ -144,6 +152,10 @@ Autocomplete {
      For each candidate polygon: check INTERIOR_FLAG, else PIP in f64.
      Track best-by-admin-level by smallest area, respecting per-country
      max_area caps (catches AU pastoral stations tagged admin_level=9).
+     If no country-level (admin_level=2) polygon matched and
+     wof_countries.bin is loaded, consult the WoF country index to
+     back-fill country_code. This covers per-country Geofabrik extracts
+     that don't include the country relation (GB, US, etc.).
 
 2. Map admin_level → output field per country (AdminConfig lookup).
      e.g. AU: 6 → county, 9 → city, 11 → postcode.
@@ -217,6 +229,28 @@ Autocomplete {
      giving the full normalised address object in the response.
 ```
 
+### Response enrichment: H3 cells
+
+Every endpoint that returns a coordinate accepts an optional `h3_res=`
+query parameter — a comma-separated list of Uber H3 resolutions
+(0–15, max 4). When present, the handler converts the response coord
+into an `h3` map keyed by resolution, computed on the fly via `h3o`:
+
+```
+/reverse → Address.h3         (uses the caller's query coord)
+/search  → hit.h3 per result  (uses the refined post-house-number coord)
+/validate → response.h3       (uses final_lat/final_lng, post-refinement)
+/autocomplete → hit.h3 per result
+/geocode/ip → response.h3     (uses the MaxMind lookup coord)
+```
+
+Cells are 15-char lowercase hex strings (not u64 — JSON/JS can't carry
+the full 64-bit value cleanly). No field is emitted when `h3_res` is
+absent; the serde skip keeps the response byte-identical for callers
+that don't opt in. The gRPC proto mirrors the REST shape via
+`repeated uint32 h3_res` on requests and `map<uint32, string> h3` on
+responses.
+
 ### Tokenization / normalisation (build-side + query-side, symmetric)
 
 Both index-time and query-time text passes through the same pipeline:
@@ -256,15 +290,28 @@ Optional enrichment (AU-specific):
     build-postcode-lookup → postcode_lookup.bin (244 KB)
 
 Optional enrichment (worldwide):
-    OpenAddresses batch (~30 GB compressed ZIP from openaddresses.io)
+    OpenAddresses batch (~66 GB compressed from openaddresses.io S3)
         │
         ▼
     build-openaddresses-index [--country us,fr,de] [--skip au]
         → oa_<cc>_*.bin per country
 
+    Who's on First admin SQLite (~8.6 GB planet, or per-country extracts)
+        │
+        ▼
+    wof-importer (tools/) → wof_countries*.bin
+        Country-level polygon fallback for extracts missing
+        OSM admin_level=2 (Great Britain, USA, per-country Geofabrik).
+
 Forward index:
     build-forward-index /data/index [--partition-by-country]
         → tantivy/ (monolithic) or tantivy_<cc>/ per country
+
+Autocomplete FST:
+    build-autocomplete-fst /data/index
+        → fst_<cc>.fst + fst_<cc>.bin + fst_<cc>_strings.bin per country,
+          plus fst_unified.* when built with --layout both.
+        Served by /autocomplete and used as the /search fast-path.
 ```
 
 ### What the C++ indexer includes and excludes
@@ -395,8 +442,8 @@ see the new Index. Dropped refcount frees the old mmaps.
 ### Single-country deployment (e.g. AU)
 
 - **Instance**: `t4g.medium` or similar (4 GB RAM, 1-2 vCPU)
-- **Storage**: 50 GB gp3 (AU index is ~1.2 GB with all enrichment;
-  the rest is headroom for diffs / next build)
+- **Storage**: 50 GB gp3 (AU index is ~1.4 GB with G-NAF + postcode +
+  FST + tantivy; the rest is headroom for diffs / next build)
 - **Cost**: ~$20/month AWS
 - **Handles**: 5-20K QPS per core, far more than any single fleet
 
@@ -404,8 +451,10 @@ see the new Index. Dropped refcount frees the old mmaps.
 
 - **Instance**: `r6i.xlarge` or `r6id.xlarge` (32 GB RAM; NVMe
   preferred). Per-country indexes keep it manageable.
-- **Storage**: 100 GB gp3 or instance-store NVMe. Planet OSM reverse
-  + tantivy + OA is ~50-60 GB.
+- **Storage**: 100 GB gp3 or instance-store NVMe. Planet index total
+  (OSM reverse + per-country tantivy + FST + OpenAddresses + WoF
+  countries + i18n) runs ~28–33 GB; source data during the build is
+  far larger and belongs on scratch disk.
 - **Cost**: ~$200/month AWS at single-instance steady state
 - **Handles**: 5-10K QPS per instance; scale out behind a load balancer
 
@@ -446,17 +495,13 @@ process, multi-threaded, S2 + Tantivy is apparently the right answer.
 
 | Thing | Radar | Ours |
 |---|---|---|
-| **FST fast-path** | In-memory FST caches "millions of happy paths in MBs", returns "order of magnitude faster than a Tantivy query". Serves 80% of their traffic. | **Shipped.** Per-country FSTs used by both `/autocomplete` and `/search` for exact-key queries. Measured **400 ns per FST hit** vs 19–70 µs via tantivy — matches Radar's order-of-magnitude claim. |
-| **ML-driven query understanding** | FastText for typo-tolerant n-gram embedding; LightGBM classifier routes queries by intent. | **Partial.** FuzzyTermQuery (Levenshtein 1) as last-resort fallback catches most single-char typos. No ML intent classification. |
-| **Two-tier query architecture** | "Fast tier" for speed/precision, "deep search tier" for recall. | **Matches in shape.** FST fast-path + tantivy + fuzzy fallback is effectively a three-tier ladder. |
+| **ML-driven query understanding** | FastText n-gram embeddings for typo tolerance; LightGBM classifier routes queries by intent. | FuzzyTermQuery (Levenshtein 1) as last-resort fallback. No ML intent classification. |
 | **Data pipeline** | Apache Spark, versioned S3 assets, ingest+eval new sources "within a day". | Per-dataset CLI builders + shell scripts. |
-| **Separate stores per domain** | Separate tantivy indexes + RocksDB stores for **Addresses / Regions / Places** (three independent data clients). | Single tantivy with a `kind` fast field. Address-point, admin, and place indexes are already separate bin files. |
+| **Separate stores per domain** | Separate tantivy indexes + RocksDB stores for **Addresses / Regions / Places**. | Single tantivy with a `kind` fast field. Address-point, admin, and place indexes are already separate bin files, but forward search is one index. |
 | **RocksDB-backed KV** | Point lookups over RocksDB for record retrieval. | mmap'd fixed-record arrays indexed by S2 cells. |
-| **Custom fst::Automaton for country prefix pruning** | One FST per data type, keys prefixed with 2-byte ISO code. Custom automaton peels the prefix before delegating. | Per-country FST files — equivalent behaviour, different file layout. Unified FST is a low-priority structural cleanup. |
+| **Custom fst::Automaton for country prefix pruning** | One FST per data type, keys prefixed with 2-byte ISO code. | Per-country FST files — equivalent behaviour, different file layout. Unified FST is a low-priority structural cleanup. |
 | **u64-bitmap fast fields for dense numerics** | Custom Collector intersects query bitmask with per-hit bitmap pre-BM25 for street numbers. | Not yet — we dedup housenumber strings in tantivy, which is less efficient but works. |
-| **ML typo tolerance (FastText n-grams)** | Embedding model for semantic/typo recall. | Levenshtein-1 only. |
 | **Production battle-testing** | 1B+ calls/day, 1K QPS/core measured. | 20K QPS/core measured on AU synthetic load, not yet run at production scale globally. |
-| **Cost savings documented** | Replaced Mongo + Elasticsearch clusters, saved "high five-figures/month". | Greenfield — no legacy to replace. |
 | **api-diff regression harness** | Open-sourced `@radarlabs/api-diff` — CSV-driven regression tool used to shadow HorizonDB traffic for a year. | Not built. |
 | **Kinesis → S3 + Athena partition-projection** | Telemetry pipeline with nightly Airflow repartitioning. >1000× bytes-read reduction. | Not built — no query-log pipeline yet. |
 | **CDKTF-driven blue-green deployment** | Each index release is a versioned S3 asset; new ASG reads it, ALB weighted-shifts traffic. | Our ArcSwap + marker-file pattern covers single-instance hot-reload; multi-instance deployment pattern not documented. |
@@ -471,8 +516,10 @@ process, multi-threaded, S2 + Tantivy is apparently the right answer.
 | **Zero-downtime reload pattern** | `ArcSwap<Arc<Index>>` + marker file polling. Index rebuild → atomic swap. | Not explicitly described; they mention "gradual migration" over a year for their own system cut-over. |
 | **Simpler operational surface** | Single binary, no RocksDB tuning, no Spark cluster. Just mmap. | Single binary but RocksDB + Spark ingestion to operate. |
 | **Built-in i18n** | `/reverse?lang=zh` returns localised admin names from OSM `name:<lang>` tags via `i18n_names.bin`. | Radar's public docs don't specify an i18n mechanism for returned names. |
-| **gRPC API** | `geocoder.proto` mirrors every REST endpoint. Typed clients, lower serialisation cost. | REST only. |
-| **Every enrichment optional** | Missing `gnaf_*.bin` / `fst_*.fst` / `i18n_names.bin` / `postcode_lookup.bin` → server starts, the corresponding feature returns 501 or degrades silently. Per-country deployments only mount what they need. | Not documented. |
+| **gRPC API with full feature parity** | `geocoder.proto` mirrors every REST endpoint, including H3 enrichment. Typed clients, lower serialisation cost. | REST only. |
+| **H3 cell enrichment** | Opt-in `h3_res=` parameter stamps Uber H3 cell IDs on any returned coord, up to 4 resolutions in one call. Computed query-time via `h3o`; no on-disk footprint. Lets Kepler.gl / DuckDB / Databricks / Snowflake consumers join directly against H3-indexed data. | Not publicly exposed on Radar's API. |
+| **WoF country fallback** | `wof_countries.bin` fills in `country_code` when an OSM extract is missing the `admin_level=2` relation (per-country Geofabrik). | Uses reverse-geocodable polygons end-to-end; not documented as a separate fallback path. |
+| **Every enrichment optional** | Missing `gnaf_*.bin` / `fst_*.fst` / `i18n_names.bin` / `postcode_lookup.bin` / `wof_countries.bin` → server starts, the corresponding feature returns 501 or degrades silently. Per-country deployments only mount what they need. | Not documented. |
 
 ### Performance: apples vs oranges
 
@@ -499,17 +546,6 @@ solving different problems:
 - Radar's 1K QPS/core is with 1B calls/day of truly diverse queries;
   our 20K QPS/core is uniform AU reverse — we haven't load-tested
   global freeform.
-
-### What we've since adopted from their playbook
-
-Three of the biggest Radar-documented patterns are now live:
-
-1. **FST fast-path** — ✅ shipped. `/search` probes per-country FSTs for
-   exact-key matches before touching tantivy; 400 ns when it hits.
-2. **Fuzzy fallback** — ✅ shipped. FuzzyTermQuery (Levenshtein-1) retries
-   the freeform query on zero hits; catches most single-char typos.
-3. **i18n via OSM `name:<lang>`** — ✅ shipped. `/reverse?lang=zh` swaps
-   admin names to the requested language when OSM has the tag.
 
 ### What we'd still adopt if the scope grew
 
@@ -544,27 +580,6 @@ Three of the biggest Radar-documented patterns are now live:
    Our ArcSwap reload handles single-instance; fleet-level rollouts
    want the Radar pattern.
 
-### What we already do better (or more explicitly)
-
-1. **Simpler storage.** No RocksDB to tune. Our mmap'd flat format is
-   smaller, faster for point lookups, and has no LSM compaction
-   overhead. Tradeoff: we can't do range scans, prefix lookups on
-   arbitrary text, or update-in-place. Fine for our workload.
-
-2. **Explicit country-source priority.** G-NAF for AU, OA for other
-   covered countries, OSM as floor. Each source is visible in the
-   `find_addr_point` ladder. Their preprocessing collapses this into
-   one opaque "addresses" store.
-
-3. **Drop-in Nominatim compatibility.** Existing clients of
-   nominatim.openstreetmap.org can point at us without changing
-   their parsers. Radar's API is their own shape.
-
-4. **Every enrichment is optional.** Missing `gnaf_*.bin`? Server
-   starts. Missing `tantivy_<cc>/`? Search falls back. Missing
-   `postcode_lookup.bin`? Postcode fields are just null. Lets operators
-   pick their exact cost/coverage tradeoff per country.
-
 ### Areas Radar hasn't publicly documented
 
 Worth flagging as both our risk areas and opportunities to differentiate
@@ -583,14 +598,13 @@ through our own documentation:
 
 ## Summary
 
-We've built a geocoder architecturally congruent with Radar's
-production HorizonDB and have since closed the three biggest
-documented gaps: **FST fast-path, fuzzy fallback, and i18n via OSM
-`name:<lang>` tags** are all live. Measured latency is still 100–1000×
-below Radar's published numbers for the narrower structured-dispatch
-workload, with room for the harder freeform/ML-disambiguated case if
-the scope grows.
-
-Both systems validate that Rust + S2 + tantivy + mmap is the current
-best-in-class answer for geocoding infrastructure, and neither needed
-PostGIS, Elasticsearch, or a distributed database to get there.
+Rust + S2 + tantivy + mmap has turned out to be the right answer for
+geocoding infrastructure on both sides of this comparison — neither
+system needed PostGIS, Elasticsearch, or a distributed database to
+get there. Our measured latency sits 100–1000× below Radar's published
+numbers for structured-dispatch workloads; the freeform / ML-ranked
+case is where they still do more, and that backlog is catalogued above.
+Beyond the Radar playbook we ship H3 cell enrichment, a gRPC mirror of
+every REST endpoint, drop-in Nominatim JSON compatibility, and
+optional-enrichment semantics that let operators pick their exact
+cost / coverage tradeoff per country.

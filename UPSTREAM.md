@@ -25,7 +25,10 @@ These are architectural expansions that don't match upstream's mandate as a Trac
 - **Confidence field** (`exact` / `interpolated` / `fallback`) on all responses.
 - **Hot reload** via `ArcSwap` + marker file.
 - **Per-country partitioning** for Tantivy, FST, and address-point indexes.
-- **Build tooling** — `build-forward-index`, `build-autocomplete-fst`, `build-gnaf-index`, `build-openaddresses-index`, `build-postcode-lookup`.
+- **Build tooling** — `build-forward-index`, `build-autocomplete-fst`, `build-gnaf-index`, `build-openaddresses-index`, `build-postcode-lookup`, `wof-importer`.
+- **Who's on First country fallback** — `wof_countries.bin` back-fills `country_code` when an OSM extract (e.g. per-country Geofabrik) lacks the `admin_level=2` relation.
+- **H3 cell enrichment** — opt-in `h3_res=` query parameter stamps Uber H3 cell IDs on any returned coord (up to 4 resolutions per call). Computed query-time via `h3o`; no on-disk footprint.
+- **Removed: API key authentication and web dashboard** — the fork ships as an unauthenticated internal service, gated at the network layer. Upstream retains its dashboard.
 - **Architecture documentation** — [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ### Bug fixes and quality improvements — candidates for upstream PRs

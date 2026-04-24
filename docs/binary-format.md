@@ -427,6 +427,26 @@ flat `tantivy/` (monolithic) or `tantivy_<cc>/` per-country.
 `GeoLite2-City.mmdb`. MaxMind binary format, not ours. Loaded via
 the `maxminddb` crate.
 
+## Runtime-only enrichments (not on disk)
+
+Some response fields are computed at query time and therefore have
+no corresponding `.bin` file. They're called out here so readers
+auditing "what's in the index directory?" don't go looking for a
+file that doesn't exist.
+
+### H3 cell IDs
+
+When a request carries `h3_res=<comma-separated resolutions>` (0–15,
+max 4), the server converts the response coord into an `h3` map
+`{"<resolution>": "<15-char hex cell id>"}` via the `h3o` crate.
+Each cell takes ~tens of nanoseconds to compute, so persisting them
+on disk would cost more in complexity than it saves. See
+`server/src/h3_cell.rs` for the helper module and the reasoning.
+
+The same param + response shape is mirrored on the gRPC proto as
+`repeated uint32 h3_res` on requests and `map<uint32, string> h3`
+on responses.
+
 ## File relationships
 
 ```
