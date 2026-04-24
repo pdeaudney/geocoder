@@ -218,6 +218,44 @@ fn mmap_file_optional(path: &str) -> Option<Mmap> {
     File::open(path).ok().and_then(|f| unsafe { Mmap::map(&f).ok() })
 }
 
+/// Mmap a record-array file and verify its length is a positive multiple
+/// of `record_size`. Truncated or zero-length indexes otherwise turn into
+/// silently-short typed slices that serve partial data; we'd rather
+/// refuse to start than mmap corruption.
+fn mmap_records(path: &str, record_size: usize, record_name: &str) -> Result<Mmap, String> {
+    let mmap = mmap_file(path)?;
+    if record_size == 0 {
+        return Err(format!("internal: record_size=0 for {path}"));
+    }
+    if mmap.is_empty() {
+        return Err(format!(
+            "{path}: empty (expected at least one {record_name}) — index is corrupt or incomplete"
+        ));
+    }
+    if mmap.len() % record_size != 0 {
+        return Err(format!(
+            "{path}: length {} is not a multiple of {record_size} ({record_name}) — \
+             likely truncated or format-mismatched; rebuild the index",
+            mmap.len()
+        ));
+    }
+    Ok(mmap)
+}
+
+/// Mmap an entries/cells file that contains variable-length payloads,
+/// refusing only an empty file. Entries files have a u16 count header
+/// so the mmap length isn't a simple multiple; we validate structural
+/// consistency opportunistically at query time.
+fn mmap_nonempty(path: &str, role: &str) -> Result<Mmap, String> {
+    let mmap = mmap_file(path)?;
+    if mmap.is_empty() {
+        return Err(format!(
+            "{path}: empty (expected a non-empty {role}) — index is corrupt or incomplete"
+        ));
+    }
+    Ok(mmap)
+}
+
 impl Index {
     pub fn load(dir: &str, street_cell_level: u64, admin_cell_level: u64, search_distance: f64) -> Result<Self, String> {
         Self::load_with_admin_config(
@@ -243,24 +281,53 @@ impl Index {
         let open_addresses = OpenAddresses::open(Path::new(dir))?;
         let i18n_names = I18nNames::open(Path::new(dir))?;
         let wof_countries = crate::wof_countries::WofCountries::open(Path::new(dir))?;
+        // Fixed-size record files: length must be a positive multiple
+        // of the record size. Variable-payload entry/cells files just
+        // need to be non-empty; the reader validates per-cell structure
+        // on each access.
+        let geo_cells = mmap_records(&format!("{}/geo_cells.bin", dir), 20, "GeoCell")?;
+        let street_entries = mmap_nonempty(&format!("{}/street_entries.bin", dir), "street entries")?;
+        let street_ways = mmap_records(&format!("{}/street_ways.bin", dir), std::mem::size_of::<WayHeader>(), "WayHeader")?;
+        let street_nodes = mmap_records(&format!("{}/street_nodes.bin", dir), std::mem::size_of::<NodeCoord>(), "NodeCoord")?;
+        let addr_entries = mmap_nonempty(&format!("{}/addr_entries.bin", dir), "addr entries")?;
+        let addr_points = mmap_records(&format!("{}/addr_points.bin", dir), std::mem::size_of::<AddrPoint>(), "AddrPoint")?;
+        let interp_entries = mmap_nonempty(&format!("{}/interp_entries.bin", dir), "interp entries")?;
+        let interp_ways = mmap_records(&format!("{}/interp_ways.bin", dir), std::mem::size_of::<InterpWay>(), "InterpWay")?;
+        let interp_nodes = mmap_records(&format!("{}/interp_nodes.bin", dir), std::mem::size_of::<NodeCoord>(), "NodeCoord")?;
+        let admin_cells = mmap_nonempty(&format!("{}/admin_cells.bin", dir), "admin cells")?;
+        let admin_entries = mmap_nonempty(&format!("{}/admin_entries.bin", dir), "admin entries")?;
+        let admin_polygons = mmap_records(&format!("{}/admin_polygons.bin", dir), std::mem::size_of::<AdminPolygon>(), "AdminPolygon")?;
+        let admin_vertices = mmap_records(&format!("{}/admin_vertices.bin", dir), std::mem::size_of::<NodeCoord>(), "NodeCoord")?;
+        // Place files are optional (old indexes may not have them); when
+        // present, they still have to be well-formed.
+        let place_points_path = format!("{}/place_points.bin", dir);
+        let place_points = if Path::new(&place_points_path).exists() {
+            Some(mmap_records(&place_points_path, std::mem::size_of::<PlacePoint>(), "PlacePoint")?)
+        } else {
+            None
+        };
+        let place_cells = mmap_file_optional(&format!("{}/place_cells.bin", dir));
+        let place_entries = mmap_file_optional(&format!("{}/place_entries.bin", dir));
+        let strings = mmap_nonempty(&format!("{}/strings.bin", dir), "string pool")?;
+
         Ok(Index {
-            geo_cells: mmap_file(&format!("{}/geo_cells.bin", dir))?,
-            street_entries: mmap_file(&format!("{}/street_entries.bin", dir))?,
-            street_ways: mmap_file(&format!("{}/street_ways.bin", dir))?,
-            street_nodes: mmap_file(&format!("{}/street_nodes.bin", dir))?,
-            addr_entries: mmap_file(&format!("{}/addr_entries.bin", dir))?,
-            addr_points: mmap_file(&format!("{}/addr_points.bin", dir))?,
-            interp_entries: mmap_file(&format!("{}/interp_entries.bin", dir))?,
-            interp_ways: mmap_file(&format!("{}/interp_ways.bin", dir))?,
-            interp_nodes: mmap_file(&format!("{}/interp_nodes.bin", dir))?,
-            admin_cells: mmap_file(&format!("{}/admin_cells.bin", dir))?,
-            admin_entries: mmap_file(&format!("{}/admin_entries.bin", dir))?,
-            admin_polygons: mmap_file(&format!("{}/admin_polygons.bin", dir))?,
-            admin_vertices: mmap_file(&format!("{}/admin_vertices.bin", dir))?,
-            place_cells: mmap_file_optional(&format!("{}/place_cells.bin", dir)),
-            place_entries: mmap_file_optional(&format!("{}/place_entries.bin", dir)),
-            place_points: mmap_file_optional(&format!("{}/place_points.bin", dir)),
-            strings: mmap_file(&format!("{}/strings.bin", dir))?,
+            geo_cells,
+            street_entries,
+            street_ways,
+            street_nodes,
+            addr_entries,
+            addr_points,
+            interp_entries,
+            interp_ways,
+            interp_nodes,
+            admin_cells,
+            admin_entries,
+            admin_polygons,
+            admin_vertices,
+            place_cells,
+            place_entries,
+            place_points,
+            strings,
             street_cell_level,
             admin_cell_level,
             max_distance_sq,
@@ -405,6 +472,16 @@ impl Index {
                 let way = &all_ways[id as usize];
                 let offset = way.node_offset as usize;
                 let count = way.node_count as usize;
+                // Defensive: a street with <2 nodes has no segments. The
+                // builder guarantees ≥2 per way, but a truncated or
+                // adversarial `street_nodes.bin` could violate this —
+                // without the guard, `nodes.len() - 1` would underflow
+                // usize and the subsequent index would segfault. Crashing
+                // a worker on a bad record is not an acceptable 99.99%
+                // failure mode.
+                if offset + count > all_street_nodes.len() || count < 2 {
+                    return;
+                }
                 let nodes = &all_street_nodes[offset..offset + count];
 
                 for i in 0..nodes.len() - 1 {
@@ -427,6 +504,11 @@ impl Index {
 
                 let offset = iw.node_offset as usize;
                 let count = iw.node_count as usize;
+                // Same defensive guard as the street loop above: corrupt
+                // `interp_nodes.bin` must not panic the worker.
+                if offset + count > all_interp_nodes.len() || count < 2 {
+                    return;
+                }
                 let nodes = &all_interp_nodes[offset..offset + count];
 
                 if let Some((dist, t)) = project_point_on_polyline(lat, lng, nodes, cos_lat) {
@@ -481,6 +563,7 @@ impl Index {
             Self::for_each_entry(&self.admin_entries, Self::lookup_admin_cell(&self.admin_cells, c), |id| {
                 let is_interior = (id & INTERIOR_FLAG) != 0;
                 let poly_id = (id & ID_MASK) as usize;
+                if poly_id >= all_polygons.len() { return; }
                 let poly = &all_polygons[poly_id];
                 let level = poly.admin_level as usize;
                 if level >= 12 { return; }
@@ -489,11 +572,15 @@ impl Index {
                     if poly.area >= best_area { return; }
                 }
 
-                if is_interior || point_in_polygon_f64(lat, lng, {
-                    let offset = poly.vertex_offset as usize;
-                    let count = poly.vertex_count as usize;
-                    &all_vertices[offset..offset + count]
-                }) {
+                let offset = poly.vertex_offset as usize;
+                let count = poly.vertex_count as usize;
+                // Defensive: reject out-of-range vertex slices from a
+                // corrupt admin_polygons.bin / admin_vertices.bin pair
+                // rather than panicking the worker.
+                if offset + count > all_vertices.len() || count < 3 {
+                    return;
+                }
+                if is_interior || point_in_polygon_f64(lat, lng, &all_vertices[offset..offset + count]) {
                     best_by_level[level] = Some((poly.area, poly));
                 }
             });

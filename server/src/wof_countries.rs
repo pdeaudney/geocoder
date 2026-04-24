@@ -179,6 +179,11 @@ impl WofCountries {
             let p = polys[idx as usize];
             let off = p.vertex_offset as usize;
             let count = p.vertex_count as usize;
+            // Defensive: reject out-of-range ring rather than panic on
+            // a truncated/corrupt wof_countries_vertices.bin.
+            if off + count > all_vertices.len() || count < 3 {
+                continue;
+            }
             let ring = &all_vertices[off..off + count];
             if !point_in_polygon_f64(lat, lng, ring) {
                 continue;

@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! struct PostcodeEntry {
-//!     key_hash: u64,        // FxHash of "<state_abbr>|<normalised_locality>"
+//!     key_hash: u64,        // FNV-1a of "<state_abbr>|<normalised_locality>"
 //!     postcode_offset: u32, // offset into postcode_lookup_strings.bin
 //!     _pad: u32,
 //! }
@@ -20,6 +20,19 @@
 //! Strings live in a separate NUL-terminated pool. Only the postcode values
 //! are stored — the hash covers the (state, locality) lookup key.
 //!
+//! ## Hash algorithm choice
+//!
+//! We deliberately use **FNV-1a** — a fixed, public, deterministic
+//! algorithm — rather than `std::collections::hash_map::DefaultHasher`
+//! whose algorithm is explicitly not stable across Rust releases
+//! (<https://doc.rust-lang.org/std/collections/hash_map/struct.DefaultHasher.html>).
+//! The build-side and query-side of this lookup must produce the same
+//! u64 forever, independent of toolchain upgrades. If `DefaultHasher`
+//! ever changes algorithm, every postcode on disk would hash to a
+//! different key and the lookup would return all-miss with no error.
+//! FNV-1a is slower than FxHash but ~17k lookups per server lifetime
+//! is not the bottleneck, and no-new-dep is worth the simplicity.
+//!
 //! ## Build
 //!
 //! Populated by `build-postcode-lookup` reading G-NAF PSV files:
@@ -31,13 +44,27 @@
 //! every locality with a `PRIMARY_POSTCODE`.
 
 use memmap2::Mmap;
-use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 /// Size of a single entry in `postcode_lookup.bin`, in bytes.
 pub const ENTRY_SIZE: usize = 16;
+
+/// FNV-1a 64-bit seed and multiplier — the published constants. Do not
+/// change these. Changing either would silently invalidate every
+/// `postcode_lookup.bin` ever built.
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x00000100000001b3;
+
+/// FNV-1a over `bytes`, continuing from `hash`.
+#[inline]
+fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
 
 /// Hash function applied symmetrically at build-time and query-time.
 ///
@@ -45,11 +72,13 @@ pub const ENTRY_SIZE: usize = 16;
 /// lowercase, strip diacritics, and strip punctuation before hashing so
 /// "St. Kilda" and "St Kilda" collide correctly.
 pub fn lookup_hash(state_abbr: &str, locality: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    normalise_locality(state_abbr).hash(&mut hasher);
-    b"|".hash(&mut hasher);
-    normalise_locality(locality).hash(&mut hasher);
-    hasher.finish()
+    let state = normalise_locality(state_abbr);
+    let loc = normalise_locality(locality);
+    let mut h = FNV_OFFSET;
+    h = fnv1a(h, state.as_bytes());
+    h = fnv1a(h, b"|");
+    h = fnv1a(h, loc.as_bytes());
+    h
 }
 
 /// Normalise a locality name for postcode-lookup matching: ASCII fold,
@@ -236,5 +265,35 @@ mod tests {
         let nsw = lookup_hash("NSW", "Armidale");
         let sa = lookup_hash("SA", "Armidale");
         assert_ne!(nsw, sa);
+    }
+
+    #[test]
+    fn hash_is_stable_across_toolchain_versions() {
+        // CRITICAL — pins the FNV-1a output for a known (state, locality)
+        // pair. If this test ever fails, the hash algorithm has been
+        // changed or a rustc upgrade has broken something unexpected, and
+        // every previously-built `postcode_lookup.bin` is now unreadable.
+        // Rebuild all indexes; do not paper over by updating the constant.
+        //
+        // The expected value was captured after the FNV-1a switch; any
+        // drift is a real incident.
+        let h = lookup_hash("NSW", "Baulkham Hills");
+        // Captured after the FNV-1a swap; any drift here indicates the
+        // hash output has changed and all postcode_lookup.bin files are
+        // unreadable until rebuilt.
+        assert_eq!(
+            h, 14417430809016431040u64,
+            "postcode hash drift: existing indexes are unreadable"
+        );
+    }
+
+    #[test]
+    fn fnv1a_matches_published_vectors() {
+        // Guard against a silent corruption of FNV_OFFSET / FNV_PRIME.
+        // These are the published FNV-1a 64-bit test vectors for the
+        // empty input and the literal "a". Changing the constants makes
+        // this test fail without touching any of the product code.
+        assert_eq!(fnv1a(FNV_OFFSET, b""), 0xcbf29ce484222325);
+        assert_eq!(fnv1a(FNV_OFFSET, b"a"), 0xaf63dc4c8601ec8c);
     }
 }
