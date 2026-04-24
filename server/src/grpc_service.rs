@@ -2,9 +2,11 @@
 //! `IpGeo` stack the REST API uses. Messages mirror the REST JSON shape
 //! so clients can pick the wire protocol without semantic drift.
 
+use crate::h3_cell;
 use crate::ip_geo::IpGeo;
 use crate::{Address as NativeAddress, AddressDetails as NativeAddressDetails, Index};
 use arc_swap::ArcSwap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
@@ -45,11 +47,14 @@ impl Geocoder for GeocoderService {
         req: Request<ReverseRequest>,
     ) -> Result<Response<AddressResponse>, Status> {
         let r = req.into_inner();
+        let h3_res = validate_h3_res(&r.h3_res)?;
         let snap = self.index.load();
         let address = snap.query(r.lat, r.lon);
         let _ = r.lang; // accepted, not yet honoured — mirrors REST
+        let mut pb = into_pb_address(address);
+        pb.h3 = build_h3_proto(r.lat, r.lon, &h3_res);
         Ok(Response::new(AddressResponse {
-            address: Some(into_pb_address(address)),
+            address: Some(pb),
         }))
     }
 
@@ -59,6 +64,7 @@ impl Geocoder for GeocoderService {
         req: Request<SearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         let r = req.into_inner();
+        let h3_res = validate_h3_res(&r.h3_res)?;
         let Some(fwd) = self.forward.as_ref() else {
             return Err(Status::unimplemented("forward index not built"));
         };
@@ -117,6 +123,7 @@ impl Geocoder for GeocoderService {
             };
             let enriched = snap.query(lat, lon);
             let details = into_pb_details(&enriched.address, matched_hn.as_deref());
+            let h3 = build_h3_proto(lat, lon, &h3_res);
             out.push(PbSearchHit {
                 name: hit.name,
                 kind: hit.kind as u32,
@@ -126,6 +133,7 @@ impl Geocoder for GeocoderService {
                 lon,
                 display_name: enriched.display_name.unwrap_or_default(),
                 address: Some(details),
+                h3,
             });
         }
         Ok(Response::new(SearchResponse { results: out }))
@@ -147,6 +155,7 @@ impl Geocoder for GeocoderService {
         req: Request<ValidateRequest>,
     ) -> Result<Response<ValidateResponse>, Status> {
         let r = req.into_inner();
+        let h3_res = validate_h3_res(&r.h3_res)?;
         let Some(fwd) = self.forward.as_ref() else {
             return Err(Status::unimplemented("forward index not built"));
         };
@@ -198,12 +207,14 @@ impl Geocoder for GeocoderService {
             (top.lat, top.lng, false, "interpolated".to_string())
         };
         let canonical = snap.query(lat, lon);
+        let h3 = build_h3_proto(lat, lon, &h3_res);
         Ok(Response::new(ValidateResponse {
             verified,
             confidence,
             lat,
             lon,
             normalized: Some(into_pb_address(canonical)),
+            h3,
         }))
     }
 
@@ -223,6 +234,7 @@ impl Geocoder for GeocoderService {
         req: Request<AutocompleteRequest>,
     ) -> Result<Response<AutocompleteResponse>, Status> {
         let r = req.into_inner();
+        let h3_res = validate_h3_res(&r.h3_res)?;
         let Some(a) = self.autocomplete.as_ref() else {
             return Err(Status::unimplemented("autocomplete FST not built"));
         };
@@ -237,13 +249,17 @@ impl Geocoder for GeocoderService {
         };
         let out = hits
             .into_iter()
-            .map(|h| PbAutocompleteHit {
-                name: h.name,
-                suburb: h.suburb.unwrap_or_default(),
-                kind: h.kind as u32,
-                rank: h.rank as u32,
-                lat: h.lat,
-                lon: h.lng,
+            .map(|h| {
+                let h3 = build_h3_proto(h.lat, h.lng, &h3_res);
+                PbAutocompleteHit {
+                    name: h.name,
+                    suburb: h.suburb.unwrap_or_default(),
+                    kind: h.kind as u32,
+                    rank: h.rank as u32,
+                    lat: h.lat,
+                    lon: h.lng,
+                    h3,
+                }
             })
             .collect();
         Ok(Response::new(AutocompleteResponse { results: out }))
@@ -267,6 +283,7 @@ impl Geocoder for GeocoderService {
         // inner message — tonic's Request::into_inner takes self.
         let peer = req.remote_addr();
         let r = req.into_inner();
+        let h3_res = validate_h3_res(&r.h3_res)?;
         let Some(db) = self.ip_db.as_ref() else {
             return Err(Status::unavailable("ip geocoding not enabled"));
         };
@@ -284,11 +301,13 @@ impl Geocoder for GeocoderService {
         };
         let snap = self.index.load();
         let addr = snap.query(lat, lon);
+        let h3 = build_h3_proto(lat, lon, &h3_res);
         Ok(Response::new(IpGeocodeResponse {
             ip: ip.to_string(),
             lat,
             lon,
             address: Some(into_pb_address(addr)),
+            h3,
         }))
     }
 }
@@ -297,10 +316,13 @@ impl Geocoder for GeocoderService {
 
 fn into_pb_address(src: NativeAddress<'_>) -> PbAddress {
     let confidence = src.confidence.unwrap_or("").to_string();
+    // h3 is populated by callers after they know the source coord;
+    // this converter doesn't have coords in scope.
     PbAddress {
         display_name: src.display_name.unwrap_or_default(),
         address: Some(into_pb_details(&src.address, None)),
         confidence,
+        h3: HashMap::new(),
     }
 }
 
@@ -326,6 +348,41 @@ fn empty_to_none(s: &str) -> Option<&str> {
     } else {
         Some(s)
     }
+}
+
+/// Validate H3 resolutions coming off the wire (proto carries them as
+/// `uint32` but H3 cells only exist at 0–15). Mirrors the REST path's
+/// `parse_h3_res` validation so the two surfaces can't diverge.
+fn validate_h3_res(raw: &[u32]) -> Result<Vec<u8>, Status> {
+    if raw.len() > h3_cell::MAX_RESOLUTIONS {
+        return Err(Status::invalid_argument(format!(
+            "h3_res: too many resolutions ({}, max {})",
+            raw.len(),
+            h3_cell::MAX_RESOLUTIONS
+        )));
+    }
+    let mut out = Vec::with_capacity(raw.len());
+    for &r in raw {
+        if r > 15 {
+            return Err(Status::invalid_argument(format!(
+                "h3_res: {r} is out of range 0–15"
+            )));
+        }
+        out.push(r as u8);
+    }
+    Ok(out)
+}
+
+/// Build the proto-shaped `map<uint32, string>` h3 field from a coord.
+/// Returns an empty map when no resolutions were requested so the
+/// default proto value round-trips cleanly.
+fn build_h3_proto(lat: f64, lng: f64, resolutions: &[u8]) -> HashMap<u32, String> {
+    let Some(m) = h3_cell::build_h3_map(lat, lng, resolutions) else {
+        return HashMap::new();
+    };
+    m.into_iter()
+        .filter_map(|(k, v)| k.parse::<u32>().ok().map(|r| (r, v)))
+        .collect()
 }
 
 fn parse_cc(s: &str) -> Option<[u8; 2]> {

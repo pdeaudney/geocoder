@@ -22,6 +22,16 @@ arc-swap = "1.7"
 tantivy = { version = "0.22", optional = true }
 maxminddb = "0.24"
 fst = "0.4"
+# H3 hexagonal spatial index — pure-Rust, from-scratch implementation
+# of the H3 spec, not a binding to the C reference impl. Active
+# upstream (HydroniumLabs/h3o), zero open issues, tracks the official
+# H3 issue tracker for spec parity. Used at query time to stamp an
+# H3 cell on response coords; no on-disk footprint.
+#
+# Pinned to 0.8.* because 0.9.x uses `const fn f64::round` which
+# requires rustc 1.90+. Our build targets stable 1.89. Bump to
+# "0.9" once we upgrade the toolchain.
+h3o = "0.8"
 tonic = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }
 

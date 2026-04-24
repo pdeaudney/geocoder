@@ -19,6 +19,7 @@ pub mod autocomplete;
 pub mod gnaf;
 pub mod i18n;
 pub mod ip_geo;
+pub mod h3_cell;
 pub mod openaddresses;
 pub mod postcode;
 pub mod wof_countries;
@@ -961,6 +962,11 @@ impl Index {
             display_name,
             address,
             confidence: confidence_level,
+            // H3 is populated by the HTTP layer when the caller asked for
+            // it — `query` itself is H3-agnostic so the indexing layer
+            // stays callable from non-HTTP contexts (tests, benches,
+            // builders) without having to think about query-time param.
+            h3: None,
         }
     }
 }
@@ -1204,6 +1210,13 @@ pub struct Address<'a> {
     /// trust on fallback matches. One of `exact`, `interpolated`, `fallback`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<&'static str>,
+    /// Optional H3 cell identifiers, keyed by resolution. Populated when
+    /// the caller passes `h3_res=...` on the request. Map shape means a
+    /// single-resolution request and a multi-resolution request share
+    /// the same schema: `{"9": "8928308280fffff"}` vs
+    /// `{"7": "87283082fffffff", "9": "8928308280fffff"}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h3: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// Canonical confidence labels used on `Address::confidence` and the

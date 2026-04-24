@@ -32,6 +32,9 @@ message Address {
   AddressDetails address = 2;
   // "exact" | "interpolated" | "fallback"
   string confidence = 3;
+  // H3 cell IDs keyed by resolution; populated when the request
+  // supplied `h3_res`. Empty map when no enrichment was requested.
+  map<uint32, string> h3 = 4;
 }
 
 // --- /reverse ---
@@ -42,6 +45,9 @@ message ReverseRequest {
   // ISO 639-1 language preference for returned names. Accepted today;
   // honoured once the OSM builder emits name:<lang> tags.
   string lang = 3;
+  // Optional H3 resolutions (0–15) to stamp on the response coord.
+  // Empty = no enrichment; max 4 entries.
+  repeated uint32 h3_res = 4;
 }
 
 message AddressResponse {
@@ -61,6 +67,8 @@ message SearchRequest {
   string kind = 7;
   // 1..=50, defaults to 10 if 0.
   uint32 limit = 8;
+  // Optional H3 resolutions (0–15) stamped on every hit. Max 4.
+  repeated uint32 h3_res = 9;
 }
 
 message SearchHit {
@@ -72,6 +80,9 @@ message SearchHit {
   double lon = 6;
   string display_name = 7;
   AddressDetails address = 8;
+  // H3 cell IDs keyed by resolution; populated when the request
+  // supplied `h3_res`. Empty map when no enrichment was requested.
+  map<uint32, string> h3 = 9;
 }
 
 message SearchResponse {
@@ -87,6 +98,8 @@ message ValidateRequest {
   string state = 4;
   string postcode = 5;
   string country_code = 6;
+  // Optional H3 resolutions (0–15) stamped on the response coord. Max 4.
+  repeated uint32 h3_res = 7;
 }
 
 message ValidateResponse {
@@ -95,6 +108,9 @@ message ValidateResponse {
   double lat = 3;
   double lon = 4;
   Address normalized = 5;
+  // H3 cell IDs keyed by resolution; populated when the request
+  // supplied `h3_res`. Empty map when no enrichment was requested.
+  map<uint32, string> h3 = 6;
 }
 
 // --- /autocomplete ---
@@ -103,6 +119,8 @@ message AutocompleteRequest {
   string q = 1;
   string country_code = 2;
   uint32 limit = 3;
+  // Optional H3 resolutions (0–15) stamped on every hit. Max 4.
+  repeated uint32 h3_res = 4;
 }
 
 message AutocompleteHit {
@@ -112,6 +130,9 @@ message AutocompleteHit {
   uint32 rank = 4;
   double lat = 5;
   double lon = 6;
+  // H3 cell IDs keyed by resolution; populated when the request
+  // supplied `h3_res`. Empty map when no enrichment was requested.
+  map<uint32, string> h3 = 7;
 }
 
 message AutocompleteResponse {
@@ -123,6 +144,8 @@ message AutocompleteResponse {
 message IpGeocodeRequest {
   // Textual IPv4 or IPv6. Empty = server uses the peer address.
   string ip = 1;
+  // Optional H3 resolutions (0–15) stamped on the response coord. Max 4.
+  repeated uint32 h3_res = 2;
 }
 
 message IpGeocodeResponse {
@@ -130,4 +153,7 @@ message IpGeocodeResponse {
   double lat = 2;
   double lon = 3;
   Address address = 4;
+  // H3 cell IDs keyed by resolution; populated when the request
+  // supplied `h3_res`. Empty map when no enrichment was requested.
+  map<uint32, string> h3 = 5;
 }

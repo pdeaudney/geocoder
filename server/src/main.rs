@@ -36,6 +36,12 @@ struct QueryParams {
     /// unconditionally without breaking.
     #[serde(default)]
     lang: Option<String>,
+    /// Optional comma-separated H3 resolutions (0–15, max 4). When set,
+    /// the response includes an `h3` map keyed by resolution. Rejects
+    /// invalid input with HTTP 400 rather than silently dropping it;
+    /// a typo in the query param is a bug to surface, not to swallow.
+    #[serde(default)]
+    h3_res: Option<String>,
     key: Option<String>,
 }
 
@@ -46,6 +52,8 @@ struct AutocompleteParams {
     country_code: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    h3_res: Option<String>,
     key: Option<String>,
 }
 
@@ -63,6 +71,8 @@ struct ValidateParams {
     #[serde(default)]
     postcode: Option<String>,
     country_code: String,
+    #[serde(default)]
+    h3_res: Option<String>,
     key: Option<String>,
 }
 
@@ -72,6 +82,8 @@ struct IpParams {
     /// either IPv4 or IPv6 in the usual textual form.
     #[serde(default)]
     ip: Option<String>,
+    #[serde(default)]
+    h3_res: Option<String>,
     key: Option<String>,
 }
 
@@ -96,7 +108,21 @@ struct SearchParams {
     kind: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    h3_res: Option<String>,
     key: Option<String>,
+}
+
+/// Resolve the `h3_res` query param to a validated list of resolutions.
+/// Returns an empty Vec when unset (no enrichment). Returns a 400 error
+/// response when the input is malformed so the handler can short-circuit.
+fn resolve_h3_res(raw: Option<&str>) -> Result<Vec<u8>, Response> {
+    match raw {
+        None => Ok(Vec::new()),
+        Some(s) => query_server::h3_cell::parse_h3_res(s).map_err(|msg| {
+            (StatusCode::BAD_REQUEST, msg).into_response()
+        }),
+    }
 }
 
 /// Liveness probe. 200 + `{"status":"ok"}` whenever the process can
@@ -241,8 +267,16 @@ async fn reverse_geocode(
         return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
     }
 
+    let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
     let snapshot = index.load();
-    let address = snapshot.query_with_lang(params.lat, params.lon, params.lang.as_deref());
+    let mut address = snapshot.query_with_lang(params.lat, params.lon, params.lang.as_deref());
+    // H3 describes the caller's query coord (the thing they asked about),
+    // not any refined match — /reverse has no refinement step.
+    address.h3 = query_server::h3_cell::build_h3_map(params.lat, params.lon, &h3_resolutions);
     // serde_json::to_string never fails for Address (no non-string map keys,
     // no Serialize impls that can return Err). An error here is a code bug,
     // not a runtime condition — panicking with a clear message is more
@@ -279,6 +313,11 @@ async fn validate_address(
     if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
         return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
     }
+
+    let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
 
     let Some(fwd) = forward_idx.as_ref() else {
         return (
@@ -361,6 +400,10 @@ async fn validate_address(
         },
         "lat": final_lat,
         "lon": final_lng,
+        // H3 describes the final (refined) coord — the thing the client
+        // would act on — not the pre-refinement street centroid. Skip
+        // the map entirely when h3_res wasn't requested.
+        "h3": query_server::h3_cell::build_h3_map(final_lat, final_lng, &h3_resolutions),
     });
     let json = serde_json::to_string(&body).expect("validate response serialisable");
     ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
@@ -373,6 +416,7 @@ async fn validate_address(
 fn enrich_fst_hit(
     fst_hit: query_server::autocomplete::Hit,
     index: &Index,
+    h3_resolutions: &[u8],
 ) -> serde_json::Value {
     let addr = index.query(fst_hit.lat, fst_hit.lng);
     let d = &addr.address;
@@ -399,6 +443,10 @@ fn enrich_fst_hit(
             "country_code": d.country_code,
         },
         "confidence": addr.confidence,
+        // FST hits and tantivy hits share the same response shape —
+        // if one carries `h3` both must, otherwise clients see silent
+        // inconsistency per query path.
+        "h3": query_server::h3_cell::build_h3_map(fst_hit.lat, fst_hit.lng, h3_resolutions),
     })
 }
 
@@ -436,6 +484,11 @@ async fn autocomplete(
         return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
     }
 
+    let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
     let Some(autoc) = autocomplete_idx.as_ref() else {
         return (
             StatusCode::NOT_IMPLEMENTED,
@@ -454,7 +507,27 @@ async fn autocomplete(
             None => autoc.search_any(&params.q, limit),
         };
 
-    let body = serde_json::json!({ "results": results });
+    // Transform hits into JSON values so we can attach `h3` per-result
+    // without coupling the autocomplete::Hit struct to H3.
+    let enriched: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|hit| {
+            let lat = hit.lat;
+            let lng = hit.lng;
+            let mut v = serde_json::to_value(hit).expect("autocomplete hit serialisable");
+            if let Some(obj) = v.as_object_mut() {
+                if let Some(h3) = query_server::h3_cell::build_h3_map(lat, lng, &h3_resolutions) {
+                    obj.insert(
+                        "h3".to_string(),
+                        serde_json::to_value(h3).expect("h3 map serialisable"),
+                    );
+                }
+            }
+            v
+        })
+        .collect();
+
+    let body = serde_json::json!({ "results": enriched });
     let json = serde_json::to_string(&body).expect("autocomplete response serialisable");
     ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
 }
@@ -483,6 +556,11 @@ async fn ip_geocode(
     if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
         return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
     }
+
+    let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
 
     // If the caller passes `?ip=...` accept that (convenient for admin
     // testing), otherwise default to the socket's peer address.
@@ -517,6 +595,7 @@ async fn ip_geocode(
         "display_name": address.display_name,
         "address": address.address,
         "confidence": address.confidence,
+        "h3": query_server::h3_cell::build_h3_map(lat, lon, &h3_resolutions),
     });
     let json = serde_json::to_string(&body).expect("ip response serialisable");
     ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
@@ -550,6 +629,11 @@ async fn search(
     if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
         return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
     }
+
+    let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
 
     let Some(fwd) = forward_idx.as_ref() else {
         return (
@@ -635,7 +719,7 @@ async fn search(
                     .unwrap_or(true);
                 if kind_ok {
                     let idx_snap = index.load();
-                    let enriched = enrich_fst_hit(fst_hit, &idx_snap);
+                    let enriched = enrich_fst_hit(fst_hit, &idx_snap, &h3_resolutions);
                     let body = serde_json::json!({ "results": [enriched] });
                     let json =
                         serde_json::to_string(&body).expect("fst fast-path serialisable");
@@ -699,7 +783,7 @@ async fn search(
     let idx_snapshot = index.load();
     let enriched: Vec<serde_json::Value> = hits
         .into_iter()
-        .map(|hit| enrich_hit(hit, housenumber.as_deref(), &idx_snapshot))
+        .map(|hit| enrich_hit(hit, housenumber.as_deref(), &idx_snapshot, &h3_resolutions))
         .collect();
 
     let body = serde_json::json!({ "results": enriched });
@@ -716,6 +800,7 @@ fn enrich_hit(
     hit: forward::Hit,
     housenumber: Option<&str>,
     index: &Index,
+    h3_resolutions: &[u8],
 ) -> serde_json::Value {
     use serde_json::json;
 
@@ -750,6 +835,9 @@ fn enrich_hit(
             "country": details.country,
             "country_code": details.country_code,
         },
+        // Always use the refined coord (post house-number match) — that's
+        // the coord the client will act on and should spatial-join by.
+        "h3": query_server::h3_cell::build_h3_map(final_lat, final_lng, h3_resolutions),
     })
 }
 

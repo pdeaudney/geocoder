@@ -222,6 +222,24 @@ GET /geocode/ip?ip=8.8.8.8&key=KEY               # explicit override
 
 Requires `GeoLite2-City.mmdb` in the data directory (free signup at [maxmind.com](https://www.maxmind.com/en/geolite2/signup)) or the `GEOLITE2_DB` env var pointing at one. Returns `503 Service Unavailable` when the DB isn't loaded.
 
+### H3 cell enrichment
+
+Any endpoint that returns a coordinate accepts an optional `h3_res` parameter — a comma-separated list of [Uber H3](https://h3geo.org/) resolutions (0–15, up to 4 values). The response gets an extra `h3` map keyed by resolution so downstream tools (Kepler.gl, DuckDB, Databricks, Snowflake) can do direct H3 joins without a per-row conversion step. Absent the parameter, no field is added — zero overhead for callers that don't ask.
+
+```
+GET /reverse?lat=-33.87&lon=151.21&h3_res=9&key=KEY
+GET /search?q=Sydney&country_code=au&h3_res=7,9,12&key=KEY
+```
+
+```json
+{
+  "address": { ... },
+  "h3": { "7": "872830828ffffff", "9": "8928308280fffff", "12": "8c28308280c01ff" }
+}
+```
+
+Values are the standard 15-char lowercase hex cell IDs. Cells are computed at query time — nothing new is stored on disk. The same parameter and response field work over gRPC (`repeated uint32 h3_res` on requests, `map<uint32, string> h3` on responses).
+
 ## gRPC
 
 A typed mirror of every REST endpoint. Service definition: [`server/proto/geocoder.proto`](server/proto/geocoder.proto).
