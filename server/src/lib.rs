@@ -834,14 +834,13 @@ impl Index {
             return None;
         }
 
-        let hn_needle = housenumber.trim().to_ascii_lowercase();
+        let hn_needle = housenumber.trim();
         if hn_needle.is_empty() {
             return None;
         }
         let street_hint = street_name_hint
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_ascii_lowercase);
+            .filter(|s| !s.is_empty());
 
         let cos_lat = near_lat.to_radians().cos();
         let mut best: Option<(f64, &AddrPoint)> = None;
@@ -851,12 +850,17 @@ impl Index {
             Self::for_each_entry(&self.addr_entries, offsets.addr, |id| {
                 let p = &all_points[id as usize];
                 let p_hn = self.get_string(p.housenumber_id);
-                if p_hn.to_ascii_lowercase() != hn_needle {
+                // eq_ignore_ascii_case is zero-alloc — both sides are compared
+                // byte-by-byte with per-byte ASCII-lowercase folding. In
+                // dense cities this loop visits hundreds of candidates per
+                // request; the old `p_hn.to_ascii_lowercase() != hn_needle`
+                // allocated a String per visit.
+                if !p_hn.eq_ignore_ascii_case(hn_needle) {
                     return;
                 }
-                if let Some(hint) = street_hint.as_deref() {
-                    let p_street = self.get_string(p.street_id).to_ascii_lowercase();
-                    if !p_street.contains(hint) {
+                if let Some(hint) = street_hint {
+                    let p_street = self.get_string(p.street_id);
+                    if !contains_ignore_ascii_case(p_street, hint) {
                         return;
                     }
                 }
@@ -885,7 +889,7 @@ impl Index {
     /// the caller's preferred language via OSM `name:<lang>` tags. Missing
     /// i18n index or no matching tag = falls through to the default name.
     pub fn query_with_lang(&self, lat: f64, lng: f64, lang: Option<&str>) -> Address<'_> {
-        let mut address = self.query(lat, lng);
+        let (mut address, admin) = self.query_and_admin(lat, lng);
         let Some(lang) = lang else { return address };
         let Some(code) = pack_lang_code(lang) else { return address };
         let Some(i18n) = self.i18n_names.as_ref() else { return address };
@@ -893,11 +897,6 @@ impl Index {
         // Apply the i18n override for each admin field that carries a
         // poly_id. Fields set via place=* fallback have no poly_id and
         // fall through unchanged.
-        // Note: we need the AdminResult poly_ids from find_admin; the
-        // simplest path is to re-run find_admin here to get them back.
-        // (Running it a second time is cheap — ~50 µs — and spares us a
-        // bigger refactor.)
-        let admin = self.find_admin(lat, lng);
         let details = &mut address.address;
         if let Some(pid) = admin.country_poly_id {
             if let Some(id) = i18n.lookup(ENTITY_ADMIN, pid, code) {
@@ -925,6 +924,14 @@ impl Index {
     }
 
     pub fn query(&self, lat: f64, lng: f64) -> Address<'_> {
+        self.query_and_admin(lat, lng).0
+    }
+
+    /// Internal: the full query pipeline, returning both the public
+    /// `Address` and the `AdminResult` it was built from so
+    /// `query_with_lang` can reuse the poly_ids instead of running
+    /// `find_admin` twice. ~50 µs saved on every i18n-tagged /reverse.
+    fn query_and_admin(&self, lat: f64, lng: f64) -> (Address<'_>, AdminResult<'_>) {
         let max_dist = self.max_distance_sq;
 
         let mut admin = self.find_admin(lat, lng);
@@ -1035,7 +1042,7 @@ impl Index {
         }
 
         if road.is_none() && admin.country.is_none() && admin.city.is_none() {
-            return Address::default();
+            return (Address::default(), admin);
         }
 
         // If we only have admin data (no road / house), that's still a
@@ -1055,7 +1062,7 @@ impl Index {
             country_code: admin.country_code.map(|c| String::from_utf8_lossy(&c).into_owned()),
         };
         let display_name = format_address(&address);
-        Address {
+        let out = Address {
             display_name,
             address,
             confidence: confidence_level,
@@ -1064,11 +1071,46 @@ impl Index {
             // stays callable from non-HTTP contexts (tests, benches,
             // builders) without having to think about query-time param.
             h3: None,
-        }
+        };
+        (out, admin)
     }
 }
 
 // --- Geometry helpers ---
+
+/// Case-insensitive substring check without allocating. Mirrors
+/// `str::contains` + `str::to_ascii_lowercase` but comparing byte-by-
+/// byte with per-byte ASCII folding, so no `String` is materialised.
+/// Used in housenumber / street matching where the hot loop visits
+/// hundreds of candidates per request. ASCII-only folding is
+/// acceptable: upstream normalisation (G-NAF, OpenAddresses) already
+/// strips diacritics, and the comparison is against street names from
+/// the same pipeline.
+#[inline]
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return true;
+    }
+    if n.len() > h.len() {
+        return false;
+    }
+    let last = h.len() - n.len();
+    for i in 0..=last {
+        let mut matched = true;
+        for j in 0..n.len() {
+            if !h[i + j].eq_ignore_ascii_case(&n[j]) {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
+}
 
 /// Resolve a `&AdminPolygon` reference back to its index in the
 /// `admin_polygons.bin` array, via pointer arithmetic against the typed

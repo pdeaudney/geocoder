@@ -1,0 +1,43 @@
+# Per-target compiler flags for Rust builds.
+#
+# We deploy on AWS x86_64 (M/C/R families) and AWS Graviton 4+. Both
+# are common enough that we want release builds tuned for each — the
+# query-server's hot loops aren't FLOPS-bound (see perf-review) but
+# `-C target-cpu` still buys us tighter codegen for minor loops and,
+# more importantly, keeps us from leaving compiler features on the
+# table.
+#
+# Rationale for each target:
+#
+# - `x86-64-v3` is the microarchitecture level published in the psABI
+#   covering AVX2, BMI1/2, FMA, F16C — the baseline for everything
+#   Haswell (2013) and later. Every current AWS x86 family is
+#   Skylake-X or newer, so this is safe and widely compatible. We
+#   do NOT use `x86-64-v4` (AVX-512) because it would exclude AMD
+#   Zen 1/2 Graviton-parity instances and some current Intel SKUs
+#   on AWS still don't enable AVX-512.
+#
+# - `neoverse-v2` is Graviton 4's core. Graviton 4 (r8g/c8g/m8g as
+#   they roll out) is the target; Graviton 3/3E (neoverse-v1) get
+#   somewhat suboptimal code, Graviton 2 (neoverse-n1) more so.
+#   Per user direction, G4+ is the support floor — older Gravitons
+#   will still run the binary but without V2-specific scheduling /
+#   SVE2 code generation.
+#
+# macOS (aarch64-apple-darwin, x86_64-apple-darwin) is deliberately
+# left at rustc defaults. Developer workstations aren't production;
+# the `apple-m1`/`apple-m2`/native detection rustc applies by
+# default is fine there and it avoids breaking local builds on
+# Apple Silicon by assuming a Neoverse core.
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=neoverse-v2"]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-cpu=neoverse-v2"]

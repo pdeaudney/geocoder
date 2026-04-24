@@ -246,12 +246,10 @@ async fn reverse_geocode(
     // H3 describes the caller's query coord (the thing they asked about),
     // not any refined match — /reverse has no refinement step.
     address.h3 = query_server::h3_cell::build_h3_map(params.lat, params.lon, &h3_resolutions);
-    // serde_json::to_string never fails for Address (no non-string map keys,
-    // no Serialize impls that can return Err). An error here is a code bug,
-    // not a runtime condition — panicking with a clear message is more
-    // useful than silently returning "" to the client.
-    let json = serde_json::to_string(&address).expect("Address is always serialisable");
-    ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
+    // axum::Json writes directly to a BytesMut; skips the intermediate
+    // `String` allocation + UTF-8 copy the old `to_string() -> tuple
+    // response` path forced.
+    axum::Json(address).into_response()
 }
 
 /// Address validation — given structured components, confirm whether the
@@ -301,12 +299,7 @@ async fn validate_address(
             "confidence": "fallback",
             "reason": "street not found in the requested city/state/country",
         });
-        return (
-            StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
-            serde_json::to_string(&body).expect("serialise"),
-        )
-            .into_response();
+        return (StatusCode::OK, axum::Json(body)).into_response();
     };
 
     // Step 2: refine to the exact property if a housenumber was supplied.
@@ -354,8 +347,7 @@ async fn validate_address(
         // the map entirely when h3_res wasn't requested.
         "h3": query_server::h3_cell::build_h3_map(final_lat, final_lng, &h3_resolutions),
     });
-    let json = serde_json::to_string(&body).expect("validate response serialisable");
-    ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
+    axum::Json(body).into_response()
 }
 
 /// Build a `/search`-response-shaped record from a FST fast-path hit.
@@ -457,8 +449,7 @@ async fn autocomplete(
         .collect();
 
     let body = serde_json::json!({ "results": enriched });
-    let json = serde_json::to_string(&body).expect("autocomplete response serialisable");
-    ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
+    axum::Json(body).into_response()
 }
 
 async fn ip_geocode(
@@ -507,8 +498,7 @@ async fn ip_geocode(
         "confidence": address.confidence,
         "h3": query_server::h3_cell::build_h3_map(lat, lon, &h3_resolutions),
     });
-    let json = serde_json::to_string(&body).expect("ip response serialisable");
-    ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
+    axum::Json(body).into_response()
 }
 
 #[cfg(feature = "forward")]
@@ -609,10 +599,7 @@ async fn search(
                     let idx_snap = index.load();
                     let enriched = enrich_fst_hit(fst_hit, &idx_snap, &h3_resolutions);
                     let body = serde_json::json!({ "results": [enriched] });
-                    let json =
-                        serde_json::to_string(&body).expect("fst fast-path serialisable");
-                    return ([(axum::http::header::CONTENT_TYPE, "application/json")], json)
-                        .into_response();
+                    return axum::Json(body).into_response();
                 }
             }
         }
@@ -675,8 +662,7 @@ async fn search(
         .collect();
 
     let body = serde_json::json!({ "results": enriched });
-    let json = serde_json::to_string(&body).expect("enriched results are always serialisable");
-    ([(axum::http::header::CONTENT_TYPE, "application/json")], json).into_response()
+    axum::Json(body).into_response()
 }
 
 /// Upgrade a forward `Hit` into a dispatch-grade record: apply house-number

@@ -152,46 +152,48 @@ impl AddressPointIndex {
         let origin = CellID::from(LatLng::from_degrees(near_lat, near_lng)).parent(street_level);
         let neighbours = origin.all_neighbors(street_level);
 
-        let hn_needle = housenumber.trim().to_ascii_lowercase();
+        let hn_needle = housenumber.trim();
         let street_needle = street_hint
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_ascii_lowercase);
+            .filter(|s| !s.is_empty());
 
         let cos_lat = near_lat.to_radians().cos();
-        let mut candidate_ids: Vec<u32> = Vec::new();
+        let mut best: Option<(f64, &AddressPoint)> = None;
+        // Fuse the candidate enumeration with the scoring pass — avoids
+        // materialising a Vec<u32> of IDs for every query. On dense
+        // cities this was ~1–4 KB of heap per call.
         for cell in std::iter::once(origin).chain(neighbours.into_iter()) {
             let Some(entry_offset) = lookup_cell_offset(&self.cells, cell.0) else {
                 continue;
             };
-            for_each_point_in_cell(&self.entries, entry_offset, |id| candidate_ids.push(id));
-        }
-
-        let mut best: Option<(f64, &AddressPoint)> = None;
-        for id in candidate_ids {
-            let Some(p) = points.get(id as usize) else {
-                continue;
-            };
-            let hn = self.string_at(p.housenumber_id);
-            if !hn.eq_ignore_ascii_case(&hn_needle) {
-                continue;
-            }
-            if let Some(street_needle) = street_needle.as_deref() {
-                let street = self.string_at(p.street_id).to_ascii_lowercase();
-                if !street.contains(street_needle) {
-                    continue;
+            for_each_point_in_cell(&self.entries, entry_offset, |id| {
+                let Some(p) = points.get(id as usize) else {
+                    return;
+                };
+                let hn = self.string_at(p.housenumber_id);
+                if !hn.eq_ignore_ascii_case(hn_needle) {
+                    return;
                 }
-            }
-            let dlat = (p.lat as f64 - near_lat).to_radians();
-            let dlng = (p.lng as f64 - near_lng).to_radians();
-            let dist = dlat * dlat + dlng * dlng * cos_lat * cos_lat;
-            let take = match best {
-                None => true,
-                Some((best_dist, _)) => dist < best_dist,
-            };
-            if take {
-                best = Some((dist, p));
-            }
+                if let Some(street_needle) = street_needle {
+                    let street = self.string_at(p.street_id);
+                    // Zero-alloc case-insensitive substring check. Mirrors
+                    // crate::contains_ignore_ascii_case but inlined here
+                    // to avoid a module-private dependency.
+                    if !contains_ignore_ascii_case(street, street_needle) {
+                        return;
+                    }
+                }
+                let dlat = (p.lat as f64 - near_lat).to_radians();
+                let dlng = (p.lng as f64 - near_lng).to_radians();
+                let dist = dlat * dlat + dlng * dlng * cos_lat * cos_lat;
+                let take = match best {
+                    None => true,
+                    Some((best_dist, _)) => dist < best_dist,
+                };
+                if take {
+                    best = Some((dist, p));
+                }
+            });
         }
 
         best.map(|(_, p)| self.hydrate(p))
@@ -245,6 +247,35 @@ impl AddressPointIndex {
 // on-disk format lives in exactly one place: this module.
 
 const CELL_ENTRY_SIZE: usize = 12; // u64 + u32
+
+/// Case-insensitive substring check, zero-alloc. ASCII folding only —
+/// upstream normalisation in G-NAF / OpenAddresses has already stripped
+/// diacritics, so the comparison is against ASCII-normalised names.
+#[inline]
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return true;
+    }
+    if n.len() > h.len() {
+        return false;
+    }
+    let last = h.len() - n.len();
+    for i in 0..=last {
+        let mut matched = true;
+        for j in 0..n.len() {
+            if !h[i + j].eq_ignore_ascii_case(&n[j]) {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
+}
 
 fn lookup_cell_offset(cells: &[u8], cell_id: u64) -> Option<u32> {
     let count = cells.len() / CELL_ENTRY_SIZE;

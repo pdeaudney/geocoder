@@ -128,7 +128,15 @@ impl AutocompleteCountry {
         let automaton = fst::automaton::Str::new(q).starts_with();
         let mut stream = self.map.search(automaton).into_stream();
         let records: &[AutocompleteEntry] = crate::as_typed_slice(&self.entries);
-        let mut heap: BinaryHeap<(u8, String, u64)> = BinaryHeap::with_capacity(limit + 1);
+        // Heap key is (rank, id): we drop string names from the heap so a
+        // broad prefix that visits ~10k candidates doesn't allocate ~10k
+        // `String`s only for 10 to survive. Final alphabetic tie-break is
+        // applied in `heap_into_sorted_hits` over the surviving `limit`
+        // items. For rank-ties, heap eviction now breaks on id (smaller
+        // wins) instead of alphabetic — in practice this still produces
+        // the same top-N for any real prefix because items are stored in
+        // rank-then-name order upstream.
+        let mut heap: BinaryHeap<(u8, u64)> = BinaryHeap::with_capacity(limit + 1);
         let mut visited = 0usize;
         while let Some((_, id)) = stream.next() {
             visited += 1;
@@ -138,7 +146,7 @@ impl AutocompleteCountry {
             let Some(entry) = records.get(id as usize) else {
                 continue;
             };
-            heap_push_bounded(&mut heap, entry, id, &self.strings, limit);
+            heap_push_bounded(&mut heap, entry.rank, id, limit);
         }
         heap_into_sorted_hits(heap, records, &self.strings)
     }
@@ -167,32 +175,29 @@ fn entry_to_hit(entry: &AutocompleteEntry, strings: &[u8]) -> Hit {
     }
 }
 
-/// Drain `heap` into a rank-then-name sorted `Vec<Hit>`.
+/// Drain `heap` into a rank-then-name sorted `Vec<Hit>`. String names
+/// are materialised here — once per surviving heap entry — rather than
+/// per-candidate at push time.
 fn heap_into_sorted_hits(
-    heap: BinaryHeap<(u8, String, u64)>,
+    heap: BinaryHeap<(u8, u64)>,
     records: &[AutocompleteEntry],
     strings: &[u8],
 ) -> Vec<Hit> {
     let mut out: Vec<Hit> = heap
         .into_iter()
-        .filter_map(|(_, _, id)| records.get(id as usize).map(|e| entry_to_hit(e, strings)))
+        .filter_map(|(_, id)| records.get(id as usize).map(|e| entry_to_hit(e, strings)))
         .collect();
     out.sort_by(|a, b| a.rank.cmp(&b.rank).then(a.name.cmp(&b.name)));
     out
 }
 
 /// Push an entry into a bounded max-heap keyed on rank (smallest wins).
-/// When the heap exceeds `limit`, pop the worst — i.e. always retain the
-/// best `limit` observed so far.
-fn heap_push_bounded(
-    heap: &mut BinaryHeap<(u8, String, u64)>,
-    entry: &AutocompleteEntry,
-    id: u64,
-    strings: &[u8],
-    limit: usize,
-) {
-    let name = read_cstr(strings, entry.name_offset).to_owned();
-    heap.push((entry.rank, name, id));
+/// Breaks ties by id. When the heap exceeds `limit`, pops the worst —
+/// always retaining the best `limit` observed so far. Zero-alloc on
+/// every push; strings are resolved only in `heap_into_sorted_hits`.
+#[inline]
+fn heap_push_bounded(heap: &mut BinaryHeap<(u8, u64)>, rank: u8, id: u64, limit: usize) {
+    heap.push((rank, id));
     if heap.len() > limit {
         heap.pop();
     }
@@ -643,7 +648,15 @@ impl UnifiedAutocomplete {
         let auto = CountryPrefixAutomaton::starts_with(*country_code, &key);
         let mut stream = self.map.search(auto).into_stream();
         let records = self.records();
-        let mut heap: BinaryHeap<(u8, String, u64)> = BinaryHeap::with_capacity(limit + 1);
+        // Heap key is (rank, id): we drop string names from the heap so a
+        // broad prefix that visits ~10k candidates doesn't allocate ~10k
+        // `String`s only for 10 to survive. Final alphabetic tie-break is
+        // applied in `heap_into_sorted_hits` over the surviving `limit`
+        // items. For rank-ties, heap eviction now breaks on id (smaller
+        // wins) instead of alphabetic — in practice this still produces
+        // the same top-N for any real prefix because items are stored in
+        // rank-then-name order upstream.
+        let mut heap: BinaryHeap<(u8, u64)> = BinaryHeap::with_capacity(limit + 1);
         let mut visited = 0usize;
         while let Some((_, id)) = stream.next() {
             visited += 1;
@@ -653,7 +666,7 @@ impl UnifiedAutocomplete {
             let Some(entry) = records.get(id as usize) else {
                 continue;
             };
-            heap_push_bounded(&mut heap, entry, id, &self.strings, limit);
+            heap_push_bounded(&mut heap, entry.rank, id, limit);
         }
         heap_into_sorted_hits(heap, records, &self.strings)
     }

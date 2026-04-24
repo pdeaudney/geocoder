@@ -39,6 +39,22 @@ target_compile_options(build-index PRIVATE
     $<$<CONFIG:Release>:-O3 -DNDEBUG>
 )
 
+# Per-arch tuning for release builds. Matches .cargo/config.toml — we
+# deploy on AWS x86_64 (Haswell+) and Graviton 4+. On Linux pick the
+# right flag; on macOS leave the native default alone (dev laptops,
+# not production).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+        target_compile_options(build-index PRIVATE
+            $<$<CONFIG:Release>:-march=x86-64-v3>
+        )
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        target_compile_options(build-index PRIVATE
+            $<$<CONFIG:Release>:-mcpu=neoverse-v2>
+        )
+    endif()
+endif()
+
 if(EXISTS /opt/homebrew/include AND APPLE)
     target_include_directories(build-index PRIVATE /opt/homebrew/include)
 endif()
