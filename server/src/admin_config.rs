@@ -176,11 +176,12 @@ mod tests {
     #[test]
     fn au_level_9_has_max_area_cap() {
         let cfg = AdminConfig::embedded_default();
-        let entry = cfg.lookup(Some("AU"), 9).unwrap();
+        let entry = cfg
+            .lookup(Some("AU"), 9)
+            .expect("AU level 9 should resolve in the embedded default");
         assert_eq!(entry.field, AdminField::City);
         // Cap rejects pastoral-station-sized polygons.
-        assert!(entry.max_area.is_some());
-        let cap = entry.max_area.unwrap();
+        let cap = entry.max_area.expect("AU level 9 entry should carry max_area cap");
         assert!(cap > 0.01 && cap < 0.1, "cap {cap} should be in urban-suburb range");
     }
 
@@ -203,7 +204,7 @@ mod tests {
         let cfg = AdminConfig::from_json(
             r#"{"defaults":{"admin":{"6":"county"}},"countries":{"AU":{"admin":{"6":"ignore"}}}}"#,
         )
-        .unwrap();
+        .expect("test fixture parses");
         assert_eq!(field(cfg.lookup(Some("AU"), 6)), None);
         assert_eq!(field(cfg.lookup(None, 6)), Some(AdminField::County));
     }
@@ -213,8 +214,8 @@ mod tests {
         let cfg = AdminConfig::from_json(
             r#"{"countries":{"AU":{"admin":{"9":{"field":"city","max_area":0.05}}}}}"#,
         )
-        .unwrap();
-        let entry = cfg.lookup(Some("AU"), 9).unwrap();
+        .expect("test fixture parses");
+        let entry = cfg.lookup(Some("AU"), 9).expect("AU level 9 present");
         assert_eq!(entry.field, AdminField::City);
         assert_eq!(entry.max_area, Some(0.05));
     }

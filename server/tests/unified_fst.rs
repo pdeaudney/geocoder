@@ -126,12 +126,12 @@ fn build_synthetic_fst() -> Map<Vec<u8>> {
     entries.sort();
 
     let mut buf = Vec::new();
-    let mut builder = MapBuilder::new(&mut buf).unwrap();
+    let mut builder = MapBuilder::new(&mut buf).expect("new MapBuilder");
     for (k, v) in entries {
-        builder.insert(&k, v).unwrap();
+        builder.insert(&k, v).expect("insert fst key");
     }
-    builder.finish().unwrap();
-    Map::new(buf).unwrap()
+    builder.finish().expect("finish fst");
+    Map::new(buf).expect("Map::new over the built fst")
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn fst_stream_exact_match_returns_single_hit() {
     let mut stream = map.search(auto).into_stream();
     let first = stream.next();
     assert!(first.is_some());
-    let (k, v) = first.unwrap();
+    let (k, v) = first.expect("exact-match hit present");
     assert_eq!(k, b"ausydney");
     assert_eq!(v, 3);
     assert!(stream.next().is_none(), "exact match should return one hit");
@@ -340,7 +340,7 @@ fn write_layout(dir: &Path, kind: LayoutKind, rows: &[(&str, &str, &str)]) {
     // Records: one per row. FST key → entry index.
     let mut entries_bytes: Vec<u8> = Vec::new();
     let mut fst_buf: Vec<u8> = Vec::new();
-    let mut b = MapBuilder::new(&mut fst_buf).unwrap();
+    let mut b = MapBuilder::new(&mut fst_buf).expect("new MapBuilder");
 
     let mut sorted: Vec<(String, String, String)> = rows
         .iter()
@@ -367,11 +367,11 @@ fn write_layout(dir: &Path, kind: LayoutKind, rows: &[(&str, &str, &str)]) {
             )
         };
         entries_bytes.extend_from_slice(bytes);
-        b.insert(key.as_bytes(), i as u64).unwrap();
+        b.insert(key.as_bytes(), i as u64).expect("insert fst key");
     }
-    b.finish().unwrap();
+    b.finish().expect("finish fst");
 
-    std::fs::write(&fst_path, &fst_buf).unwrap();
-    std::fs::write(&bin_path, &entries_bytes).unwrap();
-    std::fs::write(&strings_path, &strings).unwrap();
+    std::fs::write(&fst_path, &fst_buf).expect("write fst file");
+    std::fs::write(&bin_path, &entries_bytes).expect("write entries file");
+    std::fs::write(&strings_path, &strings).expect("write strings file");
 }

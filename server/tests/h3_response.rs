@@ -96,7 +96,7 @@ fn antimeridian_coord_produces_valid_cell() {
     // API with data derived from maritime or Pacific sources.
     let map = build_h3_map(0.0, 180.0, &[9]).expect("has a cell");
     assert_eq!(map.len(), 1);
-    let cell = map.get("9").unwrap();
+    let cell = map.get("9").expect("resolution 9 present");
     assert_eq!(cell.len(), 15, "H3 cell IDs are 15 hex chars");
     assert!(cell.chars().all(|c| c.is_ascii_hexdigit()));
 }
@@ -107,7 +107,7 @@ fn pole_coord_produces_valid_cell() {
     // returns a valid cell ID and the wire format is identical to
     // hex-shaped cells. Clients should not care about the shape.
     let map = build_h3_map(90.0, 0.0, &[5]).expect("north pole cell");
-    let cell = map.get("5").unwrap();
+    let cell = map.get("5").expect("resolution 5 present");
     assert_eq!(cell.len(), 15);
     assert!(cell.starts_with('8'));
 }

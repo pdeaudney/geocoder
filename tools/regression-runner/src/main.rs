@@ -543,7 +543,7 @@ mod tests {
         let v: Value = serde_json::from_str(
             r#"{"results":[{"name":"Sydney","lat":-33.87}]}"#,
         )
-        .unwrap();
+        .expect("test fixture parses");
         assert_eq!(
             json_path_lookup(&v, "results.0.name"),
             Some(&Value::String("Sydney".to_string()))

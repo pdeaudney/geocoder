@@ -978,11 +978,14 @@ async fn main() {
 
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 443));
         eprintln!("Starting HTTPS server on :443 for {}...", domain);
-        axum_server::bind(addr)
+        if let Err(e) = axum_server::bind(addr)
             .acceptor(acceptor)
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
-            .unwrap();
+        {
+            eprintln!("HTTPS server exited: {e}");
+            std::process::exit(1);
+        }
     } else {
         let bind_addr = args.get(2).map(|s| s.as_str()).unwrap_or("0.0.0.0:3000");
         eprintln!("Starting HTTP server on {}...", bind_addr);
@@ -1003,8 +1006,22 @@ async fn main() {
             );
         }
 
-        let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
-        axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+        let listener = match tokio::net::TcpListener::bind(bind_addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Failed to bind {bind_addr}: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        {
+            eprintln!("HTTP server exited: {e}");
+            std::process::exit(1);
+        }
     }
 }
 

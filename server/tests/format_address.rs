@@ -57,7 +57,7 @@ fn details_full_au<'a>(hn: &'a str) -> AddressDetails<'a> {
 fn au_format_is_number_street_city_state_postcode_country() {
     let hn = String::from("123");
     let d = details_full_au(&hn);
-    let out = format_address(&d).unwrap();
+    let out = format_address(&d).expect("formatter returns Some for a populated AddressDetails");
     assert_eq!(out, "123 Elizabeth Street, Sydney, New South Wales 2000, Australia");
 }
 
@@ -72,7 +72,7 @@ fn au_format_without_house_number() {
         country_code: Some(String::from("AU")),
         ..Default::default()
     };
-    let out = format_address(&d).unwrap();
+    let out = format_address(&d).expect("formatter returns Some for a populated AddressDetails");
     assert_eq!(out, "George Street, Brisbane, Queensland, Australia");
 }
 
@@ -87,7 +87,7 @@ fn au_format_admin_only() {
         country_code: Some(String::from("AU")),
         ..Default::default()
     };
-    let out = format_address(&d).unwrap();
+    let out = format_address(&d).expect("formatter returns Some for a populated AddressDetails");
     assert_eq!(out, "Sydney, New South Wales, Australia");
 }
 
@@ -104,7 +104,7 @@ fn european_format_is_street_number_postcode_city_country() {
         country_code: Some(String::from("DE")),
         ..Default::default()
     };
-    let out = format_address(&d).unwrap();
+    let out = format_address(&d).expect("formatter returns Some for a populated AddressDetails");
     assert_eq!(out, "Friedrichstraße 12, 10117 Berlin, Germany");
 }
 
@@ -122,7 +122,7 @@ fn japan_format_is_number_street_postcode_city_state() {
         country_code: Some(String::from("JP")),
         ..Default::default()
     };
-    let out = format_address(&d).unwrap();
+    let out = format_address(&d).expect("formatter returns Some for a populated AddressDetails");
     assert_eq!(out, "1 Chome-2 Nihonbashi, 103-0027 Chuo City, Tokyo, Japan");
 }
 

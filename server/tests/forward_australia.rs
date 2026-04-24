@@ -43,7 +43,10 @@ fn search_place_sydney_returns_sydney() {
     eprintln!("search('Sydney', place) -> {sydney}");
     // Australia: Sydney is around (-33.87, 151.21). Pick any hit named Sydney
     // and assert it's in AU coords.
-    let hit = hits.iter().find(|h| h.name == sydney).unwrap();
+    let hit = hits
+        .iter()
+        .find(|h| h.name == sydney)
+        .expect("Sydney hit was confirmed above via the previous unwrap_or_else");
     assert!((-45.0..-10.0).contains(&hit.lat), "lat {} not in AU range", hit.lat);
     assert!((110.0..155.0).contains(&hit.lng), "lng {} not in AU range", hit.lng);
 }

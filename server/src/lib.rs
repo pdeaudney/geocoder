@@ -351,11 +351,21 @@ impl Index {
     }
 
     fn read_u32(data: &[u8], offset: usize) -> u32 {
-        u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+        // .expect is safe here: callers always slice exactly 4 bytes,
+        // and slice-to-[u8; 4] only fails when the length mismatches.
+        u32::from_le_bytes(
+            data[offset..offset + 4]
+                .try_into()
+                .expect("read_u32: 4-byte slice"),
+        )
     }
 
     fn read_u64(data: &[u8], offset: usize) -> u64 {
-        u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
+        u64::from_le_bytes(
+            data[offset..offset + 8]
+                .try_into()
+                .expect("read_u64: 8-byte slice"),
+        )
     }
 
     fn for_each_entry(entries: &[u8], offset: u32, mut f: impl FnMut(u32)) {

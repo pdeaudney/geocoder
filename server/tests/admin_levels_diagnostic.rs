@@ -85,9 +85,17 @@ fn dump_admin_levels_for_au_fixtures() {
             let mut offset = u32::MAX;
             while lo < hi {
                 let mid = lo + (hi - lo) / 2;
-                let mid_id = u64::from_le_bytes(cells[mid * entry_size..mid * entry_size + 8].try_into().unwrap());
+                let mid_id = u64::from_le_bytes(
+                    cells[mid * entry_size..mid * entry_size + 8]
+                        .try_into()
+                        .expect("8-byte cell id slice"),
+                );
                 if mid_id == c {
-                    offset = u32::from_le_bytes(cells[mid * entry_size + 8..mid * entry_size + 12].try_into().unwrap());
+                    offset = u32::from_le_bytes(
+                        cells[mid * entry_size + 8..mid * entry_size + 12]
+                            .try_into()
+                            .expect("4-byte cell offset slice"),
+                    );
                     break;
                 } else if mid_id < c {
                     lo = mid + 1;
@@ -103,7 +111,9 @@ fn dump_admin_levels_for_au_fixtures() {
             let id_count = u16::from_le_bytes([entries[o], entries[o + 1]]) as usize;
             for i in 0..id_count {
                 let raw = u32::from_le_bytes(
-                    entries[o + 2 + i * 4..o + 6 + i * 4].try_into().unwrap(),
+                    entries[o + 2 + i * 4..o + 6 + i * 4]
+                        .try_into()
+                        .expect("4-byte admin entry slice"),
                 );
                 let is_interior = (raw & 0x80000000) != 0;
                 let poly_id = raw & 0x7FFFFFFF;

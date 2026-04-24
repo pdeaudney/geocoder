@@ -45,8 +45,8 @@ fn tiny_synthetic_batch_roundtrips_through_build_and_query() {
     let csv_root = tmp.join("csv");
     let out_dir = tmp.join("index");
     let country_dir = csv_root.join("tt"); // "tt" — not any real country's code we use
-    fs::create_dir_all(&country_dir).unwrap();
-    fs::create_dir_all(&out_dir).unwrap();
+    fs::create_dir_all(&country_dir).expect("mkdir country_dir");
+    fs::create_dir_all(&out_dir).expect("mkdir out_dir");
 
     // Four synthetic addresses on a single street so we can test
     // housenumber matching and nearest-neighbour scoring.
@@ -55,7 +55,7 @@ fn tiny_synthetic_batch_roundtrips_through_build_and_query() {
 150.9800,-33.7371,11,Alysse Close,,Baulkham Hills,,NSW,2153,t2,h2\n\
 150.9804,-33.7372,12,Alysse Close,,Baulkham Hills,,NSW,2153,t3,h3\n\
 150.9808,-33.7373,14,Alysse Close,,Baulkham Hills,,NSW,2153,t4,h4\n";
-    fs::write(country_dir.join("test.csv"), csv).unwrap();
+    fs::write(country_dir.join("test.csv"), csv).expect("write test.csv");
 
     // Run the builder with --skip "" so the default AU skip doesn't
     // interfere with our "tt" country.
@@ -77,7 +77,7 @@ fn tiny_synthetic_batch_roundtrips_through_build_and_query() {
 
     // Now load via the runtime.
     let oa = OpenAddresses::open(&out_dir)
-        .unwrap()
+        .expect("OpenAddresses::open succeeds")
         .expect("per-country index should load");
     assert!(oa.has_country(b"tt"));
     assert!(!oa.has_country(b"zz"));
@@ -111,7 +111,7 @@ fn tempdir() -> std::path::PathBuf {
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&base).expect("mkdir tempdir");
     base
 }
 

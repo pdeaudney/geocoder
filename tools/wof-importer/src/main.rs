@@ -437,7 +437,7 @@ mod tests {
         let gj: Value = serde_json::from_str(
             r#"{"type":"Polygon","coordinates":[[[1.0,2.0],[3.0,4.0],[5.0,6.0],[1.0,2.0]]]}"#,
         )
-        .unwrap();
+        .expect("test fixture parses");
         let rings = extract_outer_rings(&gj);
         assert_eq!(rings.len(), 1);
         assert_eq!(rings[0].len(), 4);
@@ -451,7 +451,7 @@ mod tests {
                 [[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,0.0]]]
             ]}"#,
         )
-        .unwrap();
+        .expect("test fixture parses");
         let rings = extract_outer_rings(&gj);
         assert_eq!(rings.len(), 2);
     }
