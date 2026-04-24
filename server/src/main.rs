@@ -1,5 +1,3 @@
-mod auth;
-
 use arc_swap::ArcSwap;
 use axum::extract::Query;
 use axum::http::StatusCode;
@@ -12,7 +10,7 @@ use query_server::ip_geo::IpGeo;
 use query_server::{Index, DEFAULT_ADMIN_CELL_LEVEL, DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 #[cfg(feature = "forward")]
@@ -42,7 +40,6 @@ struct QueryParams {
     /// a typo in the query param is a bug to surface, not to swallow.
     #[serde(default)]
     h3_res: Option<String>,
-    key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -54,7 +51,6 @@ struct AutocompleteParams {
     limit: Option<usize>,
     #[serde(default)]
     h3_res: Option<String>,
-    key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -73,7 +69,6 @@ struct ValidateParams {
     country_code: String,
     #[serde(default)]
     h3_res: Option<String>,
-    key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -84,7 +79,6 @@ struct IpParams {
     ip: Option<String>,
     #[serde(default)]
     h3_res: Option<String>,
-    key: Option<String>,
 }
 
 #[cfg(feature = "forward")]
@@ -110,7 +104,6 @@ struct SearchParams {
     limit: Option<usize>,
     #[serde(default)]
     h3_res: Option<String>,
-    key: Option<String>,
 }
 
 /// Resolve the `h3_res` query param to a validated list of resolutions.
@@ -126,8 +119,8 @@ fn resolve_h3_res(raw: Option<&str>) -> Result<Vec<u8>, Response> {
 }
 
 /// Liveness probe. 200 + `{"status":"ok"}` whenever the process can
-/// accept HTTP — no auth, no rate limit, no dependencies touched.
-/// Suitable for ALB/NLB/k8s liveness checks.
+/// accept HTTP — no dependencies touched. Suitable for ALB/NLB/k8s
+/// liveness checks.
 async fn healthz() -> Response {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -140,8 +133,7 @@ async fn healthz() -> Response {
 /// for the ones that are partitioned by country, which ISO 3166-1
 /// alpha-2 codes are covered. Clients can use this for granular
 /// traffic routing ("does this instance serve country X?") or for
-/// diagnostics. No auth; no rate limit — the shape is non-sensitive
-/// and the response is cheap to generate.
+/// diagnostics.
 async fn healthz_indexes(
     index: axum::extract::Extension<LiveIndex>,
     #[cfg(feature = "forward")] forward_idx: axum::extract::Extension<Option<Arc<Forward>>>,
@@ -242,31 +234,8 @@ fn cc_to_string(cc: &[u8; 2]) -> String {
 
 async fn reverse_geocode(
     Query(params): Query<QueryParams>,
-    state: axum::extract::State<Arc<RwLock<auth::Db>>>,
     index: axum::extract::Extension<LiveIndex>,
-    limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
-    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Response {
-    let key = match params.key {
-        Some(k) => k,
-        None => return (StatusCode::UNAUTHORIZED, "Missing API key").into_response(),
-    };
-
-    let (login, rps, rpd, by_ip) = match state.read().unwrap().validate_token(&key) {
-        Some(info) => info,
-        None => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
-    };
-
-    let rate_key = if by_ip {
-        format!("{}:{}", login, connect_info.0.ip())
-    } else {
-        login
-    };
-
-    if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
-        return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
-    }
-
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -291,29 +260,9 @@ async fn reverse_geocode(
 #[cfg(feature = "forward")]
 async fn validate_address(
     Query(params): Query<ValidateParams>,
-    state: axum::extract::State<Arc<RwLock<auth::Db>>>,
     index: axum::extract::Extension<LiveIndex>,
     forward_idx: axum::extract::Extension<Option<Arc<Forward>>>,
-    limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
-    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Response {
-    let key = match params.key {
-        Some(k) => k,
-        None => return (StatusCode::UNAUTHORIZED, "Missing API key").into_response(),
-    };
-    let (login, rps, rpd, by_ip) = match state.read().unwrap().validate_token(&key) {
-        Some(info) => info,
-        None => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
-    };
-    let rate_key = if by_ip {
-        format!("{}:{}", login, connect_info.0.ip())
-    } else {
-        login
-    };
-    if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
-        return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
-    }
-
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -462,28 +411,8 @@ fn parse_country_code_bytes(s: &str) -> Option<[u8; 2]> {
 
 async fn autocomplete(
     Query(params): Query<AutocompleteParams>,
-    state: axum::extract::State<Arc<RwLock<auth::Db>>>,
     autocomplete_idx: axum::extract::Extension<Option<Arc<Autocomplete>>>,
-    limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
-    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Response {
-    let key = match params.key {
-        Some(k) => k,
-        None => return (StatusCode::UNAUTHORIZED, "Missing API key").into_response(),
-    };
-    let (login, rps, rpd, by_ip) = match state.read().unwrap().validate_token(&key) {
-        Some(info) => info,
-        None => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
-    };
-    let rate_key = if by_ip {
-        format!("{}:{}", login, connect_info.0.ip())
-    } else {
-        login
-    };
-    if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
-        return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
-    }
-
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -534,29 +463,10 @@ async fn autocomplete(
 
 async fn ip_geocode(
     Query(params): Query<IpParams>,
-    state: axum::extract::State<Arc<RwLock<auth::Db>>>,
     index: axum::extract::Extension<LiveIndex>,
     ip_db: axum::extract::Extension<Option<Arc<IpGeo>>>,
-    limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Response {
-    let key = match params.key {
-        Some(k) => k,
-        None => return (StatusCode::UNAUTHORIZED, "Missing API key").into_response(),
-    };
-    let (login, rps, rpd, by_ip) = match state.read().unwrap().validate_token(&key) {
-        Some(info) => info,
-        None => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
-    };
-    let rate_key = if by_ip {
-        format!("{}:{}", login, connect_info.0.ip())
-    } else {
-        login
-    };
-    if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
-        return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
-    }
-
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -604,32 +514,10 @@ async fn ip_geocode(
 #[cfg(feature = "forward")]
 async fn search(
     Query(params): Query<SearchParams>,
-    state: axum::extract::State<Arc<RwLock<auth::Db>>>,
     index: axum::extract::Extension<LiveIndex>,
     forward_idx: axum::extract::Extension<Option<Arc<Forward>>>,
     autocomplete_idx: axum::extract::Extension<Option<Arc<Autocomplete>>>,
-    limiter: axum::extract::Extension<Arc<auth::RateLimiter>>,
-    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Response {
-    let key = match params.key {
-        Some(k) => k,
-        None => return (StatusCode::UNAUTHORIZED, "Missing API key").into_response(),
-    };
-
-    let (login, rps, rpd, by_ip) = match state.read().unwrap().validate_token(&key) {
-        Some(info) => info,
-        None => return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response(),
-    };
-
-    let rate_key = if by_ip {
-        format!("{}:{}", login, connect_info.0.ip())
-    } else {
-        login
-    };
-    if let Err(msg) = auth::check_rate(&limiter, &rate_key, rps, rpd) {
-        return (StatusCode::TOO_MANY_REQUESTS, msg).into_response();
-    }
-
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -969,9 +857,6 @@ async fn main() {
     let admin_cell_level = arg_value("--admin-level").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_ADMIN_CELL_LEVEL);
     let search_distance = arg_value("--search-distance").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_SEARCH_DISTANCE);
 
-    let db_path = format!("{}/geocoder.json", data_dir);
-    let db = auth::Db::load(&db_path);
-
     eprintln!("Loading index from {}...", data_dir);
     let admin_config = load_admin_config();
     let index = match Index::load_with_admin_config(
@@ -998,9 +883,6 @@ async fn main() {
         admin_cell_level,
         search_distance,
     );
-
-    let db = Arc::new(RwLock::new(db));
-    let limiter = Arc::new(auth::RateLimiter::default());
 
     // Optional MaxMind GeoLite2 loader. Missing DB → /geocode/ip returns 503.
     let ip_db: Option<Arc<IpGeo>> = match IpGeo::open(Path::new(data_dir)) {
@@ -1042,25 +924,18 @@ async fn main() {
     let forward_idx: Option<()> = None;
 
     #[cfg(feature = "forward")]
-    let app = {
-        let mut app = Router::new()
-            .route("/healthz", get(healthz))
-            .route("/healthz/indexes", get(healthz_indexes))
-            .route("/reverse", get(reverse_geocode))
-            .route("/search", get(search))
-            .route("/validate", get(validate_address))
-            .route("/autocomplete", get(autocomplete))
-            .route("/geocode/ip", get(ip_geocode))
-            .merge(auth::router())
-            .layer(axum::Extension(index.clone()))
-            .layer(axum::Extension(limiter))
-            .layer(axum::Extension(forward_idx.clone()))
-            .layer(axum::Extension(autocomplete_idx.clone()))
-            .layer(axum::Extension(ip_db.clone()))
-            .with_state(db);
-        app = app.layer(axum::extract::DefaultBodyLimit::max(1 << 20));
-        app
-    };
+    let app = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/healthz/indexes", get(healthz_indexes))
+        .route("/reverse", get(reverse_geocode))
+        .route("/search", get(search))
+        .route("/validate", get(validate_address))
+        .route("/autocomplete", get(autocomplete))
+        .route("/geocode/ip", get(ip_geocode))
+        .layer(axum::Extension(index.clone()))
+        .layer(axum::Extension(forward_idx.clone()))
+        .layer(axum::Extension(autocomplete_idx.clone()))
+        .layer(axum::Extension(ip_db.clone()));
     #[cfg(not(feature = "forward"))]
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -1068,12 +943,9 @@ async fn main() {
         .route("/reverse", get(reverse_geocode))
         .route("/autocomplete", get(autocomplete))
         .route("/geocode/ip", get(ip_geocode))
-        .merge(auth::router())
         .layer(axum::Extension(index.clone()))
-        .layer(axum::Extension(limiter))
         .layer(axum::Extension(autocomplete_idx.clone()))
-        .layer(axum::Extension(ip_db.clone()))
-        .with_state(db);
+        .layer(axum::Extension(ip_db.clone()));
 
     let _ = forward_idx; // silence unused when feature disabled
 

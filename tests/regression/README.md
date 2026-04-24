@@ -81,20 +81,10 @@ objects. `results.0.address.city` → `root["results"][0]["address"]["city"]`.
 
 ### Auth
 
-Every request gets `?key=<defaults.auth_key>` appended unless the case
-sets `"auth": false`. Use `auth: false` for the health endpoints and
-for intentionally-unauthenticated negative cases.
-
-## How authentication is seeded
-
-`scripts/seed-test-token.sh` writes `<index-dir>/geocoder.json` with a
-fixed token and a dummy user. The server's `auth::Db::load` reads this
-on startup; `validate_token("REGRESSION_TEST_TOKEN")` succeeds against
-the dummy user which is set for unlimited rate (rps=0, rpd=0).
-
-The seeded file is safe to commit to a dev machine's working tree (it
-only grants access to a local, temporary port) but isn't committed —
-it's written fresh every run.
+The server is unauthenticated. The `auth_key` / `"auth": false` corpus
+knobs are ignored by the current server (any `?key=` trailing on a
+request is silently accepted); existing corpora still load unchanged.
+No token seeding step runs at the start of the regression script.
 
 ## Adding cases
 

@@ -2,11 +2,10 @@
 # Run the black-box regression suite against a locally-built index.
 #
 # Responsibilities:
-#   1. Seed a test auth token in <index-dir>/geocoder.json
-#   2. Start query-server listening on a chosen port
-#   3. Poll /healthz until the server is ready (or timeout)
-#   4. Invoke the regression-runner against the corpus
-#   5. Stop the server, return the runner's exit code
+#   1. Start query-server listening on a chosen port
+#   2. Poll /healthz until the server is ready (or timeout)
+#   3. Invoke the regression-runner against the corpus
+#   4. Stop the server, return the runner's exit code
 #
 # Usage:
 #   ./scripts/run-regression.sh [--index DIR] [--corpus FILE] [--port N] [--skip-build]
@@ -81,12 +80,6 @@ if [ ! -x "$SERVER_BIN" ] || [ ! -x "$RUNNER_BIN" ]; then
     echo "error: expected binaries not found under ./target/$TARGET_SUBDIR — run without --skip-build" >&2
     exit 2
 fi
-
-# -----------------------------------------------------------------------------
-# Seed auth token
-# -----------------------------------------------------------------------------
-echo "==> seeding regression auth token into $INDEX_DIR/geocoder.json"
-./scripts/seed-test-token.sh "$INDEX_DIR"
 
 # -----------------------------------------------------------------------------
 # Start server

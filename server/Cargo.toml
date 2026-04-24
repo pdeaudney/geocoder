@@ -16,8 +16,6 @@ serde_json = "1"
 s2 = "0.0.13"
 rustls-acme = { version = "0.14", features = ["axum"] }
 axum-server = "0.7"
-bcrypt = "0.15"
-getrandom = "0.2"
 arc-swap = "1.7"
 tantivy = { version = "0.22", optional = true }
 maxminddb = "0.24"

@@ -124,15 +124,15 @@ RAM guidance: AU-only fits a `t4g.medium` class instance; planet wants ≥16 GB 
 
 ## HTTP API
 
-All endpoints require an API key. Authentication is managed via a web dashboard served at the root URL — create an admin account on first launch, generate keys, set per-user rate limits.
+The server is unauthenticated — every endpoint is open to any caller that can reach the port. Deploy behind a network boundary (VPC, service mesh, localhost bind, reverse proxy) to control access.
 
 ### GET /reverse
 
 Coordinate → address.
 
 ```
-GET /reverse?lat=-33.8688&lon=151.2093&key=YOUR_KEY
-GET /reverse?lat=-33.8688&lon=151.2093&lang=zh&key=YOUR_KEY
+GET /reverse?lat=-33.8688&lon=151.2093
+GET /reverse?lat=-33.8688&lon=151.2093&lang=zh
 ```
 
 Response follows [Nominatim's format](https://nominatim.org/release-docs/latest/api/Reverse/):
@@ -160,7 +160,7 @@ Parameters:
 |---|---|---|
 | `lat`, `lon` | yes | WGS84 coordinate |
 | `lang` | no | ISO 639-1 language code; returns OSM `name:<lang>` tag for admin fields when available |
-| `key` | yes | API key |
+| `h3_res` | no | Comma-separated H3 resolutions (0–15, max 4); returns an `h3` map on the response. See the H3 section below. |
 
 Typical p50 latency: **20–60 µs**.
 
@@ -170,13 +170,13 @@ Text → ranked coordinate candidates.
 
 ```bash
 # Freeform
-GET /search?q=10%20alysse%20close%20baulkham%20hills%20nsw&key=KEY
+GET /search?q=10%20alysse%20close%20baulkham%20hills%20nsw
 
 # Structured (takes precedence over q when both present)
-GET /search?street=Alysse%20Close&housenumber=10&city=Baulkham%20Hills&country_code=AU&key=KEY
+GET /search?street=Alysse%20Close&housenumber=10&city=Baulkham%20Hills&country_code=AU
 
 # Multi-country
-GET /search?q=Elizabeth%20Street&country_code=US,CA,AU&key=KEY
+GET /search?q=Elizabeth%20Street&country_code=US,CA,AU
 ```
 
 Parameters:
@@ -184,9 +184,11 @@ Parameters:
 | Param | Description |
 |---|---|
 | `q` | Freeform text. Parsed for house number (leading digits), state abbreviation, postcode, country hints |
-| `street`, `housenumber`, `city`, `state`, `country_code` | Structured fields; take precedence over `q` |
+| `street`, `housenumber`, `city`, `state` | Structured fields; take precedence over `q` |
+| `country_code` | Single ISO 3166-1 alpha-2, or a comma-separated list (e.g. `US,CA,MX`). No cap on list length, but each code spawns one per-country search — keep it short (≤5) for sensible latency. |
 | `kind` | `place` or `street` (filter) |
-| `limit` | 1–50 (default 10) |
+| `limit` | Integer 1–50 (default 10). Out-of-range values are silently clamped into this window. |
+| `h3_res` | Comma-separated H3 resolutions (0–15, max 4); returns an `h3` map per hit. |
 
 Response includes each hit's `confidence` label (`exact`, `interpolated`, `fallback`) and a `source` field when served from the FST fast-path.
 
@@ -195,7 +197,7 @@ Features:
 - **Token canonicalisation** — `Hwy`/`Tce`/`Pde`/`Cres`/`Blvd`/`Ln`/`Ave`/`Rd`/`Dr`/`Ct`/`Cl`/`Pl` expand symmetrically at index + query time.
 - **Diacritic folding** — `Zürich` ≡ `Zurich`, `Café` ≡ `Cafe`.
 - **Rank-based ranking** — cities outrank streets of the same name.
-- **Fallback ladder** — strict → drop country → state → city → kind → fuzzy (Levenshtein 1) on name.
+- **Fallback ladder** — strict → drop country → state → city → kind → fuzzy. Fuzzy is **pinned to Levenshtein edit distance 1** (not tunable at runtime); queries more than one character off the target name will miss.
 - **House-number refinement** — if a number is parsed, the coord is refined via G-NAF / OpenAddresses / OSM addr_point lookup.
 - **FST fast-path** — exact-key queries bypass tantivy entirely, returning in ~400 ns.
 
@@ -206,8 +208,15 @@ Typical latency: **~400 ns** (FST fast-path) / **20–70 µs** (tantivy) / **~15
 Prefix typeahead.
 
 ```
-GET /autocomplete?q=alys&country_code=AU&limit=5&key=KEY
+GET /autocomplete?q=alys&country_code=AU&limit=5
 ```
+
+| Param | Description |
+|---|---|
+| `q` | Prefix to match against the FST. Required. |
+| `country_code` | Single ISO 3166-1 alpha-2 to restrict to one country's FST. Omit to search all loaded countries. |
+| `limit` | Integer 1–50 (default 10). Out-of-range values are silently clamped. |
+| `h3_res` | Comma-separated H3 resolutions (0–15, max 4); returns an `h3` map per hit. |
 
 Built per country from the OSM + place index as `fst_<cc>.fst` files (~16 MB for AU). Typical latency: **~7 µs** per query.
 
@@ -216,7 +225,7 @@ Built per country from the OSM + place index as `fst_<cc>.fst` files (~16 MB for
 Structured address validation.
 
 ```
-GET /validate?street=Alysse%20Close&housenumber=10&city=Baulkham%20Hills&country_code=AU&key=KEY
+GET /validate?street=Alysse%20Close&housenumber=10&city=Baulkham%20Hills&country_code=AU
 ```
 
 Returns `verified: true/false`, a canonical normalised address, confidence level, and coordinate. Use for ingest-side address cleaning.
@@ -226,8 +235,8 @@ Returns `verified: true/false`, a canonical normalised address, confidence level
 IP → coordinate + full address via MaxMind GeoLite2.
 
 ```
-GET /geocode/ip?key=KEY                          # uses requester IP
-GET /geocode/ip?ip=8.8.8.8&key=KEY               # explicit override
+GET /geocode/ip                                  # uses requester IP
+GET /geocode/ip?ip=8.8.8.8                       # explicit override
 ```
 
 Requires `GeoLite2-City.mmdb` in the data directory (free signup at [maxmind.com](https://www.maxmind.com/en/geolite2/signup)) or the `GEOLITE2_DB` env var pointing at one. Returns `503 Service Unavailable` when the DB isn't loaded.
@@ -237,8 +246,8 @@ Requires `GeoLite2-City.mmdb` in the data directory (free signup at [maxmind.com
 Any endpoint that returns a coordinate accepts an optional `h3_res` parameter — a comma-separated list of [Uber H3](https://h3geo.org/) resolutions (0–15, up to 4 values). The response gets an extra `h3` map keyed by resolution so downstream tools (Kepler.gl, DuckDB, Databricks, Snowflake) can do direct H3 joins without a per-row conversion step. Absent the parameter, no field is added — zero overhead for callers that don't ask.
 
 ```
-GET /reverse?lat=-33.87&lon=151.21&h3_res=9&key=KEY
-GET /search?q=Sydney&country_code=au&h3_res=7,9,12&key=KEY
+GET /reverse?lat=-33.87&lon=151.21&h3_res=9
+GET /search?q=Sydney&country_code=au&h3_res=7,9,12
 ```
 
 ```json
@@ -254,7 +263,9 @@ Values are the standard 15-char lowercase hex cell IDs. Cells are computed at qu
 
 A typed mirror of every REST endpoint. Service definition: [`server/proto/geocoder.proto`](server/proto/geocoder.proto).
 
-Default bind: `0.0.0.0:3001`. Override with `--grpc-addr` or `GEOCODER_GRPC_ADDR`.
+Default bind: `0.0.0.0:3001`. Override with `--grpc-addr` or `GEOCODER_GRPC_ADDR`. Like the REST side, the gRPC surface is unauthenticated — gate it at the network layer.
+
+Shared limits: `SearchRequest.limit` and `AutocompleteRequest.limit` are silently clamped into 1–50 (same behaviour as REST). `h3_res` accepts up to 4 resolutions; >4 returns `InvalidArgument`.
 
 ```
 rpc Reverse(ReverseRequest) returns (AddressResponse);
