@@ -16,6 +16,7 @@ Indexes OpenStreetMap data alongside authoritative per-country sources (G-NAF fo
 | **Address validation** | structured fields → verified status + canonical normalised address |
 | **IP geocode** | requester IP → coordinate (optional MaxMind GeoLite2) |
 | **Multi-language** | OSM `name:<lang>` translations honoured via `lang=` parameter |
+| **H3 cell enrichment** | opt-in `h3_res=` stamps [Uber H3](https://h3geo.org/) cell IDs on any returned coord, multi-resolution in one call |
 | **Authoritative country data** | G-NAF (AU) and OpenAddresses.io (~60 countries) drop in as optional enrichment |
 | **Hot reload** | index rebuilds swap atomically via `ArcSwap`; queries don't drop |
 | **Zero external deps at runtime** | one binary, one data directory, optional MaxMind file |
