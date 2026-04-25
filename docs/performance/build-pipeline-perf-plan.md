@@ -522,22 +522,52 @@ the data to decide stages 7+ if perf work continues.
 
 ## Six-stage plan: COMPLETE
 
-All six stages landed across commits f3192e1 → (latest). The
+All six stages landed across commits f3192e1 → 10334c7. The
 working AU breakdown captured at the end of stage 6 is the
 baseline for the next round.
 
-**Recommended next steps when perf work resumes:**
+### Follow-up taken: tantivy heap as a CLI flag
 
-1. **Parallel PBF block decode** in build-index — Pass 2 is 84% of
-   AU wallclock; halving Pass 2 would drop AU from ~77s to ~45s
-   and planet from ~45min to ~25min. Needs handler thread-safety
-   review (current handlers append to globals).
-2. **Tantivy IndexWriter heap budget** in build-forward-index —
-   default is ~50 MB; planet build is alloc-pressure-bound, larger
-   heap = fewer commits = smaller segments to write.
-3. **Pipeline-level overlap** in the orchestrator — G-NAF + OA +
-   WoF + tantivy can all run in parallel after build-index
-   finishes, sharing no data. Packer/scripts change, not code.
+Done in commits e42ad1b + 8aa2c3b
+(see [tantivy-heap-2026-04-25.md](tantivy-heap-2026-04-25.md)).
+`--tantivy-heap-mb` flag added, default 512 MB. AU is too small
+to be flush-bound at any reasonable heap; planet is differently
+shaped and the flag is the lever planet operators turn.
+
+### Diagnostic: parallel PBF decode is mostly already banked
+
+Tested 2026-04-25 by comparing `OSMIUM_POOL_THREADS=1` vs the
+default pool (8 threads on M1 Max):
+
+  default: pass2_ingest = 69.9s
+  pool=1:  pass2_ingest = 72.2s   (+3%)
+
+A 3 % delta means the libosmium decoder is already adequately
+parallelised by its default thread pool — the bottleneck is the
+single-threaded handler doing tag iteration, polygon assembly,
+hashmap inserts, and string interning. To meaningfully cut Pass 2
+further would need a multi-threaded handler refactor (per-thread
+accumulators with merge step), which is a substantially bigger
+project than originally scoped.
+
+**Action**: removed "parallel PBF decode" from the recommended
+next steps. Recorded for the next engineer so it isn't
+re-investigated.
+
+### Remaining recommended next steps
+
+1. **Pipeline-level overlap** in the orchestrator — G-NAF + OA +
+   WoF + tantivy all run after build-index finishes and share no
+   data. Packer/scripts change, not code. ~30 % off the post-OSM
+   stage on planet.
+2. **Multi-threaded handler in build-index** (the *real* version
+   of "parallel PBF") — splits Pass 2 across N worker threads,
+   each with its own per-thread cell maps + StringPool, merged at
+   end. Would cut planet ingest substantially. Bigger project,
+   handler thread-safety review needed throughout.
+3. **Sub-staging in build-autocomplete-fst** — currently a single
+   21 s phase; finer breakdown would identify whether FST
+   construction or the per-country dispatch dominates.
 
 ## Notes for the next engineer (or future me)
 
