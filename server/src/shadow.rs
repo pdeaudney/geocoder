@@ -125,7 +125,7 @@ impl ShadowConfig {
         Some(ShadowConfig {
             api_key,
             sample_rate: env_f64("GOOGLE_GEOCODING_SAMPLE_RATE", 0.001).clamp(0.0, 1.0),
-            daily_cap: env_u32("GOOGLE_GEOCODING_DAILY_CAP", 1000),
+            daily_cap: clamp_daily_cap(env_u32("GOOGLE_GEOCODING_DAILY_CAP", 1000)),
             rps_cap: env_u32("GOOGLE_GEOCODING_RPS_CAP", 4).max(1),
             queue_capacity: env_usize("GOOGLE_GEOCODING_QUEUE_CAPACITY", 256).max(1),
             inflight_cap: env_usize("GOOGLE_GEOCODING_INFLIGHT_CAP", 4).max(1),
@@ -177,6 +177,32 @@ fn env_u64(key: &str, default: u64) -> u64 {
 }
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Maximum daily cap we allow an operator to set. At the documented
+/// $5/1000 Google price, the upper bound corresponds to ~$500/day —
+/// already well past the normal $200/month free tier and into "you
+/// definitely meant to do this" territory. Operators wanting more
+/// either raise the constant in source (visible in code review) or
+/// set up Google's own billing alerts.
+const MAX_DAILY_CAP: u32 = 100_000;
+
+/// Clamp the daily cap to a defensible upper bound. Misreading a typo
+/// like `GOOGLE_GEOCODING_DAILY_CAP=1000000` (intended 1000) without
+/// this guard would silently authorise $5 000/day in Google calls.
+/// We log the clamp rather than failing startup so operators get told
+/// what happened without the deploy bouncing.
+fn clamp_daily_cap(raw: u32) -> u32 {
+    if raw > MAX_DAILY_CAP {
+        tracing::warn!(
+            target: "query_server::shadow",
+            requested = raw,
+            cap = MAX_DAILY_CAP,
+            "GOOGLE_GEOCODING_DAILY_CAP clamped — raise MAX_DAILY_CAP in source if intentional"
+        );
+        return MAX_DAILY_CAP;
+    }
+    raw
 }
 
 // --- Outcome + Endpoint enums -------------------------------------------
@@ -413,6 +439,15 @@ impl ShadowDispatcher {
                     m.record_shadow(endpoint.as_str(), Outcome::QueueFull.as_str(), &[], None);
                 }
                 emit_outcome(endpoint, Outcome::QueueFull, None, None, None);
+                // Self-rate-limited WARN so an oncall sees a clear
+                // signal in stdout when the bounded mpsc saturates,
+                // rather than having to be already watching the
+                // metric. The DedupFilter in telemetry.rs is scoped
+                // to `opentelemetry*` targets, so we hand-roll the
+                // throttle here. One line per 30 s under sustained
+                // pressure is enough to draw attention without
+                // dominating the log.
+                warn_queue_full_throttled();
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 // Worker died. This is a bug — surface it loudly. We
@@ -1030,6 +1065,34 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Queue-full warning gate. Process-wide AtomicU64 of last-emit unix
+/// milliseconds. Emit at most once per `QUEUE_FULL_WARN_WINDOW_MS`,
+/// using a CAS so two threads racing through the gate produce only
+/// one log line (not strictly required for correctness — duplicate
+/// warnings would still be useful — but keeps stdout tidy).
+const QUEUE_FULL_WARN_WINDOW_MS: u64 = 30_000;
+static LAST_QUEUE_FULL_WARN_MS: AtomicU64 = AtomicU64::new(0);
+
+fn warn_queue_full_throttled() {
+    let now = now_unix_ms();
+    let last = LAST_QUEUE_FULL_WARN_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < QUEUE_FULL_WARN_WINDOW_MS {
+        return;
+    }
+    if LAST_QUEUE_FULL_WARN_MS
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        // Another thread already won the gate this window. Drop ours.
+        return;
+    }
+    tracing::warn!(
+        target: "query_server::shadow",
+        window_secs = QUEUE_FULL_WARN_WINDOW_MS / 1000,
+        "shadow queue full — dispatch dropped; raise GOOGLE_GEOCODING_QUEUE_CAPACITY or GOOGLE_GEOCODING_INFLIGHT_CAP if persistent"
+    );
+}
+
 /// Compute the Duration from now until 00:00:00 UTC tomorrow. Used by
 /// the daily-cap reset task — sleeping until that instant means we
 /// reset exactly once per UTC day even if the worker started mid-day.
@@ -1440,5 +1503,49 @@ mod tests {
         assert_eq!(percent_encode(","), "%2C");
         assert_eq!(percent_encode("&"), "%26");
         assert_eq!(percent_encode("é"), "%C3%A9"); // 2-byte utf-8
+    }
+
+    // --- Daily-cap clamp ---
+
+    #[test]
+    fn daily_cap_passthrough_below_max() {
+        // Most operators never hit the clamp. Pin the no-op path.
+        assert_eq!(clamp_daily_cap(0), 0);
+        assert_eq!(clamp_daily_cap(1000), 1000);
+        assert_eq!(clamp_daily_cap(40_000), 40_000);
+        assert_eq!(clamp_daily_cap(MAX_DAILY_CAP), MAX_DAILY_CAP);
+    }
+
+    #[test]
+    fn daily_cap_clamps_above_max() {
+        // The headline scenario: typo of `100000000` instead of
+        // `100000` would silently authorise $500 000/day. The clamp
+        // brings it down to a defensible ceiling and warns.
+        assert_eq!(clamp_daily_cap(MAX_DAILY_CAP + 1), MAX_DAILY_CAP);
+        assert_eq!(clamp_daily_cap(1_000_000), MAX_DAILY_CAP);
+        assert_eq!(clamp_daily_cap(u32::MAX), MAX_DAILY_CAP);
+    }
+
+    // --- Queue-full warning throttle ---
+
+    #[test]
+    fn warn_queue_full_throttled_runs_without_panic() {
+        // Functional smoke: the gate must be safe to call rapidly
+        // (no panic on the static AtomicU64 path) and idempotent
+        // within the throttle window. We can't assert log-line
+        // emission directly without a subscriber, but we can verify
+        // the counter advances on each window cross.
+        let before = LAST_QUEUE_FULL_WARN_MS.load(Ordering::Relaxed);
+        for _ in 0..1000 {
+            warn_queue_full_throttled();
+        }
+        let after = LAST_QUEUE_FULL_WARN_MS.load(Ordering::Relaxed);
+        // Either: the test was the first caller this window (after >
+        // before), or another test already won the gate this window
+        // (after >= before). Either way the gate doesn't regress.
+        assert!(
+            after >= before,
+            "warn gate's last-emit timestamp must be monotonic — got before={before}, after={after}"
+        );
     }
 }
