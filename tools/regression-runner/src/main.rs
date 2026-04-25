@@ -512,18 +512,10 @@ fn json_path_number(root: &Value, path: &str) -> Option<f64> {
     json_path_lookup(root, path).and_then(|v| v.as_f64())
 }
 
-/// Spherical-earth great-circle distance in metres. Accurate to ~0.3 %
-/// at any distance; plenty for geocoder tolerances which are measured
-/// in 10s–1000s of metres.
-fn haversine_m(lat1: f64, lng1: f64, lat2: f64, lng2: f64) -> f64 {
-    const R: f64 = 6_371_000.0;
-    let (phi1, phi2) = (lat1.to_radians(), lat2.to_radians());
-    let dphi = (lat2 - lat1).to_radians();
-    let dlam = (lng2 - lng1).to_radians();
-    let a = (dphi / 2.0).sin().powi(2)
-        + phi1.cos() * phi2.cos() * (dlam / 2.0).sin().powi(2);
-    2.0 * R * a.sqrt().asin()
-}
+// Spherical-earth great-circle distance now lives in
+// `query_server::geo::haversine_m` so the on-disk test corpus checks
+// here and the live shadow-validation worker share one implementation.
+use query_server::geo::haversine_m;
 
 // -----------------------------------------------------------------------------
 // Tests

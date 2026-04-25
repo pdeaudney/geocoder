@@ -16,12 +16,14 @@ use std::fs::File;
 pub mod address_points;
 pub mod admin_config;
 pub mod autocomplete;
+pub mod geo;
 pub mod gnaf;
 pub mod i18n;
 pub mod ip_geo;
 pub mod h3_cell;
 pub mod openaddresses;
 pub mod postcode;
+pub mod shadow;
 pub mod telemetry;
 pub mod wof_countries;
 

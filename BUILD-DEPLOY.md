@@ -404,6 +404,90 @@ then grep the boot manifest for the same path. A 0-byte file or an
 mtime that disagrees with the rest of the index points at the corrupt
 artifact.
 
+### Shadow validation against Google's Geocoding API
+
+Optional. A small fraction of `/reverse` and `/search` requests can be
+shadowed to Google's Geocoding API for in-production accuracy
+measurement. The shadow runs **fire-and-forget on a background
+worker** — handler latency is unaffected by Google's response time.
+Operators get span attributes + structured stdout log lines they can
+aggregate to compute admin-field match rates and forward-search
+top-1 distance histograms.
+
+**Cost protection (defence in depth):**
+
+1. Operator master switch (`GOOGLE_GEOCODING_ENABLED`).
+2. Probabilistic sample gate (`GOOGLE_GEOCODING_SAMPLE_RATE`, default 0.001).
+3. Token-bucket RPS cap (`GOOGLE_GEOCODING_RPS_CAP`, default 4).
+4. Hard daily cap with UTC-midnight reset (`GOOGLE_GEOCODING_DAILY_CAP`, default 1000 — well under the $200/month free tier at $5/1000 calls).
+5. API-key absence disables the path entirely (no key → no calls, no startup error).
+
+The four are independent — a misconfiguration of any one of them is
+caught by the others.
+
+**Failure isolation:** A `REQUEST_DENIED` (bad key, billing problem)
+disables shadowing for the rest of the process lifetime, with one
+loud error log. `OVER_QUERY_LIMIT` (Google's 429) sets a 30 s
+backoff window during which the worker drains the channel without
+dispatching. HTTP timeouts and network errors drop the sample with
+a deduped warning.
+
+**Master switch truth table** — the same shape as `OTEL_TRACE_ENABLED`,
+so an operator who knows one knows both:
+
+| `GOOGLE_GEOCODING_ENABLED` | API key set | Result                                            |
+|----------------------------|-------------|---------------------------------------------------|
+| unset                      | yes         | enabled (implicit; key presence is the cue)       |
+| unset                      | no          | disabled (no key → nothing to do)                 |
+| `true`/`1`/`yes`/`on`      | yes         | enabled                                           |
+| `true`/`1`/`yes`/`on`      | no          | disabled + WARN (flag on but no key)              |
+| `false`/`0`/`no`/`off`/`""`| either      | disabled (operator opt-out)                       |
+| garbage value              | either      | disabled + WARN                                   |
+
+The "key set but disabled" path is the headline use case — operators
+staging a deploy with the secret already provisioned but choosing not
+to spend yet.
+
+**Environment variables:**
+
+| Var                                  | Default                  | Purpose                                                                       |
+|--------------------------------------|--------------------------|-------------------------------------------------------------------------------|
+| `GOOGLE_GEOCODING_ENABLED`           | unset                    | Operator master on/off, independent of the key. See truth table above.        |
+| `GOOGLE_GEOCODING_API_KEY`           | unset                    | Required when enabled. Unset → shadow disabled regardless of the flag.        |
+| `GOOGLE_GEOCODING_SAMPLE_RATE`       | `0.001`                  | Probabilistic per-request gate (0.0–1.0).                                     |
+| `GOOGLE_GEOCODING_DAILY_CAP`         | `1000`                   | Hard daily ceiling. UTC-midnight reset.                                       |
+| `GOOGLE_GEOCODING_RPS_CAP`           | `4`                      | Token-bucket smoothing.                                                       |
+| `GOOGLE_GEOCODING_INFLIGHT_CAP`      | `4`                      | Semaphore for concurrent in-flight calls.                                     |
+| `GOOGLE_GEOCODING_QUEUE_CAPACITY`    | `256`                    | Bounded mpsc; `try_send` drops past full.                                     |
+| `GOOGLE_GEOCODING_TIMEOUT_MS`        | `2000`                   | Per-request timeout.                                                          |
+| `GOOGLE_GEOCODING_BACKOFF_SECS`      | `30`                     | OVER_QUERY_LIMIT cooldown.                                                    |
+
+**Comparison output:** every shadow emits one tracing span (target
+`query_server::shadow`) plus one structured stdout log line. Span
+attributes — useful for OTLP-side aggregations:
+
+```
+geocoder.shadow.endpoint            "reverse" | "search"
+geocoder.shadow.outcome             "match" | "mismatch" | "zero_results"
+                                    | "google_error" | "auth_disabled"
+                                    | "daily_cap_hit" | "queue_full"
+                                    | "rate_limited" | "timeout"
+geocoder.shadow.country.match       bool
+geocoder.shadow.state.match         bool
+geocoder.shadow.city.match          bool
+geocoder.shadow.road.match          bool   (reverse only)
+geocoder.shadow.distance_m          f64    (search only — top-1 haversine)
+geocoder.shadow.our.country_code    "AU"
+geocoder.shadow.google.country_code "AU"
+geocoder.shadow.google.status       "OK" | "ZERO_RESULTS" | …
+geocoder.shadow.latency_ms          u64    (Google call wall time)
+```
+
+For mismatches, the structured log line additionally carries
+`our_formatted` + `google_formatted` raw strings so an operator
+investigating a known-bad reading can grep for it without joining
+two systems.
+
 ### Metrics
 
 The service doesn't export Prometheus / CloudWatch metrics today.

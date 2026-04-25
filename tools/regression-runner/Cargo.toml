@@ -11,6 +11,11 @@ mimalloc = { version = "0.1", default-features = false }
 ureq = { version = "2", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Reuse the shared `haversine_m` from the server crate so on/offline
+# accuracy checks share one implementation. default-features=false keeps
+# tantivy/gRPC out of the regression-runner build — we only need
+# query_server::geo, a leaf module.
+query-server = { path = "../../server", default-features = false }
 
 [[bin]]
 name = "regression-runner"
