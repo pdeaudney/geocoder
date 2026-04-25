@@ -12,6 +12,10 @@ service Geocoder {
   rpc Validate(ValidateRequest) returns (ValidateResponse);
   rpc Autocomplete(AutocompleteRequest) returns (AutocompleteResponse);
   rpc IpGeocode(IpGeocodeRequest) returns (IpGeocodeResponse);
+  // Pure (lat, lon) → H3 cell map. Skips reverse-geocoding entirely;
+  // resolves in microseconds. Use this when the client only needs the
+  // H3 cell IDs for spatial joins and doesn't care about the address.
+  rpc H3(H3Request) returns (H3Response);
 }
 
 // --- Shared types ---
@@ -156,4 +160,31 @@ message IpGeocodeResponse {
   // H3 cell IDs keyed by resolution; populated when the request
   // supplied `h3_res`. Empty map when no enrichment was requested.
   map<uint32, string> h3 = 5;
+}
+
+// --- /h3 ---
+//
+// Pure (lat, lon) → H3 cell-map computation. No reverse-geocoding,
+// no admin lookup, no I/O — resolves entirely in h3o on the input
+// coord. Same H3 enrichment shape as the other RPCs but standalone,
+// for clients that only need spatial-join keys.
+
+message H3Request {
+  double lat = 1;
+  double lon = 2;
+  // Required: at least one resolution. Max 4 entries; each must be
+  // 0..=15. Unlike the enrichment field on other RPCs, an empty list
+  // is rejected here because the call has no other purpose.
+  repeated uint32 h3_res = 3;
+}
+
+message H3Response {
+  // Echo of the request coord — useful for batched calls where the
+  // client wants to correlate response → request without tracking
+  // the input separately.
+  double lat = 1;
+  double lon = 2;
+  // H3 cell IDs keyed by resolution. Always populated for at least
+  // one resolution (the call would have errored otherwise).
+  map<uint32, string> h3 = 3;
 }

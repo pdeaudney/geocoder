@@ -22,9 +22,9 @@ pub mod proto {
 pub use proto::geocoder_server::{Geocoder, GeocoderServer};
 use proto::{
     Address as PbAddress, AddressDetails as PbAddressDetails, AddressResponse,
-    AutocompleteHit as PbAutocompleteHit, AutocompleteRequest, AutocompleteResponse,
-    IpGeocodeRequest, IpGeocodeResponse, ReverseRequest, SearchHit as PbSearchHit, SearchRequest,
-    SearchResponse, ValidateRequest, ValidateResponse,
+    AutocompleteHit as PbAutocompleteHit, AutocompleteRequest, AutocompleteResponse, H3Request,
+    H3Response, IpGeocodeRequest, IpGeocodeResponse, ReverseRequest, SearchHit as PbSearchHit,
+    SearchRequest, SearchResponse, ValidateRequest, ValidateResponse,
 };
 
 /// Shared handler state. Mirrors what the REST handlers have access to,
@@ -323,6 +323,51 @@ impl Geocoder for GeocoderService {
         Err(Status::unimplemented(
             "build with the `forward` feature to enable Autocomplete",
         ))
+    }
+
+    #[tracing::instrument(
+        name = "grpc.h3",
+        skip_all,
+        fields(
+            geocoder.lat = tracing::field::Empty,
+            geocoder.lon = tracing::field::Empty,
+            geocoder.h3_resolutions = tracing::field::Empty,
+        )
+    )]
+    async fn h3(&self, req: Request<H3Request>) -> Result<Response<H3Response>, Status> {
+        let r = req.into_inner();
+        let span = tracing::Span::current();
+        span.record("geocoder.lat", r.lat);
+        span.record("geocoder.lon", r.lon);
+
+        // Reuse the REST-side validator so the two surfaces enforce the
+        // same 0..=15 + max-4 rule. The h3_res field is required here
+        // (unlike the enrichment-field shape) — an empty list means the
+        // request had no work to do.
+        let resolutions = validate_h3_res(&r.h3_res)?;
+        if resolutions.is_empty() {
+            return Err(Status::invalid_argument(
+                "h3_res: at least one resolution required",
+            ));
+        }
+        span.record("geocoder.h3_resolutions", resolutions.len());
+
+        let h3 = build_h3_proto(r.lat, r.lon, &resolutions);
+        if h3.is_empty() {
+            // build_h3_map returns None (→ empty proto map here) when
+            // every resolution failed to resolve at the input coord.
+            // NaN/infinity inputs trip this; range-out-of-bounds coords
+            // get normalised by h3o so they shouldn't.
+            return Err(Status::invalid_argument(
+                "h3: no resolution produced a cell — check the coord (NaN/infinity rejected)",
+            ));
+        }
+
+        Ok(Response::new(H3Response {
+            lat: r.lat,
+            lon: r.lon,
+            h3,
+        }))
     }
 
     #[tracing::instrument(
