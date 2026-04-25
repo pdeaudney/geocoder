@@ -217,6 +217,7 @@ build {
       "    libosmium2-dev libs2-dev libprotozero-dev \\",
       "    protobuf-compiler \\",
       "    zlib1g-dev libbz2-dev libexpat1-dev liblz4-dev \\",
+      "    libdeflate-dev \\",
       "    git curl ca-certificates \\",
       "    awscli \\",
       "    bzip2 unzip \\",

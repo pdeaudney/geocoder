@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libosmium2-dev libprotozero-dev \
     libs2-dev \
     zlib1g-dev libbz2-dev libexpat1-dev liblz4-dev \
+    libdeflate-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -29,6 +30,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libs2-0 \
     zlib1g libbz2-1.0 libexpat1 liblz4-1 \
+    libdeflate0 \
     curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

@@ -65,10 +65,12 @@ Custom region? Use the download helper directly:
 
 ### Build from source
 
-Prerequisites: a C++17 compiler + CMake for the builder, Rust stable for the server, `protoc` for gRPC. On macOS:
+Prerequisites: a C++17 compiler + CMake for the builder, Rust stable for the server, `protoc` for gRPC. The C++ builder also benefits from `libdeflate` for fast PBF inflate (libosmium picks it up automatically when present; falls back to zlib otherwise — see `docs/performance/build-pipeline-perf-plan.md`).
+
+On macOS:
 
 ```bash
-brew install cmake libosmium protozero s2geometry protobuf
+brew install cmake libosmium protozero s2geometry protobuf libdeflate
 ```
 
 On Debian/Ubuntu:
@@ -76,6 +78,7 @@ On Debian/Ubuntu:
 ```bash
 apt-get install cmake libosmium2-dev libprotozero-dev libs2-dev \
                 zlib1g-dev libbz2-dev libexpat1-dev liblz4-dev \
+                libdeflate-dev \
                 protobuf-compiler
 ```
 

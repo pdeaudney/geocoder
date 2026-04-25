@@ -70,8 +70,11 @@ supports NLB targets) forces your hand. Otherwise: internal ALB.
 - **Packer 1.10+** — `brew install hashicorp/tap/packer`.
 - **Build machine** — macOS or Linux with:
   - `cargo` (stable Rust)
-  - `cmake`, `g++`, `libosmium2-dev`, `libs2-dev`, `libprotozero-dev`
-    (Dockerfile-equivalent, or use Docker)
+  - `cmake`, `g++`, `libosmium2-dev`, `libs2-dev`, `libprotozero-dev`,
+    `libdeflate-dev` (for fast PBF inflate; libosmium picks it up
+    automatically when present), plus `zlib1g-dev`, `libbz2-dev`,
+    `libexpat1-dev`, `liblz4-dev` for libosmium's compression
+    backends. (Dockerfile-equivalent, or use Docker.)
   - `osmium-tool`, `pyosmium-get-changes` (for index updates)
 - **S3 bucket** for artifacts (index files + binary). No special config needed.
 

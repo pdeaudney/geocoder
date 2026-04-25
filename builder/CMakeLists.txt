@@ -26,6 +26,19 @@ find_package(BZip2 REQUIRED)
 find_package(EXPAT REQUIRED)
 find_package(s2 QUIET)
 
+# libdeflate replaces zlib for PBF inflate when available.
+# 2-3× faster on the same data (libdeflate uses SSE4.2/AVX2 SIMD
+# for the Huffman + LZ77 fast paths). libosmium picks it up at
+# compile time via the `OSMIUM_WITH_LIBDEFLATE` macro defined
+# below — see docs/performance/build-pipeline-perf-plan.md
+# stage 1 for analysis.
+find_library(LIBDEFLATE_LIBRARY deflate
+    PATHS /opt/homebrew/lib /usr/local/lib /usr/lib
+    DOC "libdeflate library (for fast PBF inflate)")
+find_path(LIBDEFLATE_INCLUDE_DIR libdeflate.h
+    PATHS /opt/homebrew/include /usr/local/include /usr/include
+    DOC "libdeflate header")
+
 add_executable(build-index src/build_index.cpp)
 
 # Vendored ankerl::unordered_dense (single-header, MIT-licensed) at
@@ -88,4 +101,16 @@ else()
         EXPAT::EXPAT
         Threads::Threads
     )
+endif()
+
+# Link libdeflate when found. The OSMIUM_WITH_LIBDEFLATE define
+# tells libosmium to use it for PBF block inflate; without the
+# define libosmium silently falls back to zlib.
+if(LIBDEFLATE_LIBRARY AND LIBDEFLATE_INCLUDE_DIR)
+    message(STATUS "build-index: using libdeflate (${LIBDEFLATE_LIBRARY})")
+    target_compile_definitions(build-index PRIVATE OSMIUM_WITH_LIBDEFLATE)
+    target_include_directories(build-index PRIVATE ${LIBDEFLATE_INCLUDE_DIR})
+    target_link_libraries(build-index PRIVATE ${LIBDEFLATE_LIBRARY})
+else()
+    message(STATUS "build-index: libdeflate not found, falling back to zlib (slower PBF inflate)")
 endif()

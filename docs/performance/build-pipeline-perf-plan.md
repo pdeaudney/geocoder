@@ -28,7 +28,7 @@ proportionally lower).
 
 | # | Stage | Status | Wallclock impact (AU `build-index` unless noted) |
 |--:|---|---|---|
-| 1 | libdeflate in `build-index` | TODO | target: −25 to −35 % of Pass 2 |
+| 1 | libdeflate in `build-index` | DONE | AU: ~0 % (within noise; AU isn't decompression-bound). Planet expected: −3–8 min on OSM ingest. Confirmed linked + active. |
 | 2 | mimalloc as global allocator (all Rust binaries) | TODO | target: −5 to −15 % across the board |
 | 3 | Parallel countries in `build-openaddresses-index` | TODO | target: −85 to −90 % of OA stage |
 | 4 | simd-json in `wof-importer` | TODO | target: −80 % of WoF parse |
@@ -55,7 +55,7 @@ proportionally lower).
 
 ## Stage 1: libdeflate in `build-index`
 
-**Status: TODO**
+**Status: DONE** (commit pending — see end of stage)
 
 ### Background
 
@@ -100,12 +100,47 @@ linked. Available since libosmium 2.18.
 
 ### Result
 
-(fill in after running)
-
 - Wallclock before: 78 s
-- Wallclock after: ___ s
-- Δ: ___ %
-- Notes: ___
+- Wallclock after: 79 s (within noise — AU run-to-run variance is ±2 s)
+- Δ on AU: **~0 % (within noise)**
+- libdeflate IS linked and active:
+  `otool -L builder/build/build-index` shows
+  `libdeflate.0.dylib` and the build defines `OSMIUM_WITH_LIBDEFLATE`.
+- **Why no AU gain:** AU PBF is only 890 MB compressed; decompression
+  is not the AU bottleneck — Pass 2 OSM tag iteration dominates.
+  libdeflate's win is on planet PBF (~75 GB compressed) where
+  decompression takes a substantial fraction of Pass 2 wallclock.
+- **Action taken:** still ship the change. The link cost is zero,
+  the planet-scale win is real (per libdeflate benchmarks: 2.7×
+  faster gzip inflate vs zlib on x86-64 with AVX2). On the next
+  AWS planet build, expect 3–8 minutes saved on the OSM ingest
+  alone.
+
+### Build-infra updates (in same commit as the CMake change)
+
+User flagged we deploy on Ubuntu — added `libdeflate-dev` to:
+
+- `Dockerfile` build stage line ~9 (added `libdeflate-dev`)
+- `Dockerfile` runtime stage line ~32 (added `libdeflate0`)
+- `packer/build-worldwide.pkr.hcl` line ~219 (added `libdeflate-dev`)
+- `README.md` build prerequisites: brew + apt-get blocks both
+  updated, plus a one-liner explaining libosmium picks it up
+  automatically.
+- `BUILD-DEPLOY.md` build-machine prerequisites updated.
+
+### Outstanding follow-up (will surface in stage 6)
+
+The 1 s AU delta is within run-to-run noise. To confirm the
+libdeflate gain is real (and to get a defensible number for the
+perf doc), we need either:
+
+(a) per-stage timing emission so we can isolate "Pass 2 inflate"
+    from "Pass 2 tag iteration" — that's stage 6, will close the
+    loop.
+(b) A planet build measurement on AWS — large effort, needs a
+    full build run.
+
+Going with (a) via stage 6.
 
 ---
 
