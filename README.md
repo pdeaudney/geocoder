@@ -35,7 +35,7 @@ docker run -e REGION=oceania \
 
 The `auto` mode (default) downloads the PBF for a named region, builds the reverse + forward indexes, and starts serving.
 
-Supported region presets: `oceania` (default), `australia`, `new-zealand`, `africa`, `antarctica`, `asia`, `europe`, `north-america`, `south-america`, `central-america`, `russia`, `usa`, `planet`.
+Supported region presets: `oceania` (default; full Australia/Oceania continent — AU, NZ, Fiji, PNG, Vanuatu, Solomon Is, New Caledonia, Cook Is, Samoa, Tonga, Kiribati, etc.), `australia` and `new-zealand` (sub-region extracts), `africa`, `antarctica`, `asia`, `europe`, `north-america`, `south-america`, `central-america`, `russia`, `usa`, `planet`.
 
 ```yaml
 # docker-compose.yml
@@ -94,7 +94,7 @@ Fetch the source data:
 # All-in-one fetch — OSM PBF, OpenAddresses, WhosOnFirst, optional MaxMind + G-NAF.
 # Defaults output to ./data/. Re-runnable; existing files are skipped.
 ./scripts/fetch-build-data.sh --region au         # AU-only build
-./scripts/fetch-build-data.sh --region oceania    # AU + NZ
+./scripts/fetch-build-data.sh --region oceania    # full Australia/Oceania continent (AU, NZ, Fiji, PNG, etc.)
 ./scripts/fetch-build-data.sh --region europe     # EU
 ./scripts/fetch-build-data.sh --region planet     # full planet (~85 GB)
 ```

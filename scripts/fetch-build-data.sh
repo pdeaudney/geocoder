@@ -17,7 +17,7 @@
 #
 # Usage:
 #   ./scripts/fetch-build-data.sh --region au                  # AU-only build
-#   ./scripts/fetch-build-data.sh --region oceania             # AU + NZ
+#   ./scripts/fetch-build-data.sh --region oceania             # full Australia/Oceania continent
 #   ./scripts/fetch-build-data.sh --region europe              # EU
 #   ./scripts/fetch-build-data.sh --region all-continents      # planet via 9
 #                                                                Geofabrik
@@ -147,7 +147,7 @@ decompress_bz2() {
 # between adjacent continents (~5 % extra source bytes processed).
 # -----------------------------------------------------------------------------
 
-CONTINENTS="africa antarctica asia oceania central-america europe north-america russia south-america"
+CONTINENTS="africa antarctica asia australia-oceania central-america europe north-america russia south-america"
 FETCH_PARALLEL="${FETCH_PARALLEL:-4}"
 
 if [ "$SKIP_OSM" = "0" ]; then
