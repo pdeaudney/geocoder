@@ -70,7 +70,7 @@ Prerequisites: a C++17 compiler + CMake for the builder, Rust stable for the ser
 On macOS:
 
 ```bash
-brew install cmake libosmium protozero s2geometry protobuf libdeflate
+brew install cmake libosmium protozero s2geometry protobuf libdeflate lbzip2
 ```
 
 On Debian/Ubuntu:
@@ -79,8 +79,14 @@ On Debian/Ubuntu:
 apt-get install cmake libosmium2-dev libprotozero-dev libs2-dev \
                 zlib1g-dev libbz2-dev libexpat1-dev liblz4-dev \
                 libdeflate-dev \
-                protobuf-compiler
+                protobuf-compiler \
+                lbzip2
 ```
+
+`lbzip2` is the parallel bzip2 decoder used by `scripts/fetch-build-data.sh`
+to unpack the WhosOnFirst SQLite archive 3–5× faster than stock `bzip2`.
+Optional but cuts ~5 minutes off a planet build's fetch step. The script
+falls back to `pbzip2` then `bzip2` if `lbzip2` isn't installed.
 
 Fetch the source data:
 
