@@ -37,6 +37,10 @@
 //! `--skip au` (the default) avoids redundant ingestion. Pass
 //! `--country au` to override.
 
+// mimalloc global allocator — see build-pipeline-perf-plan stage 2.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use query_server::address_points::{AddressPoint, BuildOutputPaths};
 use query_server::openaddresses::oa_prefix;
 use s2::cellid::CellID;

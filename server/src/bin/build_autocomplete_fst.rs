@@ -20,6 +20,10 @@
 //! ~5–15 MB of FST + ~8 MB of entries + ~2 MB of strings. The whole
 //! AU index is <30 MB.
 
+// mimalloc global allocator — see build-pipeline-perf-plan stage 2.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use fst::MapBuilder;
 use query_server::autocomplete::{AutocompleteEntry, KIND_PLACE, KIND_STREET};
 use query_server::{

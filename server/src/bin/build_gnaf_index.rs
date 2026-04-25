@@ -9,6 +9,10 @@
 //! Memory footprint during build: ~1 GB peak (the in-memory geocode map
 //! dominates). Wall-clock: ~2-4 minutes on a typical dev machine.
 
+// mimalloc global allocator — see build-pipeline-perf-plan stage 2.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use query_server::gnaf::GnafPoint;
 use s2::cellid::CellID;
 use s2::latlng::LatLng;

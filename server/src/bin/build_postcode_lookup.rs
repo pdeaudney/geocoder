@@ -20,6 +20,10 @@
 //! Attribution (per G-NAF CC-BY 4.0): output is derived from G-NAF data
 //! © Commonwealth of Australia (Geoscape Australia) licensed under CC-BY 4.0.
 
+// mimalloc global allocator — see build-pipeline-perf-plan stage 2.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};

@@ -1,3 +1,10 @@
+// mimalloc as the global allocator. Outperforms system malloc on
+// tantivy postings construction, FST builds, hashmap rehashes, and
+// per-request response allocation. See
+// docs/performance/build-pipeline-perf-plan.md stage 2.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use arc_swap::ArcSwap;
 use axum::extract::Query;
 use axum::http::StatusCode;

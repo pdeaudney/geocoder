@@ -20,6 +20,10 @@
 //! Usage:
 //!   wof-importer <wof-sqlite-dir> <output-index-dir>
 
+// mimalloc global allocator — see build-pipeline-perf-plan stage 2.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use rusqlite::Connection;
 use serde_json::Value;
 use std::fs::{self, File};

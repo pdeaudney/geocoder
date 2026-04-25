@@ -12,6 +12,10 @@
 //! index dir. Smaller, faster per-query dispatch; ideal for worldwide
 //! deployments. `Forward::open` picks up both layouts automatically.
 
+// mimalloc global allocator — see build-pipeline-perf-plan stage 2.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use query_server::forward;
 use std::path::PathBuf;
 

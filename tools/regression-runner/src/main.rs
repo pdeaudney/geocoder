@@ -9,6 +9,10 @@
 //! start/stop-server lifecycle. This binary deliberately knows nothing
 //! about the server process — it only speaks HTTP.
 
+// mimalloc global allocator — see build-pipeline-perf-plan stage 2.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

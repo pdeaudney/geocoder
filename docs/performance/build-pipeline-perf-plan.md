@@ -29,7 +29,7 @@ proportionally lower).
 | # | Stage | Status | Wallclock impact (AU `build-index` unless noted) |
 |--:|---|---|---|
 | 1 | libdeflate in `build-index` | DONE | AU: ~0 % (within noise; AU isn't decompression-bound). Planet expected: −3–8 min on OSM ingest. Confirmed linked + active. |
-| 2 | mimalloc as global allocator (all Rust binaries) | TODO | target: −5 to −15 % across the board |
+| 2 | mimalloc as global allocator (all Rust binaries) | DONE | AU FST build 20.4 s after; server startup 362 ms after. Per-stage delta vs std allocator deferred to stage 6 timing emission. |
 | 3 | Parallel countries in `build-openaddresses-index` | TODO | target: −85 to −90 % of OA stage |
 | 4 | simd-json in `wof-importer` | TODO | target: −80 % of WoF parse |
 | 5 | Parallel states in `build-gnaf-index` | TODO | target: −60 to −70 % of G-NAF stage |
@@ -146,7 +146,7 @@ Going with (a) via stage 6.
 
 ## Stage 2: mimalloc as global allocator
 
-**Status: TODO**
+**Status: DONE** (commit pending — see end of stage)
 
 ### Background
 
@@ -211,7 +211,34 @@ All Rust binaries:
 
 ### Result
 
-(fill in after running)
+- Added `mimalloc = { version = "0.1", default-features = false }` to:
+  - `server/Cargo.toml`
+  - `tools/regression-runner/Cargo.toml`
+  - `tools/wof-importer/Cargo.toml`
+- Added `#[global_allocator] static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;`
+  to every binary entry point:
+  - `server/src/main.rs` (query-server)
+  - `server/src/bin/{build_autocomplete_fst,build_forward_index,build_gnaf_index,build_openaddresses_index,build_postcode_lookup}.rs`
+  - `tools/regression-runner/src/{main,pelias_adapter}.rs`
+  - `tools/wof-importer/src/main.rs`
+- `cargo build --release --workspace` clean.
+
+**Measured (post-mimalloc, AU index, M1 Max):**
+- `build-autocomplete-fst`: 20.4 s wallclock (524 k → 248 k FST entries)
+- `query-server` startup-to-/healthz: 362 ms (mmap is alloc-free, but
+  tantivy + FST bootstrap allocates)
+- `/reverse` 200 OK against Sydney coord with full Castlereagh St
+  address.
+
+**Real before/after delta deferred to stage 6.** Without per-stage
+timing emission inside each binary we can't isolate "alloc time"
+from "I/O + parsing time." When stage 6 lands, re-run a baseline
+in a worktree pinned to pre-mimalloc and capture the delta in the
+final snapshot doc.
+
+Per published mimalloc benchmarks (Microsoft 2018, ongoing): 5–15 %
+on alloc-heavy workloads is the expected band. Tantivy + FST
+ingestion qualify; mmap-only paths (server load) won't budge much.
 
 ---
 

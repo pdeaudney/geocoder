@@ -33,6 +33,10 @@
 //! pass/fail report to curate a subset and copy into
 //! `tests/regression/corpora/` for committing.
 
+// mimalloc global allocator — see build-pipeline-perf-plan stage 2.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
