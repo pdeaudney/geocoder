@@ -36,6 +36,13 @@
 #
 #     TANTIVY_HEAP_MB       default 4096 — per-writer heap. 4 GB on 128 GB box.
 #     SMOKE_PORT            default 13099 — local port for the smoke step.
+#     PLANET_PBF            default 0 — opt back into the legacy single-stream
+#                           planet PBF download (slower, less resumable; only
+#                           useful if Geofabrik is unreachable). Default is to
+#                           pull 9 continent extracts in parallel via
+#                           --region all-continents.
+#     FETCH_PARALLEL        default 4 — concurrent download streams when
+#                           fetching continents. Honoured by fetch-build-data.sh.
 #
 # Exit codes:
 #     0    everything completed (or already done from a previous run)
@@ -48,11 +55,22 @@ DATA_DIR="${DATA_DIR:-./data-planet}"
 GNAF_ARCHIVE_URL="${GNAF_ARCHIVE_URL:-}"
 TANTIVY_HEAP_MB="${TANTIVY_HEAP_MB:-4096}"
 SMOKE_PORT="${SMOKE_PORT:-13099}"
+PLANET_PBF="${PLANET_PBF:-0}"
 
 DONE_DIR="$DATA_DIR/.done"
 LOG_DIR="$DATA_DIR/logs"
-PBF="$DATA_DIR/pbf/planet-latest.osm.pbf"
+PBF_DIR="$DATA_DIR/pbf"
 INDEX_DIR="$DATA_DIR/index"
+
+# Region argument handed to fetch-build-data.sh + the post-fetch sanity
+# check. all-continents (default) downloads 9 Geofabrik continent
+# extracts in parallel; planet pulls the single 80 GB stream from
+# planet.osm.org for operators who explicitly opt in via PLANET_PBF=1.
+if [ "$PLANET_PBF" = "1" ]; then
+    FETCH_REGION="planet"
+else
+    FETCH_REGION="all-continents"
+fi
 
 mkdir -p "$DATA_DIR" "$DONE_DIR" "$LOG_DIR"
 
@@ -192,13 +210,19 @@ run_preflight() {
 
 run_fetch_data() {
     step_start "fetch-data"
+    log "region=$FETCH_REGION (set PLANET_PBF=1 for the legacy single-stream path)"
     DATA_DIR="$DATA_DIR" GNAF_ARCHIVE_URL="$GNAF_ARCHIVE_URL" \
-        ./scripts/fetch-build-data.sh --region planet --skip-oa \
+        ./scripts/fetch-build-data.sh --region "$FETCH_REGION" --skip-oa \
         2>&1 | tee "$LOG_DIR/fetch-data.log"
-    if [ ! -f "$PBF" ]; then
-        err "expected planet PBF at $PBF — fetch-build-data.sh did not produce it"
+
+    # Sanity: at least one PBF must exist under $PBF_DIR. Globbing here
+    # rather than a fixed filename so both --region planet and
+    # --region all-continents validate the same way.
+    if ! ls -1 "$PBF_DIR"/*.osm.pbf >/dev/null 2>&1; then
+        err "no PBFs found under $PBF_DIR — fetch-build-data.sh did not produce any"
         exit 1
     fi
+    log "PBFs ready: $(ls -1 "$PBF_DIR"/*.osm.pbf | wc -l | tr -d ' ') file(s), $(du -sh "$PBF_DIR" | cut -f1) total"
     step_done
 }
 
@@ -225,10 +249,16 @@ run_build_binaries() {
 run_build_index() {
     step_start "build-index"
     mkdir -p "$INDEX_DIR"
-    log "starting build-index over $(du -h "$PBF" | cut -f1) PBF"
-    log "  (dominant phase; expect 12+ hours wall time)"
+    # Capture the PBF list with shell glob expansion. build-index accepts
+    # multiple positional PBF args and shares the admin/street tables
+    # across them — exactly what we want for the multi-continent path.
+    local pbf_count pbf_total
+    pbf_count=$(ls -1 "$PBF_DIR"/*.osm.pbf 2>/dev/null | wc -l | tr -d ' ')
+    pbf_total=$(du -ch "$PBF_DIR"/*.osm.pbf 2>/dev/null | awk '/total$/ {print $1}')
+    log "starting build-index over $pbf_count PBF file(s), $pbf_total total"
+    log "  (dominant phase; expect 12+ hours wall time on the planet scope)"
     log "  (per-stage timings stream into $LOG_DIR/build-index.log)"
-    ./build/build-index "$INDEX_DIR" "$PBF" 2>&1 | tee "$LOG_DIR/build-index.log"
+    ./build/build-index "$INDEX_DIR" "$PBF_DIR"/*.osm.pbf 2>&1 | tee "$LOG_DIR/build-index.log"
 
     # Sanity-check the output: geo_cells.bin must exist and be non-empty.
     # The build-index tool exits 0 on partial output in some failure modes;
@@ -358,7 +388,7 @@ run_step() {
     "$@"
 }
 
-log "starting planet build: DATA_DIR=$DATA_DIR  TANTIVY_HEAP_MB=$TANTIVY_HEAP_MB"
+log "starting planet build: DATA_DIR=$DATA_DIR  TANTIVY_HEAP_MB=$TANTIVY_HEAP_MB  region=$FETCH_REGION"
 log "logs land under $LOG_DIR/"
 
 # preflight intentionally has no .done marker — re-run every invocation

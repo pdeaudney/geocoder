@@ -16,18 +16,38 @@
 #   data/GeoLite2-City.mmdb                     MaxMind, runtime /geocode/ip
 #
 # Usage:
-#   ./scripts/fetch-build-data.sh --region au               # AU-only build
-#   ./scripts/fetch-build-data.sh --region oceania          # AU + NZ
-#   ./scripts/fetch-build-data.sh --region europe           # EU
-#   ./scripts/fetch-build-data.sh --region planet           # full planet build
-#   ./scripts/fetch-build-data.sh --region au --skip-oa     # skip OpenAddresses
-#   ./scripts/fetch-build-data.sh --region au --skip-wof    # skip WhosOnFirst
+#   ./scripts/fetch-build-data.sh --region au                  # AU-only build
+#   ./scripts/fetch-build-data.sh --region oceania             # AU + NZ
+#   ./scripts/fetch-build-data.sh --region europe              # EU
+#   ./scripts/fetch-build-data.sh --region all-continents      # planet via 9
+#                                                                Geofabrik
+#                                                                continent
+#                                                                extracts in
+#                                                                parallel
+#                                                                (recommended)
+#   ./scripts/fetch-build-data.sh --region planet              # planet as
+#                                                                single 80 GB
+#                                                                stream from
+#                                                                planet.osm.org
+#                                                                (legacy / slow)
+#   ./scripts/fetch-build-data.sh --region au --skip-oa        # skip OpenAddresses
+#   ./scripts/fetch-build-data.sh --region au --skip-wof       # skip WhosOnFirst
 #
 # Required deps on the build box:
 #   curl, bzip2, unzip, awscli (only if fetching OpenAddresses)
 #
+# Optional but recommended:
+#   lbzip2  — parallel bzip2 decoder. WoF planet SQLite ships as ~8.6 GB
+#             of single-stream bzip2; lbzip2 decompresses it 3–5× faster
+#             than stock bzip2 -d on a multi-core box. Wire-compatible
+#             with bzip2 output. Auto-detected; falls back to bzip2 -d
+#             when not installed.
+#
 # Env vars:
 #   DATA_DIR             default ./data
+#   FETCH_PARALLEL       default 4 — concurrent download streams when
+#                        --region all-continents is selected. Higher on
+#                        a fast cloud box; 4 is conservative for residential.
 #   MAXMIND_LICENSE_KEY  needed for GeoLite2-City; skipped without it
 #   GNAF_ARCHIVE_URL     HTTPS URL to a G-NAF ZIP you've already
 #                        license-accepted on data.gov.au — skipped
@@ -38,10 +58,15 @@
 #                        or space-separated alpha-2 codes
 #
 # Total downloads (no cache, all sources):
-#   AU only:      ~1.5 GB   (PBF 800 MB + OA-AU 30 MB + WoF-au 50 MB
-#                            + GeoLite2 80 MB + G-NAF 6 GB if license-accepted)
-#   Planet:       ~85 GB    (PBF 80 GB + OA all 5 GB + WoF planet 8.6 GB
-#                            uncompressed + GeoLite2 80 MB)
+#   AU only:           ~1.5 GB   (PBF 800 MB + OA-AU 30 MB + WoF-au 50 MB
+#                                 + GeoLite2 80 MB + G-NAF 6 GB if license-accepted)
+#   all-continents:    ~80 GB    (continent PBFs ~70 GB + WoF planet 8.6 GB
+#                                 uncompressed + GeoLite2 80 MB). ~1.5–2 h on
+#                                 a residential connection with FETCH_PARALLEL=4;
+#                                 much faster on a cloud box.
+#   planet (single):   ~85 GB    (PBF 80 GB single stream from
+#                                 planet.osm.org, frequently throttled to
+#                                 1–3 MB/s — plan for 6–8 h).
 set -eu
 
 DATA_DIR="${DATA_DIR:-./data}"
@@ -74,13 +99,51 @@ fi
 
 mkdir -p "$DATA_DIR"
 
+# Pick the fastest available bzip2 decoder. lbzip2 parallelises bz2
+# decompression by pipelining block decodes across cores; on the WoF
+# planet 8.6 GB file the difference is roughly 3–5× wall-time saved.
+# Wire-compatible with bzip2 output, so callers don't need to know.
+if command -v lbzip2 >/dev/null 2>&1; then
+    BZIP2_D="lbzip2 -d"
+else
+    BZIP2_D="bzip2 -d"
+fi
+
+decompress_bz2() {
+    # Usage: decompress_bz2 <input.bz2>
+    # Decompresses in-place (removes .bz2 suffix). Honours $BZIP2_D.
+    $BZIP2_D "$1"
+}
+
 # -----------------------------------------------------------------------------
 # 1. OSM PBF — the only mandatory source. Everything else degrades gracefully.
+#
+# `--region all-continents` fans the download across 9 Geofabrik continent
+# extracts in parallel via `xargs -P`. Each extract is 30 MB to 30 GB; the
+# parallel download from Geofabrik's CDN sustains much higher aggregate
+# throughput than the single 80 GB stream from planet.osm.org. The build
+# pipeline's pass 4 dedup handles the small amount of border overlap
+# between adjacent continents (~5 % extra source bytes processed).
 # -----------------------------------------------------------------------------
 
+CONTINENTS="africa antarctica asia oceania central-america europe north-america russia south-america"
+FETCH_PARALLEL="${FETCH_PARALLEL:-4}"
+
 if [ "$SKIP_OSM" = "0" ]; then
-    echo "==> fetching OSM PBF for region=$REGION"
-    ./scripts/download-region.sh "$REGION" "$DATA_DIR/pbf"
+    if [ "$REGION" = "all-continents" ]; then
+        echo "==> fetching $(echo "$CONTINENTS" | wc -w | tr -d ' ') continent PBFs in parallel (FETCH_PARALLEL=$FETCH_PARALLEL)"
+        # `printf '%s\n'` + xargs is POSIX and propagates non-zero exit
+        # via the -P-aware xargs `--exit` flag where available. Each
+        # download-region.sh invocation is independently idempotent
+        # (skips already-downloaded files), so a re-run resumes cleanly
+        # if one of the parallel slots failed.
+        printf '%s\n' $CONTINENTS \
+            | xargs -n 1 -P "$FETCH_PARALLEL" -I{} \
+                ./scripts/download-region.sh {} "$DATA_DIR/pbf"
+    else
+        echo "==> fetching OSM PBF for region=$REGION"
+        ./scripts/download-region.sh "$REGION" "$DATA_DIR/pbf"
+    fi
 else
     echo "==> skipping OSM (--skip-osm)"
 fi
@@ -141,7 +204,7 @@ if [ "$SKIP_WOF" = "0" ]; then
                 tmp_bz2="$DATA_DIR/.wof-planet.db.bz2"
                 curl -fSL -o "$tmp_bz2" \
                     "https://data.geocode.earth/wof/dist/sqlite/whosonfirst-data-admin-latest.db.bz2"
-                bzip2 -d "$tmp_bz2"
+                decompress_bz2 "$tmp_bz2"
                 mv "${tmp_bz2%.bz2}" "$db"
                 echo "    wrote $db ($(du -h "$db" | cut -f1))"
             else
@@ -162,7 +225,7 @@ if [ "$SKIP_WOF" = "0" ]; then
                 tmp_bz2="$DATA_DIR/.wof-${cc}.db.bz2"
                 curl -fsSL -o "$tmp_bz2" \
                     "https://data.geocode.earth/wof/dist/sqlite/whosonfirst-data-admin-${cc}-latest.db.bz2"
-                bzip2 -d "$tmp_bz2"
+                decompress_bz2 "$tmp_bz2"
                 mv "${tmp_bz2%.bz2}" "$db"
                 echo "    wrote $db ($(du -h "$db" | cut -f1))"
             done
@@ -227,9 +290,11 @@ fi
 
 echo
 echo "==> done. data root: $DATA_DIR"
+echo "    PBFs available:"
+ls -1sh "$DATA_DIR/pbf/" 2>/dev/null | tail -n +2 | sed 's/^/      /' || echo "      (none)"
 echo "    next steps:"
 echo "      cd build && cmake ../builder && make && cd .."
-echo "      ./build/build-index $DATA_DIR/index $DATA_DIR/pbf/*.osm.pbf"
 echo "      cargo build --release --manifest-path server/Cargo.toml"
+echo "      ./build/build-index $DATA_DIR/index $DATA_DIR/pbf/*.osm.pbf"
 echo "      ./server/target/release/build-forward-index $DATA_DIR/index --partition-by-country"
 echo "      ./server/target/release/build-autocomplete-fst $DATA_DIR/index"
