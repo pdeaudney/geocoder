@@ -79,13 +79,28 @@ impl AddressPointIndex {
         entries_path: &Path,
         strings_path: &Path,
     ) -> Result<Option<Self>, String> {
+        Self::open_labeled("address_points", points_path, cells_path, entries_path, strings_path)
+    }
+
+    /// Same as [`open`], but tags the manifest entries with a caller-supplied
+    /// label (`gnaf`, `open_addresses_us`, …) so each loaded file is grep-able
+    /// by source in stdout logs.
+    pub fn open_labeled(
+        index_label: &'static str,
+        points_path: &Path,
+        cells_path: &Path,
+        entries_path: &Path,
+        strings_path: &Path,
+    ) -> Result<Option<Self>, String> {
         let paths = [points_path, cells_path, entries_path, strings_path];
         if paths.iter().any(|p| !p.exists()) {
             return Ok(None);
         }
         let mmap = |p: &Path| -> Result<Mmap, String> {
             let f = File::open(p).map_err(|e| format!("open {}: {}", p.display(), e))?;
-            unsafe { Mmap::map(&f) }.map_err(|e| format!("mmap {}: {}", p.display(), e))
+            let m = unsafe { Mmap::map(&f) }.map_err(|e| format!("mmap {}: {}", p.display(), e))?;
+            crate::log_loaded_file(index_label, &p.display().to_string(), m.len() as u64);
+            Ok(m)
         };
         Ok(Some(AddressPointIndex {
             points: mmap(points_path)?,
@@ -99,11 +114,19 @@ impl AddressPointIndex {
     /// (e.g. `open_with_prefix(dir, "gnaf")` opens
     /// `dir/gnaf_{points,cells,entries,strings}.bin`).
     pub fn open_with_prefix(dir: &Path, prefix: &str) -> Result<Option<Self>, String> {
+        Self::open_with_prefix_labeled(dir, prefix, "address_points")
+    }
+
+    pub fn open_with_prefix_labeled(
+        dir: &Path,
+        prefix: &str,
+        index_label: &'static str,
+    ) -> Result<Option<Self>, String> {
         let points = dir.join(format!("{prefix}_points.bin"));
         let cells = dir.join(format!("{prefix}_cells.bin"));
         let entries = dir.join(format!("{prefix}_entries.bin"));
         let strings = dir.join(format!("{prefix}_strings.bin"));
-        Self::open(&points, &cells, &entries, &strings)
+        Self::open_labeled(index_label, &points, &cells, &entries, &strings)
     }
 
     pub fn points(&self) -> &[AddressPoint] {

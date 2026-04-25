@@ -293,13 +293,116 @@ reload, making debugging miserable.
 
 ## Operations
 
+### Sinks at a glance
+
+The query server has two **independent** observability sinks. They never
+duplicate data, and disabling one does not affect the other:
+
+| Sink                       | Carries           | Format                       | Default in prod | Toggle                                          |
+|----------------------------|-------------------|------------------------------|-----------------|-------------------------------------------------|
+| **stdout**                 | log events        | NDJSON (one event per line)  | always on       | `RUST_LOG=off` to silence; `GEOCODER_LOG_FORMAT` to change format |
+| **OTLP** (gRPC or HTTP)    | distributed spans | OTLP protobuf                | off             | `OTEL_TRACE_ENABLED=true` + `OTEL_EXPORTER_OTLP_ENDPOINT`         |
+
+So in a stock production deploy with no env vars set: **one log format,
+one log sink — newline-delimited JSON on stdout**, captured by
+`systemd-journald` and shipped wherever you ship journal output. Spans
+are still built in-process (so log lines correlate via `spans[]` /
+`current_span` fields), but they aren't exported anywhere unless you
+opt into OTLP. Setting `OTEL_TRACE_ENABLED=false` does **not** affect
+stdout — it only suppresses OTLP export.
+
 ### Logs
 
-`systemd-journald` captures `query-server`'s stderr output. Forward to
-CloudWatch Logs via the
-[CloudWatch agent](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/install-CloudWatch-Agent-on-EC2-Instance.html) —
-install it in the AMI (one more `apt-get install` line in the Packer
-provisioner) and point its config at `journal`.
+`query-server` writes NDJSON log lines to **stdout** by default (when
+stdout is not a terminal). Each line carries the canonical `tracing`
+fields plus any structured key/values attached by the handler:
+
+```json
+{"timestamp":"…","level":"INFO","target":"query_server::http","fields":{"message":"request complete","status":200,"duration_ms":1.42},"spans":[{"otel.kind":"server","http.request.method":"GET","url.path":"/reverse","name":"http.request"},{"name":"reverse_geocode","geocoder.lat":-33.85,"geocoder.lon":151.21}]}
+```
+
+Aggregators that parse JSON natively (CloudWatch Logs Insights, Loki,
+Datadog Logs, Stackdriver) can group by `fields.geocoder.stage`,
+`spans[].geocoder.path` etc. without log-parsing rules. On EC2,
+`systemd-journald` captures stdout — install the CloudWatch agent in the
+AMI and point it at the journal.
+
+Useful environment variables:
+
+| Variable                | Purpose                                                                                                            |
+|-------------------------|--------------------------------------------------------------------------------------------------------------------|
+| `RUST_LOG`              | EnvFilter directive (e.g. `info,query_server=debug,tower_http=info`). Applied to both sinks — set this to silence. |
+| `GEOCODER_LOG_FORMAT`   | `json` (prod, NDJSON), `pretty` (local dev, multi-line ANSI), `compact` (single-line text). Auto-picks JSON when stdout isn't a tty. |
+
+Format note: `json` output is already one event per line — there is no
+separate "compact JSON" mode. The `compact` value selects a non-JSON
+single-line text format for humans, not a denser JSON variant.
+
+### Tracing (OpenTelemetry)
+
+The query server is fully instrumented with OpenTelemetry spans:
+per-request HTTP / gRPC server spans, and a child span tree describing
+each pipeline stage (FST fast-path, structured tantivy search, ladder
+relaxation rungs, fuzzy fallback, house-number refinement,
+reverse-geocode enrichment, IP MaxMind lookup, …). Spans are always
+created in-process; export to an OTLP collector is opt-in.
+
+Enable export with:
+
+```bash
+OTEL_TRACE_ENABLED=true \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.observability:4317 \
+OTEL_SERVICE_NAME=query-server \
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,service.namespace=geocoder \
+./query-server data/index
+```
+
+| Variable                              | Default                  | Purpose                                                                                              |
+|---------------------------------------|--------------------------|------------------------------------------------------------------------------------------------------|
+| `OTEL_TRACE_ENABLED`                  | `true` if endpoint set   | Master switch. Set `false` to force-disable OTLP export (logs still go to stdout).                   |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`         | `http://localhost:4317`  | Collector endpoint. gRPC port 4317 or HTTP port 4318 — match the protocol below.                    |
+| `OTEL_EXPORTER_OTLP_PROTOCOL`         | `grpc`                   | `grpc` / `http/protobuf` / `http/json`.                                                              |
+| `OTEL_SERVICE_NAME`                   | `query-server`           | `service.name` resource attribute.                                                                   |
+| `OTEL_RESOURCE_ATTRIBUTES`            | unset                    | Comma-separated `key=value` pairs merged into the resource (e.g. `deployment.environment=prod`).     |
+
+Tested against the OpenTelemetry Collector, Tempo, Honeycomb,
+Datadog Agent, and Jaeger 2.x — anything that speaks OTLP works.
+
+#### Identifying corrupt index files
+
+Spans and stdout logs both carry attribution fields so an operator can
+tie a suspect query (or a suspect result) to a specific file on disk.
+
+**Per-query span attributes** (filterable in any tracing UI):
+
+| Field                              | Recorded on                              | Value                                                                                          |
+|------------------------------------|------------------------------------------|------------------------------------------------------------------------------------------------|
+| `geocoder.forward.tantivy_dir`     | every `forward.search_*` span            | `tantivy` or `tantivy_<cc>` — the directory tantivy answered from.                             |
+| `geocoder.forward.index_variant`   | every `forward.search_*` span            | `default` or `per_country` — distinguishes monolithic vs partitioned even when the dir name doesn't. |
+| `geocoder.address.source`          | `find_addr_point` span                   | `gnaf`, `open_addresses_<cc>`, `osm_addr_points`, or `none`.                                   |
+| `geocoder.autocomplete.fst_variant`| `autocomplete` and `search.fst_fast_path`| `unified`, `per_country_<cc>`, `any`, or `none`.                                               |
+
+**Startup file manifest** — one INFO line per loaded file at
+`target=query_server::manifest`. Fields: `index`, `path`, `size_bytes`,
+`mtime_unix`. Filter the boot logs to enumerate every file the process
+mmap'd, with sizes you can diff against an expected manifest:
+
+```bash
+journalctl -u geocoder | jq -c 'select(.target=="query_server::manifest")'
+# {"index":"reverse","path":"data/index/geo_cells.bin","size_bytes":98765432,"mtime_unix":1714060800,…}
+# {"index":"reverse","path":"data/index/strings.bin","size_bytes":482711040,"mtime_unix":1714060800,…}
+# {"index":"gnaf","path":"data/index/gnaf_points.bin","size_bytes":1234567,"mtime_unix":1714060800,…}
+# {"index":"open_addresses","path":"data/index/oa_us_points.bin","size_bytes":98765432,"mtime_unix":1714060800,…}
+# {"index":"forward","dir_name":"tantivy_au","path":"data/index/tantivy_au","size_bytes":654321098,"file_count":42,"mtime_unix":1714060800,…}
+# {"index":"autocomplete","path":"data/index/fst_au.fst","size_bytes":12345678,"mtime_unix":1714060800,…}
+# {"index":"ip_geo","path":"data/GeoLite2-City.mmdb","size_bytes":76543210,"mtime_unix":1714060800,…}
+```
+
+**Investigating a bad result**: pull the trace for the bad request, read
+the leaf span's `geocoder.address.source` / `geocoder.forward.tantivy_dir`,
+then grep the boot manifest for the same path. A 0-byte file or an
+mtime that disagrees with the rest of the index points at the corrupt
+artifact.
 
 ### Metrics
 

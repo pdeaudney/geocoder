@@ -29,7 +29,7 @@ impl Gnaf {
     /// `Ok(None)` when the files aren't present — lets callers treat
     /// G-NAF as optional.
     pub fn open(dir: &Path) -> Result<Option<Self>, String> {
-        Ok(AddressPointIndex::open_with_prefix(dir, "gnaf")?
+        Ok(AddressPointIndex::open_with_prefix_labeled(dir, "gnaf", "gnaf")?
             .map(|inner| Gnaf { inner }))
     }
 

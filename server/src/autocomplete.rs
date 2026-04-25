@@ -93,10 +93,21 @@ impl AutocompleteCountry {
             .map_err(|e| format!("open {}: {}", fst_path.display(), e))?;
         let fst_mmap = unsafe { Mmap::map(&fst_file) }
             .map_err(|e| format!("mmap {}: {}", fst_path.display(), e))?;
+        crate::log_loaded_file("autocomplete", &fst_path.display().to_string(), fst_mmap.len() as u64);
         let map = Map::new(fst_mmap).map_err(|e| format!("parse FST: {e}"))?;
 
         let entries = unsafe { Mmap::map(&File::open(entries_path).map_err(io)?) }.map_err(io)?;
+        crate::log_loaded_file(
+            "autocomplete",
+            &entries_path.display().to_string(),
+            entries.len() as u64,
+        );
         let strings = unsafe { Mmap::map(&File::open(strings_path).map_err(io)?) }.map_err(io)?;
+        crate::log_loaded_file(
+            "autocomplete",
+            &strings_path.display().to_string(),
+            strings.len() as u64,
+        );
 
         Ok(Some(AutocompleteCountry { map, entries, strings }))
     }
@@ -123,6 +134,16 @@ impl AutocompleteCountry {
     /// prefix without pinning CPU on a 100k-entry country-wide walk.
     pub fn starts_with(&self, q: &str, limit: usize) -> Vec<Hit> {
         if limit == 0 {
+            return Vec::new();
+        }
+        // Empty-prefix short-circuit. Without this, an `fst::automaton::Str`
+        // built from `""` matches every key in the FST — the walk hits
+        // FST_WALK_CAP (10 000) before it bails and returns rank-sorted
+        // junk. Mirrors the unified-FST `starts_with` at the bottom of
+        // this file. Caller is expected to have already normalised `q`,
+        // so an empty string here means "the user typed nothing typeable"
+        // — the right answer is `[]`, not a sample of the whole country.
+        if q.is_empty() {
             return Vec::new();
         }
         let automaton = fst::automaton::Str::new(q).starts_with();
@@ -297,12 +318,22 @@ impl Autocomplete {
     /// gate is enforced inside the concrete lookups against the
     /// normalised key.
     pub fn exact_match(&self, country_code: &[u8; 2], q: &str) -> Option<Hit> {
+        let span = tracing::Span::current();
         if let Some(u) = self.unified.as_ref() {
             if let Some(hit) = u.get_exact(country_code, q) {
+                span.record("geocoder.autocomplete.fst_variant", "unified");
                 return Some(hit);
             }
         }
-        self.per_country.get(&lower(country_code))?.get_exact(q)
+        let cc = lower(country_code);
+        let result = self.per_country.get(&cc)?.get_exact(q);
+        if result.is_some() {
+            span.record(
+                "geocoder.autocomplete.fst_variant",
+                format!("per_country_{}", String::from_utf8_lossy(&cc)).as_str(),
+            );
+        }
+        result
     }
 
     /// Country-agnostic exact match. Iterates per-country FSTs to preserve
@@ -315,6 +346,10 @@ impl Autocomplete {
         }
         for (cc, idx) in &self.per_country {
             if let Some(hit) = idx.get_exact(q) {
+                tracing::Span::current().record(
+                    "geocoder.autocomplete.fst_variant",
+                    format!("per_country_{}", String::from_utf8_lossy(cc)).as_str(),
+                );
                 return Some((cc, hit));
             }
         }
@@ -325,16 +360,24 @@ impl Autocomplete {
     /// (via `CountryPrefixAutomaton`), falls through to the per-country
     /// FST if unified isn't loaded.
     pub fn search(&self, country_code: &[u8; 2], q: &str, limit: usize) -> Vec<Hit> {
+        let span = tracing::Span::current();
         if let Some(u) = self.unified.as_ref() {
             let hits = u.starts_with(country_code, q, limit);
             if !hits.is_empty() {
+                span.record("geocoder.autocomplete.fst_variant", "unified");
                 return hits;
             }
         }
         let Some(country) = self.per_country.get(&lower(country_code)) else {
+            span.record("geocoder.autocomplete.fst_variant", "none");
             return Vec::new();
         };
-        country.starts_with(&normalise_prefix(q), limit)
+        let hits = country.starts_with(&normalise_prefix(q), limit);
+        span.record(
+            "geocoder.autocomplete.fst_variant",
+            format!("per_country_{}", String::from_utf8_lossy(&lower(country_code))).as_str(),
+        );
+        hits
     }
 
     /// Prefix search across every loaded country. With the unified FST
@@ -350,6 +393,7 @@ impl Autocomplete {
         }
         merged.sort_by(|a, b| a.rank.cmp(&b.rank).then(a.name.cmp(&b.name)));
         merged.truncate(limit);
+        tracing::Span::current().record("geocoder.autocomplete.fst_variant", "any");
         merged
     }
 }

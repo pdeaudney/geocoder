@@ -509,6 +509,11 @@ struct FieldedIndex {
     index: TIndex,
     reader: IndexReader,
     schema: ForwardSchema,
+    /// On-disk directory name (e.g. `tantivy`, `tantivy_au`). Recorded on
+    /// every span that uses this index so an operator can correlate a
+    /// suspect query to a specific file set without guessing which
+    /// per-country shard answered it.
+    dir_name: String,
 }
 
 /// Forward-geocoding dispatcher.
@@ -630,10 +635,17 @@ impl Forward {
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()
             .map_err(|e| format!("tantivy reader: {e}"))?;
+        let dir_name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("<unknown>")
+            .to_string();
+        log_loaded_dir(dir, &dir_name);
         Ok(FieldedIndex {
             index: t_index,
             reader,
             schema,
+            dir_name,
         })
     }
 
@@ -657,11 +669,15 @@ impl Forward {
     /// Pick the index to query: per-country if we have a loaded index
     /// matching the caller's country hint, else the monolithic default,
     /// else `None` and the caller returns empty.
-    fn pick<'s>(&'s self, country_code: Option<&str>) -> Option<&'s FieldedIndex> {
+    ///
+    /// The returned variant tag (`per_country` / `default`) is recorded
+    /// on the search span so an operator hunting a corrupt file knows
+    /// whether the query hit `tantivy_<cc>/` or the monolithic `tantivy/`.
+    fn pick<'s>(&'s self, country_code: Option<&str>) -> Option<(&'s FieldedIndex, &'static str)> {
         if let Some(cc) = country_code {
             if let Some(code) = parse_country_code(cc) {
                 if let Some(idx) = self.per_country.get(&code) {
-                    return Some(idx);
+                    return Some((idx, "per_country"));
                 }
                 // Country-specific filter but no per-country index loaded.
                 // Fall through to default; the filter clause inside the
@@ -669,7 +685,7 @@ impl Forward {
                 // the indexed `country_code` field.
             }
         }
-        self.default.as_ref()
+        self.default.as_ref().map(|d| (d, "default"))
     }
 
     /// Legacy single-text search — kept for tests and simple cases.
@@ -690,7 +706,7 @@ impl Forward {
     /// Resolve the underlying tantivy index for the first pick-able index
     /// matching the query. Used internally by search_structured; public
     /// mainly so tests can poke at it.
-    fn active_index<'s>(&'s self, q: &StructuredQuery<'_>) -> Option<&'s FieldedIndex> {
+    fn active_index<'s>(&'s self, q: &StructuredQuery<'_>) -> Option<(&'s FieldedIndex, &'static str)> {
         self.pick(q.country_code)
     }
 
@@ -704,38 +720,84 @@ impl Forward {
     /// is: full query → drop country_code → drop state → drop city → drop
     /// kind. Each step is a one-line simpler query. Total fallback cost
     /// for a truly-nothing query: ~5 × one search ≈ 100 µs.
+    #[tracing::instrument(
+        name = "forward.search_structured",
+        skip_all,
+        fields(
+            geocoder.q = q.q.unwrap_or(""),
+            geocoder.street = q.street.unwrap_or(""),
+            geocoder.city = q.city.unwrap_or(""),
+            geocoder.state = q.state.unwrap_or(""),
+            geocoder.country_code = q.country_code.unwrap_or(""),
+            geocoder.kind = q.kind.unwrap_or(0),
+            geocoder.limit = q.limit,
+            geocoder.stage = tracing::field::Empty,
+            geocoder.match_count = tracing::field::Empty,
+            geocoder.forward.index_variant = tracing::field::Empty,
+            geocoder.forward.tantivy_dir = tracing::field::Empty,
+        )
+    )]
     pub fn search_structured(&self, q: StructuredQuery<'_>) -> Result<Vec<Hit>, String> {
-        let Some(active) = self.active_index(&q) else {
+        let Some((active, variant)) = self.active_index(&q) else {
+            tracing::Span::current().record("geocoder.stage", "no_index");
+            tracing::Span::current().record("geocoder.match_count", 0);
+            tracing::debug!(
+                target: "query_server::forward",
+                "no active index for query — empty result"
+            );
             return Ok(Vec::new());
         };
+        tracing::Span::current().record("geocoder.forward.index_variant", variant);
+        tracing::Span::current()
+            .record("geocoder.forward.tantivy_dir", active.dir_name.as_str());
 
         // First try: honour every constraint. If it hits, we're done.
-        let hits = self.search_once(active, &q)?;
+        let strict_span = tracing::info_span!(
+            target: "query_server::forward",
+            "forward.ladder.rung",
+            geocoder.stage = "strict",
+            geocoder.forward.tantivy_dir = %active.dir_name,
+        );
+        let hits = strict_span.in_scope(|| self.search_once(active, &q))?;
         if !hits.is_empty() {
+            tracing::Span::current().record("geocoder.stage", "strict");
+            tracing::Span::current().record("geocoder.match_count", hits.len());
             return Ok(hits);
         }
 
         // Progressive relaxation — each step returns as soon as any hit
         // shows up, so we stop dropping constraints the moment the query
         // can resolve. Mirrors Nominatim's "multiple interpretations" idea.
-        let ladder: &[fn(&mut StructuredQuery<'_>)] = &[
-            |q| q.country_code = None,
-            |q| q.state = None,
-            |q| q.city = None,
-            |q| q.kind = None,
+        let ladder: &[(&'static str, fn(&mut StructuredQuery<'_>))] = &[
+            ("drop_country_code", |q| q.country_code = None),
+            ("drop_state", |q| q.state = None),
+            ("drop_city", |q| q.city = None),
+            ("drop_kind", |q| q.kind = None),
         ];
         let mut relaxed = q.clone();
-        for relax in ladder {
+        for (stage, relax) in ladder {
             relax(&mut relaxed);
             // Relaxing the country_code may flip us to a different index
             // (per-country → default). Re-pick each iteration so the
             // fallback actually gets a chance.
-            let active = match self.active_index(&relaxed) {
+            let (active, variant) = match self.active_index(&relaxed) {
                 Some(a) => a,
                 None => continue,
             };
-            let hits = self.search_once(active, &relaxed)?;
+            let rung_span = tracing::info_span!(
+                target: "query_server::forward",
+                "forward.ladder.rung",
+                geocoder.stage = stage,
+                geocoder.forward.tantivy_dir = %active.dir_name,
+                geocoder.forward.index_variant = variant,
+            );
+            let hits = rung_span.in_scope(|| self.search_once(active, &relaxed))?;
             if !hits.is_empty() {
+                tracing::Span::current().record("geocoder.stage", *stage);
+                tracing::Span::current().record("geocoder.match_count", hits.len());
+                tracing::Span::current().record("geocoder.forward.index_variant", variant);
+                tracing::Span::current()
+                    .record("geocoder.forward.tantivy_dir", active.dir_name.as_str());
                 return Ok(hits);
             }
         }
@@ -745,15 +807,28 @@ impl Forward {
         // ladder has failed, so we never pay fuzzy's 2-3x cost on queries
         // the strict path already resolved.
         if let Some(q_text) = q.q.filter(|s| !s.trim().is_empty()) {
-            if let Some(active) = self.active_index(&q) {
-                if let Some(hits) = self.search_fuzzy(active, q_text, q.kind, q.limit)? {
+            if let Some((active, variant)) = self.active_index(&q) {
+                let fuzzy_span = tracing::info_span!(
+                    target: "query_server::forward",
+                    "forward.ladder.rung",
+                    geocoder.stage = "fuzzy",
+                    geocoder.forward.tantivy_dir = %active.dir_name,
+                    geocoder.forward.index_variant = variant,
+                );
+                if let Some(hits) =
+                    fuzzy_span.in_scope(|| self.search_fuzzy(active, q_text, q.kind, q.limit))?
+                {
                     if !hits.is_empty() {
+                        tracing::Span::current().record("geocoder.stage", "fuzzy");
+                        tracing::Span::current().record("geocoder.match_count", hits.len());
                         return Ok(hits);
                     }
                 }
             }
         }
 
+        tracing::Span::current().record("geocoder.stage", "exhausted");
+        tracing::Span::current().record("geocoder.match_count", 0);
         Ok(Vec::new())
     }
 
@@ -761,6 +836,16 @@ impl Forward {
     /// distance 1) over the parsed tokens. Fires only when the strict
     /// ladder found nothing — typo tolerance isn't free (~2-3x tantivy
     /// cost) and we'd rather not blur scoring on queries that matched.
+    #[tracing::instrument(
+        name = "forward.search_fuzzy",
+        skip_all,
+        fields(
+            geocoder.q = q_text,
+            geocoder.kind = kind_filter.unwrap_or(0),
+            geocoder.limit = limit,
+            geocoder.match_count = tracing::field::Empty,
+        )
+    )]
     fn search_fuzzy(
         &self,
         active: &FieldedIndex,
@@ -814,9 +899,18 @@ impl Forward {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         hits.truncate(limit);
+        tracing::Span::current().record("geocoder.match_count", hits.len());
         Ok(Some(hits))
     }
 
+    #[tracing::instrument(
+        name = "forward.search_once",
+        skip_all,
+        fields(
+            geocoder.match_count = tracing::field::Empty,
+            geocoder.top_score = tracing::field::Empty,
+        )
+    )]
     fn search_once(
         &self,
         active: &FieldedIndex,
@@ -964,6 +1058,12 @@ impl Forward {
         });
         candidates.truncate(limit);
 
+        let span = tracing::Span::current();
+        span.record("geocoder.match_count", candidates.len());
+        if let Some(top) = candidates.first() {
+            span.record("geocoder.top_score", top.score);
+        }
+
         Ok(candidates)
     }
 
@@ -976,6 +1076,47 @@ impl Forward {
             .or_else(|| self.per_country.values().next())
             .map(|f| &f.index)
     }
+}
+
+/// Log a structured manifest line for a tantivy directory we just opened.
+/// One line per directory, fields: dir_name, path, size_bytes (sum of
+/// every file under the dir), file_count, mtime. Operators compare
+/// against an expected manifest to spot truncated / wrong-version files.
+fn log_loaded_dir(path: &Path, dir_name: &str) {
+    let (size_bytes, file_count, mtime_secs) = match std::fs::read_dir(path) {
+        Ok(entries) => {
+            let mut bytes: u64 = 0;
+            let mut count: u64 = 0;
+            let mut newest: Option<std::time::SystemTime> = None;
+            for entry in entries.flatten() {
+                let Ok(meta) = entry.metadata() else { continue };
+                if !meta.is_file() {
+                    continue;
+                }
+                bytes += meta.len();
+                count += 1;
+                if let Ok(m) = meta.modified() {
+                    newest = Some(newest.map_or(m, |n| n.max(m)));
+                }
+            }
+            let mtime = newest
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            (bytes, count, mtime)
+        }
+        Err(_) => (0, 0, 0),
+    };
+    tracing::info!(
+        target: "query_server::manifest",
+        index = "forward",
+        dir_name = dir_name,
+        path = %path.display(),
+        size_bytes,
+        file_count,
+        mtime_unix = mtime_secs,
+        "loaded forward index directory"
+    );
 }
 
 /// Parse a free-form country-code string (e.g. from the URL) into the

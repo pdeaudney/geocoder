@@ -42,11 +42,26 @@ pub struct GeocoderService {
 
 #[tonic::async_trait]
 impl Geocoder for GeocoderService {
+    #[tracing::instrument(
+        name = "grpc.reverse",
+        skip_all,
+        fields(
+            geocoder.lat = tracing::field::Empty,
+            geocoder.lon = tracing::field::Empty,
+            geocoder.lang = tracing::field::Empty,
+        )
+    )]
     async fn reverse(
         &self,
         req: Request<ReverseRequest>,
     ) -> Result<Response<AddressResponse>, Status> {
         let r = req.into_inner();
+        let span = tracing::Span::current();
+        span.record("geocoder.lat", r.lat);
+        span.record("geocoder.lon", r.lon);
+        if !r.lang.is_empty() {
+            span.record("geocoder.lang", r.lang.as_str());
+        }
         let h3_res = validate_h3_res(&r.h3_res)?;
         let snap = self.index.load();
         let address = snap.query(r.lat, r.lon);
@@ -59,6 +74,13 @@ impl Geocoder for GeocoderService {
     }
 
     #[cfg(feature = "forward")]
+    #[tracing::instrument(
+        name = "grpc.search",
+        skip_all,
+        fields(
+            geocoder.match_count = tracing::field::Empty,
+        )
+    )]
     async fn search(
         &self,
         req: Request<SearchRequest>,
@@ -102,6 +124,7 @@ impl Geocoder for GeocoderService {
         let hits = fwd
             .search_structured(structured)
             .map_err(|e| Status::internal(format!("search: {e}")))?;
+        tracing::Span::current().record("geocoder.match_count", hits.len());
 
         let snap = self.index.load();
         let mut out = Vec::with_capacity(hits.len());
@@ -150,16 +173,32 @@ impl Geocoder for GeocoderService {
     }
 
     #[cfg(feature = "forward")]
+    #[tracing::instrument(
+        name = "grpc.validate",
+        skip_all,
+        fields(
+            geocoder.country_code = tracing::field::Empty,
+            geocoder.has_housenumber = tracing::field::Empty,
+            geocoder.outcome = tracing::field::Empty,
+        )
+    )]
     async fn validate(
         &self,
         req: Request<ValidateRequest>,
     ) -> Result<Response<ValidateResponse>, Status> {
         let r = req.into_inner();
+        let span = tracing::Span::current();
+        if !r.country_code.is_empty() {
+            span.record("geocoder.country_code", r.country_code.as_str());
+        }
+        span.record("geocoder.has_housenumber", !r.housenumber.is_empty());
         let h3_res = validate_h3_res(&r.h3_res)?;
         let Some(fwd) = self.forward.as_ref() else {
+            span.record("geocoder.outcome", "forward_disabled");
             return Err(Status::unimplemented("forward index not built"));
         };
         if r.street.is_empty() || r.city.is_empty() || r.country_code.is_empty() {
+            span.record("geocoder.outcome", "missing_required_field");
             return Err(Status::invalid_argument(
                 "street, city, country_code are required",
             ));
@@ -178,6 +217,7 @@ impl Geocoder for GeocoderService {
             .search_structured(structured)
             .map_err(|e| Status::internal(format!("search: {e}")))?;
         let Some(top) = hits.first() else {
+            tracing::Span::current().record("geocoder.outcome", "street_not_found");
             return Ok(Response::new(ValidateResponse {
                 verified: false,
                 confidence: "fallback".into(),
@@ -207,6 +247,8 @@ impl Geocoder for GeocoderService {
             (top.lat, top.lng, false, "interpolated".to_string())
         };
         let canonical = snap.query(lat, lon);
+        tracing::Span::current()
+            .record("geocoder.outcome", if verified { "exact" } else { "fallback" });
         let h3 = build_h3_proto(lat, lon, &h3_res);
         Ok(Response::new(ValidateResponse {
             verified,
@@ -229,6 +271,13 @@ impl Geocoder for GeocoderService {
     }
 
     #[cfg(feature = "forward")]
+    #[tracing::instrument(
+        name = "grpc.autocomplete",
+        skip_all,
+        fields(
+            geocoder.match_count = tracing::field::Empty,
+        )
+    )]
     async fn autocomplete(
         &self,
         req: Request<AutocompleteRequest>,
@@ -247,6 +296,7 @@ impl Geocoder for GeocoderService {
         } else {
             a.search_any(&r.q, limit)
         };
+        tracing::Span::current().record("geocoder.match_count", hits.len());
         let out = hits
             .into_iter()
             .map(|h| {
@@ -275,6 +325,14 @@ impl Geocoder for GeocoderService {
         ))
     }
 
+    #[tracing::instrument(
+        name = "grpc.ip_geocode",
+        skip_all,
+        fields(
+            geocoder.client_ip = tracing::field::Empty,
+            geocoder.outcome = tracing::field::Empty,
+        )
+    )]
     async fn ip_geocode(
         &self,
         req: Request<IpGeocodeRequest>,
@@ -296,9 +354,12 @@ impl Geocoder for GeocoderService {
                 .parse()
                 .map_err(|_| Status::invalid_argument(format!("invalid ip {:?}", r.ip)))?
         };
+        tracing::Span::current().record("geocoder.client_ip", tracing::field::display(&ip));
         let Some((lat, lon)) = db.lookup(ip) else {
+            tracing::Span::current().record("geocoder.outcome", "not_found");
             return Err(Status::not_found("no location for ip"));
         };
+        tracing::Span::current().record("geocoder.outcome", "ok");
         let snap = self.index.load();
         let addr = snap.query(lat, lon);
         let h3 = build_h3_proto(lat, lon, &h3_res);
