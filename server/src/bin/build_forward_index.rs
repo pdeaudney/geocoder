@@ -44,13 +44,19 @@ fn main() {
     // in-memory segment with headroom. Planet operators should bump
     // this — empirical sweet spot lives near the dataset's working
     // set size; see docs/performance/tantivy-heap-2026-04-25.md.
-    let heap_mb: usize = args
-        .iter()
-        .position(|a| a == "--tantivy-heap-mb")
+    let heap_flag_pos = args.iter().position(|a| a == "--tantivy-heap-mb");
+    let heap_mb: usize = heap_flag_pos
         .and_then(|p| args.get(p + 1))
         .and_then(|v| v.parse().ok())
         .unwrap_or(512);
     let heap_bytes = heap_mb.saturating_mul(1024 * 1024);
+
+    // Indices in args that are flag values, not positional. The dest-
+    // path parser below skips these so e.g. `--tantivy-heap-mb 50`
+    // doesn't make `50` look like a positional dest.
+    let consumed: std::collections::HashSet<usize> = heap_flag_pos
+        .map(|p| std::collections::HashSet::from([p, p + 1]))
+        .unwrap_or_default();
 
     let t0 = std::time::Instant::now();
     let result: Result<(), String> = if partition {
@@ -70,9 +76,10 @@ fn main() {
     } else {
         let dest = args
             .iter()
+            .enumerate()
             .skip(2)
-            .find(|a| !a.starts_with("--"))
-            .map(PathBuf::from)
+            .find(|(i, a)| !a.starts_with("--") && !consumed.contains(i))
+            .map(|(_, a)| PathBuf::from(a))
             .unwrap_or_else(|| source.join("tantivy"));
         eprintln!("Building monolithic forward index: {} -> {} (heap={} MB)", source.display(), dest.display(), heap_mb);
         forward::build_with_heap(&source, &dest, heap_bytes).map(|stats| {
