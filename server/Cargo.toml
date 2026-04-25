@@ -49,9 +49,9 @@ prost = { version = "0.13", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
 tracing-opentelemetry = { version = "0.32", default-features = false, features = ["tracing-log"] }
-opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "rt-tokio", "internal-logs"] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-client", "internal-logs"] }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "metrics", "rt-tokio", "internal-logs"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "metrics", "grpc-tonic", "http-proto", "reqwest-client", "internal-logs"] }
 opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
 # Per-request HTTP/gRPC server spans. The TraceLayer wraps the axum
 # router and the tonic service so every inbound call gets a parent

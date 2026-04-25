@@ -409,10 +409,8 @@ impl ShadowDispatcher {
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.queue_full_count.fetch_add(1, Ordering::Relaxed);
                 if let Some(m) = self.metrics.as_ref() {
-                    m.shadow_queue_full_total.inc();
-                    m.shadow_outcomes_total
-                        .with_label_values(&[endpoint.as_str(), Outcome::QueueFull.as_str()])
-                        .inc();
+                    m.inc_shadow_queue_full();
+                    m.record_shadow(endpoint.as_str(), Outcome::QueueFull.as_str(), &[], None);
                 }
                 emit_outcome(endpoint, Outcome::QueueFull, None, None, None);
             }
@@ -1007,37 +1005,19 @@ fn emit_job_outcome(
         );
     }
 
-    // Prometheus side. The label cardinality cap is documented in
-    // metrics.rs; outcomes ∈ 9 fixed values, axes ∈ 4 fixed, results
-    // ∈ 3, so the worst case is ~96 series for shadow_match_total
-    // per endpoint (×2 endpoints = 192).
+    // Metrics — single helper bumps both the Prometheus and OTel sides.
+    // The label cardinality cap is documented in metrics.rs; outcomes
+    // ∈ 9 fixed values, axes ∈ 4 fixed, results ∈ 3 — bounded.
     if let Some(m) = metrics {
         let endpoint = job.endpoint.as_str();
-        m.shadow_outcomes_total
-            .with_label_values(&[endpoint, outcome.as_str()])
-            .inc();
-        if let Some(c) = comparison.as_ref() {
-            for (axis, axis_match) in [
-                ("country", c.country_match),
-                ("state", c.state_match),
-                ("city", c.city_match),
-                ("road", c.road_match),
-            ] {
-                let result = match axis_match {
-                    Some(true) => "match",
-                    Some(false) => "mismatch",
-                    None => "none",
-                };
-                m.shadow_match_total
-                    .with_label_values(&[endpoint, axis, result])
-                    .inc();
-            }
-            if let Some(d) = c.distance_m {
-                m.shadow_distance_meters
-                    .with_label_values(&[endpoint])
-                    .observe(d);
-            }
-        }
+        let axes = [
+            ("country", comparison.as_ref().and_then(|c| c.country_match)),
+            ("state", comparison.as_ref().and_then(|c| c.state_match)),
+            ("city", comparison.as_ref().and_then(|c| c.city_match)),
+            ("road", comparison.as_ref().and_then(|c| c.road_match)),
+        ];
+        let distance_m = comparison.as_ref().and_then(|c| c.distance_m);
+        m.record_shadow(endpoint, outcome.as_str(), &axes, distance_m);
     }
 }
 
