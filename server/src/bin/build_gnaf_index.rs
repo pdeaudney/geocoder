@@ -69,107 +69,110 @@ struct Stats {
 fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {}", out_dir.display(), e))?;
 
-    // --- Pass 1: STATE files → state_pid → state_abbr ---
+    // Pre-passes 1–4 each read disjoint files and populate disjoint maps:
+    //   pass 1: STATE → (state_pid → state_abbr)
+    //   pass 2: LOCALITY → (locality_pid → name)
+    //   pass 3: STREET_LOCALITY → (pid → "NAME TYPE")
+    //   pass 4: ADDRESS_DEFAULT_GEOCODE → (address_detail_pid → (lat, lng))
+    //
+    // No intra-pass dependency, so they run concurrently via
+    // rayon::scope. Pass 4 dominates wallclock (~14M rows on AU);
+    // the smaller passes finish first and idle, but that's fine —
+    // the win is the worst case running in parallel with whatever
+    // CPU and disk we'd otherwise wait on serially.
     let mut state_abbr: HashMap<String, String> = HashMap::new();
-    for path in list_files(psv_dir, "_STATE_psv.psv")? {
-        read_psv(&path, |fields| {
-            if fields.len() < 5 {
-                return;
-            }
-            let (Some(pid), Some(abbr)) = (fields.first(), fields.get(4)) else {
-                return;
-            };
-            if !pid.is_empty() && !abbr.is_empty() {
-                state_abbr.insert(pid.to_string(), abbr.to_string());
-            }
-        })?;
-    }
-    eprintln!("loaded {} states", state_abbr.len());
-
-    // --- Pass 2: LOCALITY files → locality_pid → (locality_name) ---
-    // We don't carry state through here — the postcode comes from
-    // ADDRESS_DETAIL directly, and state is tied to the PSV file the
-    // record came from so we derive it at emit time.
     let mut locality_name: HashMap<String, String> = HashMap::new();
-    for path in list_files(psv_dir, "_LOCALITY_psv.psv")? {
-        if path.file_name()
-            .is_some_and(|n| n.to_string_lossy().contains("STREET_LOCALITY"))
-        {
-            continue;
-        }
-        read_psv(&path, |fields| {
-            if fields.len() < 4 {
-                return;
-            }
-            let pid = fields[0];
-            let name = fields[3];
-            let retired = fields[2];
-            if !pid.is_empty() && !name.is_empty() && retired.is_empty() {
-                locality_name.insert(pid.to_string(), name.to_string());
-            }
-        })?;
-    }
-    eprintln!("loaded {} localities", locality_name.len());
-
-    // --- Pass 3: STREET_LOCALITY → street_locality_pid → "NAME TYPE" ---
     let mut street: HashMap<String, String> = HashMap::new();
-    for path in list_files(psv_dir, "_STREET_LOCALITY_psv.psv")? {
-        read_psv(&path, |fields| {
-            // STREET_LOCALITY_PID | DATE_CREATED | DATE_RETIRED | STREET_CLASS_CODE
-            //                    | STREET_NAME | STREET_TYPE_CODE | ...
-            if fields.len() < 6 {
-                return;
-            }
-            let pid = fields[0];
-            let retired = fields[2];
-            let name = fields[4];
-            let type_code = fields[5];
-            if pid.is_empty() || !retired.is_empty() || name.is_empty() {
-                return;
-            }
-            let display = if type_code.is_empty() {
-                title_case(name)
-            } else {
-                format!("{} {}", title_case(name), title_case(type_code))
-            };
-            street.insert(pid.to_string(), display);
-        })?;
-    }
-    eprintln!("loaded {} streets", street.len());
+    let mut geocode: HashMap<String, (f32, f32)> = HashMap::with_capacity(15_000_000);
 
-    // --- Pass 4: ADDRESS_DEFAULT_GEOCODE → address_detail_pid → (lat, lng) ---
-    // Biggest single in-memory structure — ~14M entries × ~40 bytes/entry =
-    // ~560 MB. Build machines routinely have 16+ GB, so this is fine.
-    let mut geocode: HashMap<String, (f32, f32)> =
-        HashMap::with_capacity(15_000_000);
-    let mut geo_rows = 0u64;
-    for path in list_files(psv_dir, "_ADDRESS_DEFAULT_GEOCODE_psv.psv")? {
-        eprintln!("reading {}", path.display());
-        read_psv(&path, |fields| {
-            // ADDRESS_DEFAULT_GEOCODE_PID | DATE_CREATED | DATE_RETIRED |
-            //   ADDRESS_DETAIL_PID | GEOCODE_TYPE_CODE | LONGITUDE | LATITUDE
-            if fields.len() < 7 {
-                return;
+    let pass1 = |out: &mut HashMap<String, String>| -> Result<(), String> {
+        for path in list_files(psv_dir, "_STATE_psv.psv")? {
+            read_psv(&path, |fields| {
+                if fields.len() < 5 { return; }
+                let (Some(pid), Some(abbr)) = (fields.first(), fields.get(4)) else { return; };
+                if !pid.is_empty() && !abbr.is_empty() {
+                    out.insert(pid.to_string(), abbr.to_string());
+                }
+            })?;
+        }
+        Ok(())
+    };
+    let pass2 = |out: &mut HashMap<String, String>| -> Result<(), String> {
+        for path in list_files(psv_dir, "_LOCALITY_psv.psv")? {
+            if path.file_name()
+                .is_some_and(|n| n.to_string_lossy().contains("STREET_LOCALITY"))
+            {
+                continue;
             }
-            let address_pid = fields[3];
-            let retired = fields[2];
-            if address_pid.is_empty() || !retired.is_empty() {
-                return;
-            }
-            let Ok(lng) = fields[5].parse::<f32>() else {
-                return;
-            };
-            let Ok(lat) = fields[6].parse::<f32>() else {
-                return;
-            };
-            geocode.insert(address_pid.to_string(), (lat, lng));
-            geo_rows += 1;
-            if geo_rows % 2_000_000 == 0 {
-                eprintln!("  {}M geocodes loaded", geo_rows / 1_000_000);
-            }
-        })?;
-    }
-    eprintln!("loaded {} geocodes", geocode.len());
+            read_psv(&path, |fields| {
+                if fields.len() < 4 { return; }
+                let pid = fields[0];
+                let name = fields[3];
+                let retired = fields[2];
+                if !pid.is_empty() && !name.is_empty() && retired.is_empty() {
+                    out.insert(pid.to_string(), name.to_string());
+                }
+            })?;
+        }
+        Ok(())
+    };
+    let pass3 = |out: &mut HashMap<String, String>| -> Result<(), String> {
+        for path in list_files(psv_dir, "_STREET_LOCALITY_psv.psv")? {
+            read_psv(&path, |fields| {
+                if fields.len() < 6 { return; }
+                let pid = fields[0];
+                let retired = fields[2];
+                let name = fields[4];
+                let type_code = fields[5];
+                if pid.is_empty() || !retired.is_empty() || name.is_empty() { return; }
+                let display = if type_code.is_empty() {
+                    title_case(name)
+                } else {
+                    format!("{} {}", title_case(name), title_case(type_code))
+                };
+                out.insert(pid.to_string(), display);
+            })?;
+        }
+        Ok(())
+    };
+    let pass4 = |out: &mut HashMap<String, (f32, f32)>| -> Result<(), String> {
+        let mut geo_rows = 0u64;
+        for path in list_files(psv_dir, "_ADDRESS_DEFAULT_GEOCODE_psv.psv")? {
+            eprintln!("reading {}", path.display());
+            read_psv(&path, |fields| {
+                if fields.len() < 7 { return; }
+                let address_pid = fields[3];
+                let retired = fields[2];
+                if address_pid.is_empty() || !retired.is_empty() { return; }
+                let Ok(lng) = fields[5].parse::<f32>() else { return; };
+                let Ok(lat) = fields[6].parse::<f32>() else { return; };
+                out.insert(address_pid.to_string(), (lat, lng));
+                geo_rows += 1;
+                if geo_rows % 2_000_000 == 0 {
+                    eprintln!("  {}M geocodes loaded", geo_rows / 1_000_000);
+                }
+            })?;
+        }
+        Ok(())
+    };
+
+    // Run all four pre-passes concurrently. Each pass owns its own
+    // output HashMap; rayon::scope joins them on exit. Errors from
+    // any pass propagate after all join.
+    let mut r1: Result<(), String> = Ok(());
+    let mut r2: Result<(), String> = Ok(());
+    let mut r3: Result<(), String> = Ok(());
+    let mut r4: Result<(), String> = Ok(());
+    rayon::scope(|s| {
+        s.spawn(|_| { r1 = pass1(&mut state_abbr); });
+        s.spawn(|_| { r2 = pass2(&mut locality_name); });
+        s.spawn(|_| { r3 = pass3(&mut street); });
+        s.spawn(|_| { r4 = pass4(&mut geocode); });
+    });
+    r1?; r2?; r3?; r4?;
+
+    eprintln!("loaded {} states, {} localities, {} streets, {} geocodes",
+        state_abbr.len(), locality_name.len(), street.len(), geocode.len());
 
     // --- Pass 5: ADDRESS_DETAIL × geocode → build output records ---
     let mut strings = StringPool::new();

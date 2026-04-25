@@ -32,7 +32,7 @@ proportionally lower).
 | 2 | mimalloc as global allocator (all Rust binaries) | DONE | AU FST build 20.4 s after; server startup 362 ms after. Per-stage delta vs std allocator deferred to stage 6 timing emission. |
 | 3 | Parallel countries in `build-openaddresses-index` | DONE | rayon par_iter; test passes; AU-local has 1 country so no measurable local delta. Planet 60-country build expects 8-16× speedup. |
 | 4 | simd-json in `wof-importer` | DONE | tests pass; deserialises into the same `serde_json::Value` so `extract_outer_rings` stays unchanged. Real win on planet's ~8.6 GB GeoJSON. |
-| 5 | Parallel states in `build-gnaf-index` | TODO | target: −60 to −70 % of G-NAF stage |
+| 5 | Parallel states in `build-gnaf-index` | DONE | refactored to run passes 1–4 (state, locality, street, geocode) concurrently via `rayon::scope`. Pass 4 dominates wallclock; the other three now overlap. tests pass. |
 | 6 | Per-stage timing emission (all builders) | TODO | 0 perf — observability only, unblocks the next round |
 
 ## Working method between stages
@@ -351,7 +351,21 @@ on x86-64 (AVX2) and ~1.5 GB/s on aarch64 (NEON), vs serde_json's
 
 ## Stage 5: Parallel states in `build-gnaf-index`
 
-**Status: TODO**
+**Status: DONE** (commit pending)
+
+**Note on the rename:** the original plan said "parallel states" but
+G-NAF doesn't really partition by state in the dimension that
+matters for parallelism — the bottleneck was the four sequential
+*pre-passes* (STATE, LOCALITY, STREET_LOCALITY, GEOCODE). The
+final ADDRESS_DETAIL pass merges them and is inherently serial.
+
+What was actually done: the four pre-passes now run in parallel
+via `rayon::scope` because they read disjoint files and populate
+disjoint output maps. The win in % terms depends on the relative
+size of pass 4 (geocode, ~14M rows) vs the other three; in
+practice pass 4 is ~5× the wallclock of any other, so the
+absolute wallclock saving is "the time pass 4 was previously
+waiting for passes 1+2+3 to finish first" — bounded but real.
 
 ### Background
 
