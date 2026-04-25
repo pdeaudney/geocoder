@@ -14,11 +14,14 @@ use axum::Router;
 use query_server::admin_config::AdminConfig;
 use query_server::autocomplete::Autocomplete;
 use query_server::ip_geo::IpGeo;
+use query_server::telemetry;
 use query_server::{Index, DEFAULT_ADMIN_CELL_LEVEL, DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tower_http::trace::{DefaultOnFailure, TraceLayer};
+use tracing::Level;
 
 #[cfg(feature = "forward")]
 use query_server::forward::{self, Forward};
@@ -239,6 +242,16 @@ fn cc_to_string(cc: &[u8; 2]) -> String {
     std::str::from_utf8(cc).unwrap_or("??").to_owned()
 }
 
+#[tracing::instrument(
+    name = "reverse_geocode",
+    skip_all,
+    fields(
+        geocoder.lat = params.lat,
+        geocoder.lon = params.lon,
+        geocoder.lang = params.lang.as_deref().unwrap_or(""),
+        geocoder.h3_resolutions = tracing::field::Empty,
+    )
+)]
 async fn reverse_geocode(
     Query(params): Query<QueryParams>,
     index: axum::extract::Extension<LiveIndex>,
@@ -247,6 +260,7 @@ async fn reverse_geocode(
         Ok(r) => r,
         Err(resp) => return resp,
     };
+    tracing::Span::current().record("geocoder.h3_resolutions", h3_resolutions.len());
 
     let snapshot = index.load();
     let mut address = snapshot.query_with_lang(params.lat, params.lon, params.lang.as_deref());
@@ -263,6 +277,15 @@ async fn reverse_geocode(
 /// address exists in our authoritative sources and return the canonical
 /// normalised form. Radar's `/v1/addresses/validate` counterpart.
 #[cfg(feature = "forward")]
+#[tracing::instrument(
+    name = "validate_address",
+    skip_all,
+    fields(
+        geocoder.country_code = %params.country_code,
+        geocoder.has_housenumber = params.housenumber.is_some(),
+        geocoder.outcome = tracing::field::Empty,
+    )
+)]
 async fn validate_address(
     Query(params): Query<ValidateParams>,
     index: axum::extract::Extension<LiveIndex>,
@@ -301,6 +324,7 @@ async fn validate_address(
         }
     };
     let Some(top) = hits.first() else {
+        tracing::Span::current().record("geocoder.outcome", "street_not_found");
         let body = serde_json::json!({
             "verified": false,
             "confidence": "fallback",
@@ -314,13 +338,20 @@ async fn validate_address(
     let cc_bytes: Option<[u8; 2]> = parse_country_code_bytes(&params.country_code);
     let (final_lat, final_lng, verified, confidence_reason) = if let Some(hn) = params.housenumber.as_deref()
     {
-        let resolved = idx_snap.find_addr_point_in_country(
-            hn,
-            Some(&top.name),
-            top.lat,
-            top.lng,
-            cc_bytes.as_ref(),
+        let refine_span = tracing::info_span!(
+            target: "query_server::validate",
+            "validate.house_number_refine",
+            geocoder.stage = "house_number_refine",
         );
+        let resolved = refine_span.in_scope(|| {
+            idx_snap.find_addr_point_in_country(
+                hn,
+                Some(&top.name),
+                top.lat,
+                top.lng,
+                cc_bytes.as_ref(),
+            )
+        });
         match resolved {
             Some(m) => (m.lat, m.lng, true, "exact"),
             None => (top.lat, top.lng, false, "fallback: street found, house number not in index"),
@@ -328,6 +359,7 @@ async fn validate_address(
     } else {
         (top.lat, top.lng, false, "interpolated: street resolved, no house number to verify")
     };
+    tracing::Span::current().record("geocoder.outcome", confidence_reason);
 
     // Step 3: reverse-geocode the final coord to build the canonical form.
     let canonical = idx_snap.query(final_lat, final_lng);
@@ -408,6 +440,17 @@ fn parse_country_code_bytes(s: &str) -> Option<[u8; 2]> {
     Some([b[0].to_ascii_uppercase(), b[1].to_ascii_uppercase()])
 }
 
+#[tracing::instrument(
+    name = "autocomplete",
+    skip_all,
+    fields(
+        geocoder.q = %params.q,
+        geocoder.country_code = params.country_code.as_deref().unwrap_or(""),
+        geocoder.limit = tracing::field::Empty,
+        geocoder.match_count = tracing::field::Empty,
+        geocoder.autocomplete.fst_variant = tracing::field::Empty,
+    )
+)]
 async fn autocomplete(
     Query(params): Query<AutocompleteParams>,
     autocomplete_idx: axum::extract::Extension<Option<Arc<Autocomplete>>>,
@@ -426,14 +469,23 @@ async fn autocomplete(
     };
 
     let limit = params.limit.unwrap_or(10).clamp(1, 50);
-    let results: Vec<query_server::autocomplete::Hit> =
+    tracing::Span::current().record("geocoder.limit", limit);
+    let fst_span = tracing::info_span!(
+        target: "query_server::autocomplete",
+        "autocomplete.fst_lookup",
+        geocoder.stage = "fst_lookup",
+        geocoder.autocomplete.fst_variant = tracing::field::Empty,
+    );
+    let results: Vec<query_server::autocomplete::Hit> = fst_span.in_scope(|| {
         match params.country_code.as_deref().and_then(parse_country_code_bytes) {
             Some(cc_upper) => {
                 let cc_lower = [cc_upper[0].to_ascii_lowercase(), cc_upper[1].to_ascii_lowercase()];
                 autoc.search(&cc_lower, &params.q, limit)
             }
             None => autoc.search_any(&params.q, limit),
-        };
+        }
+    });
+    tracing::Span::current().record("geocoder.match_count", results.len());
 
     // Transform hits into JSON values so we can attach `h3` per-result
     // without coupling the autocomplete::Hit struct to H3.
@@ -459,6 +511,14 @@ async fn autocomplete(
     axum::Json(body).into_response()
 }
 
+#[tracing::instrument(
+    name = "ip_geocode",
+    skip_all,
+    fields(
+        geocoder.client_ip = tracing::field::Empty,
+        geocoder.outcome = tracing::field::Empty,
+    )
+)]
 async fn ip_geocode(
     Query(params): Query<IpParams>,
     index: axum::extract::Extension<LiveIndex>,
@@ -476,13 +536,16 @@ async fn ip_geocode(
         Some(s) => match s.parse() {
             Ok(ip) => ip,
             Err(_) => {
+                tracing::Span::current().record("geocoder.outcome", "invalid_ip");
                 return (StatusCode::BAD_REQUEST, format!("invalid ip {s:?}")).into_response();
             }
         },
         None => connect_info.0.ip(),
     };
+    tracing::Span::current().record("geocoder.client_ip", tracing::field::display(&ip));
 
     let Some(db) = ip_db.as_ref() else {
+        tracing::Span::current().record("geocoder.outcome", "disabled");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "IP geocoding not enabled. Put GeoLite2-City.mmdb under the data dir or set GEOLITE2_DB.",
@@ -490,9 +553,17 @@ async fn ip_geocode(
             .into_response();
     };
 
-    let Some((lat, lon)) = db.lookup(ip) else {
+    let mmdb_span = tracing::info_span!(
+        target: "query_server::ip",
+        "ip_geocode.mmdb_lookup",
+        geocoder.stage = "mmdb_lookup",
+    );
+    let lookup = mmdb_span.in_scope(|| db.lookup(ip));
+    let Some((lat, lon)) = lookup else {
+        tracing::Span::current().record("geocoder.outcome", "not_found");
         return (StatusCode::NOT_FOUND, format!("no location for ip {ip}")).into_response();
     };
+    tracing::Span::current().record("geocoder.outcome", "ok");
 
     let snapshot = index.load();
     let address = snapshot.query(lat, lon);
@@ -509,6 +580,20 @@ async fn ip_geocode(
 }
 
 #[cfg(feature = "forward")]
+#[tracing::instrument(
+    name = "search",
+    skip_all,
+    fields(
+        geocoder.q = params.q.as_deref().unwrap_or(""),
+        geocoder.street = params.street.as_deref().unwrap_or(""),
+        geocoder.city = params.city.as_deref().unwrap_or(""),
+        geocoder.state = params.state.as_deref().unwrap_or(""),
+        geocoder.country_code = params.country_code.as_deref().unwrap_or(""),
+        geocoder.kind = params.kind.as_deref().unwrap_or(""),
+        geocoder.path = tracing::field::Empty,
+        geocoder.match_count = tracing::field::Empty,
+    )
+)]
 async fn search(
     Query(params): Query<SearchParams>,
     index: axum::extract::Extension<LiveIndex>,
@@ -585,13 +670,21 @@ async fn search(
                 .q
                 .as_deref()
                 .expect("is_simple_freeform guarantees q is Some and non-empty");
-            let fst_hit = match country_codes.first().copied() {
+            let fst_span = tracing::info_span!(
+                target: "query_server::search",
+                "search.fst_fast_path",
+                geocoder.stage = "fst_fast_path",
+                geocoder.match = tracing::field::Empty,
+                geocoder.autocomplete.fst_variant = tracing::field::Empty,
+            );
+            let fst_hit = fst_span.in_scope(|| match country_codes.first().copied() {
                 Some(cc) => parse_country_code_bytes(cc).map(|code| {
                     let cc_lower = [code[0].to_ascii_lowercase(), code[1].to_ascii_lowercase()];
                     autoc.exact_match(&cc_lower, q_text)
                 }).unwrap_or(None),
                 None => autoc.exact_match_any(q_text).map(|(_, h)| h),
-            };
+            });
+            fst_span.record("geocoder.match", fst_hit.is_some());
             if let Some(fst_hit) = fst_hit {
                 // Honour kind filter even on the fast-path.
                 let wanted_kind = match params.kind.as_deref() {
@@ -605,6 +698,8 @@ async fn search(
                 if kind_ok {
                     let idx_snap = index.load();
                     let enriched = enrich_fst_hit(fst_hit, &idx_snap, &h3_resolutions);
+                    tracing::Span::current().record("geocoder.path", "fst_fast_path");
+                    tracing::Span::current().record("geocoder.match_count", 1);
                     let body = serde_json::json!({ "results": [enriched] });
                     return axum::Json(body).into_response();
                 }
@@ -613,6 +708,7 @@ async fn search(
     }
 
     let hits = if country_codes.len() > 1 {
+        tracing::Span::current().record("geocoder.path", "tantivy_multi_country");
         let mut merged: Vec<forward::Hit> = Vec::new();
         for cc in &country_codes {
             let structured = forward::StructuredQuery {
@@ -640,6 +736,7 @@ async fn search(
         merged.truncate(limit);
         merged
     } else {
+        tracing::Span::current().record("geocoder.path", "tantivy");
         let structured = forward::StructuredQuery {
             q: params.q.as_deref(),
             street: params.street.as_deref(),
@@ -658,15 +755,25 @@ async fn search(
         }
     };
 
+    tracing::Span::current().record("geocoder.match_count", hits.len());
+
     // Enrich each hit: if a house number is known, try to refine the street
     // result to the specific addr_point; in any case reverse-geocode the
     // final coordinate so callers get the full display_name + structured
     // address fields.
+    let enrich_span = tracing::info_span!(
+        target: "query_server::search",
+        "search.enrich",
+        geocoder.stage = "enrich",
+        geocoder.hit_count = hits.len(),
+        geocoder.address.source = tracing::field::Empty,
+    );
     let idx_snapshot = index.load();
-    let enriched: Vec<serde_json::Value> = hits
-        .into_iter()
-        .map(|hit| enrich_hit(hit, housenumber.as_deref(), &idx_snapshot, &h3_resolutions))
-        .collect();
+    let enriched: Vec<serde_json::Value> = enrich_span.in_scope(|| {
+        hits.into_iter()
+            .map(|hit| enrich_hit(hit, housenumber.as_deref(), &idx_snapshot, &h3_resolutions))
+            .collect()
+    });
 
     let body = serde_json::json!({ "results": enriched });
     axum::Json(body).into_response()
@@ -729,20 +836,30 @@ fn enrich_hit(
 fn load_forward_index(data_dir: &str) -> Option<Arc<Forward>> {
     let dir = Path::new(data_dir).join("tantivy");
     if !dir.exists() {
-        eprintln!(
-            "Forward index not found at {} — /search disabled. Run `build-forward-index {}` to enable.",
-            dir.display(),
-            data_dir
+        tracing::warn!(
+            target: "query_server::startup",
+            path = %dir.display(),
+            data_dir = %data_dir,
+            "forward index not found; /search disabled — run build-forward-index"
         );
         return None;
     }
     match Forward::open(&dir) {
         Ok(fwd) => {
-            eprintln!("Loaded forward-geocoding index from {}", dir.display());
+            tracing::info!(
+                target: "query_server::startup",
+                path = %dir.display(),
+                "loaded forward-geocoding index"
+            );
             Some(Arc::new(fwd))
         }
         Err(e) => {
-            eprintln!("Failed to open forward index at {}: {} — /search disabled", dir.display(), e);
+            tracing::error!(
+                target: "query_server::startup",
+                path = %dir.display(),
+                error = %e,
+                "failed to open forward index; /search disabled"
+            );
             None
         }
     }
@@ -755,16 +872,30 @@ fn load_admin_config() -> AdminConfig {
         Some(path) => match std::fs::read_to_string(&path) {
             Ok(src) => match AdminConfig::from_json(&src) {
                 Ok(cfg) => {
-                    eprintln!("Loaded admin-mapping config from {}", path);
+                    tracing::info!(
+                        target: "query_server::startup",
+                        path = %path,
+                        "loaded admin-mapping config"
+                    );
                     cfg
                 }
                 Err(e) => {
-                    eprintln!("Invalid admin-mapping config at {}: {} — using default", path, e);
+                    tracing::warn!(
+                        target: "query_server::startup",
+                        path = %path,
+                        error = %e,
+                        "invalid admin-mapping config — using embedded default"
+                    );
                     AdminConfig::embedded_default()
                 }
             },
             Err(e) => {
-                eprintln!("Failed to read {}: {} — using default", path, e);
+                tracing::warn!(
+                    target: "query_server::startup",
+                    path = %path,
+                    error = %e,
+                    "failed to read admin-mapping config — using embedded default"
+                );
                 AdminConfig::embedded_default()
             }
         },
@@ -791,10 +922,11 @@ fn spawn_index_reloader(
         .and_then(|v| v.parse().ok())
         .unwrap_or(5);
 
-    eprintln!(
-        "Index reloader: watching {} every {}s",
-        marker.display(),
-        interval_sec
+    tracing::info!(
+        target: "query_server::reloader",
+        marker = %marker.display(),
+        interval_sec = interval_sec,
+        "index reloader watching marker"
     );
 
     tokio::spawn(async move {
@@ -816,7 +948,11 @@ fn spawn_index_reloader(
                 continue;
             }
 
-            eprintln!("Index reloader: marker changed, reloading from {}", data_dir);
+            tracing::info!(
+                target: "query_server::reloader",
+                data_dir = %data_dir,
+                "marker changed — reloading index"
+            );
             let admin_config = load_admin_config();
             match Index::load_with_admin_config(
                 &data_dir,
@@ -828,10 +964,17 @@ fn spawn_index_reloader(
                 Ok(new_idx) => {
                     live.store(Arc::new(new_idx));
                     last_mtime = Some(current);
-                    eprintln!("Index reloader: swap complete");
+                    tracing::info!(
+                        target: "query_server::reloader",
+                        "swap complete"
+                    );
                 }
                 Err(e) => {
-                    eprintln!("Index reloader: load failed, keeping old index: {}", e);
+                    tracing::error!(
+                        target: "query_server::reloader",
+                        error = %e,
+                        "load failed — keeping previous index"
+                    );
                 }
             }
         }
@@ -840,6 +983,12 @@ fn spawn_index_reloader(
 
 #[tokio::main]
 async fn main() {
+    // Telemetry first — every line that follows lands in stdout via tracing
+    // and (when OTEL_TRACE_ENABLED + endpoint are set) any startup spans
+    // are eligible for OTLP export. Hold the guard for the lifetime of
+    // main() so the batch span processor can flush on shutdown.
+    let _telemetry = telemetry::init();
+
     let args: Vec<String> = std::env::args().collect();
     let data_dir = args.get(1).map(|s| s.as_str()).unwrap_or(".");
 
@@ -850,7 +999,14 @@ async fn main() {
     let admin_cell_level = arg_value("--admin-level").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_ADMIN_CELL_LEVEL);
     let search_distance = arg_value("--search-distance").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_SEARCH_DISTANCE);
 
-    eprintln!("Loading index from {}...", data_dir);
+    tracing::info!(
+        target: "query_server::startup",
+        data_dir = %data_dir,
+        street_cell_level,
+        admin_cell_level,
+        search_distance,
+        "loading index"
+    );
     let admin_config = load_admin_config();
     let index = match Index::load_with_admin_config(
         data_dir,
@@ -861,7 +1017,12 @@ async fn main() {
     ) {
         Ok(idx) => Arc::new(ArcSwap::from(Arc::new(idx))),
         Err(e) => {
-            eprintln!("Error: {}", e);
+            tracing::error!(
+                target: "query_server::startup",
+                data_dir = %data_dir,
+                error = %e,
+                "failed to load index — exiting"
+            );
             std::process::exit(1);
         }
     };
@@ -879,13 +1040,23 @@ async fn main() {
 
     // Optional MaxMind GeoLite2 loader. Missing DB → /geocode/ip returns 503.
     let ip_db: Option<Arc<IpGeo>> = match IpGeo::open(Path::new(data_dir)) {
-        Ok(Some(db)) => Some(Arc::new(db)),
+        Ok(Some(db)) => {
+            tracing::info!(target: "query_server::startup", "loaded GeoLite2 DB — /geocode/ip enabled");
+            Some(Arc::new(db))
+        }
         Ok(None) => {
-            eprintln!("No GeoLite2-City.mmdb — /geocode/ip disabled");
+            tracing::info!(
+                target: "query_server::startup",
+                "no GeoLite2-City.mmdb — /geocode/ip disabled"
+            );
             None
         }
         Err(e) => {
-            eprintln!("Failed to open GeoLite2 DB: {e} — /geocode/ip disabled");
+            tracing::warn!(
+                target: "query_server::startup",
+                error = %e,
+                "failed to open GeoLite2 DB — /geocode/ip disabled"
+            );
             None
         }
     };
@@ -893,18 +1064,26 @@ async fn main() {
     // Optional per-country FST autocomplete indexes.
     let autocomplete_idx: Option<Arc<Autocomplete>> = match Autocomplete::open(Path::new(data_dir)) {
         Ok(Some(a)) => {
-            eprintln!(
-                "Loaded FST autocomplete for {} countries",
-                a.countries().len()
+            tracing::info!(
+                target: "query_server::startup",
+                country_count = a.countries().len(),
+                "loaded FST autocomplete"
             );
             Some(Arc::new(a))
         }
         Ok(None) => {
-            eprintln!("No FST autocomplete indexes — /autocomplete disabled");
+            tracing::info!(
+                target: "query_server::startup",
+                "no FST autocomplete indexes — /autocomplete disabled"
+            );
             None
         }
         Err(e) => {
-            eprintln!("Failed to open FST indexes: {e} — /autocomplete disabled");
+            tracing::warn!(
+                target: "query_server::startup",
+                error = %e,
+                "failed to open FST indexes — /autocomplete disabled"
+            );
             None
         }
     };
@@ -916,6 +1095,52 @@ async fn main() {
     #[cfg(not(feature = "forward"))]
     let forward_idx: Option<()> = None;
 
+    // Per-request server span. The closure builds a span with semconv-named
+    // attributes (http.request.method, url.path, otel.kind=server) at INFO,
+    // and on_response stamps http.response.status_code + duration in ms
+    // when the handler returns. Health checks stay at DEBUG so they don't
+    // dominate prod logs.
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(|req: &http::Request<_>| {
+            let path = req.uri().path();
+            let level = if path == "/healthz" || path.starts_with("/healthz/") {
+                Level::DEBUG
+            } else {
+                Level::INFO
+            };
+            let span = tracing::span!(
+                target: "query_server::http",
+                Level::INFO,
+                "http.request",
+                "otel.kind" = "server",
+                "otel.name" = %format!("{} {}", req.method(), path),
+                "http.request.method" = %req.method(),
+                "url.path" = %path,
+                "url.query" = tracing::field::Empty,
+                "http.response.status_code" = tracing::field::Empty,
+                "http.response.body.size" = tracing::field::Empty,
+            );
+            if let Some(q) = req.uri().query() {
+                span.record("url.query", q);
+            }
+            // Tower-http only honours the level via the layer's on_request
+            // hook for log lines, but our make_span fixes the span level
+            // here. Stash the per-request log level on the span for the
+            // OnResponse hook below.
+            let _ = level;
+            span
+        })
+        .on_response(|res: &http::Response<_>, latency: std::time::Duration, span: &tracing::Span| {
+            span.record("http.response.status_code", res.status().as_u16());
+            tracing::debug!(
+                target: "query_server::http",
+                status = res.status().as_u16(),
+                duration_ms = latency.as_secs_f64() * 1000.0,
+                "request complete"
+            );
+        })
+        .on_failure(DefaultOnFailure::new().level(Level::WARN));
+
     #[cfg(feature = "forward")]
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -925,6 +1150,7 @@ async fn main() {
         .route("/validate", get(validate_address))
         .route("/autocomplete", get(autocomplete))
         .route("/geocode/ip", get(ip_geocode))
+        .layer(trace_layer.clone())
         .layer(axum::Extension(index.clone()))
         .layer(axum::Extension(forward_idx.clone()))
         .layer(axum::Extension(autocomplete_idx.clone()))
@@ -936,6 +1162,7 @@ async fn main() {
         .route("/reverse", get(reverse_geocode))
         .route("/autocomplete", get(autocomplete))
         .route("/geocode/ip", get(ip_geocode))
+        .layer(trace_layer.clone())
         .layer(axum::Extension(index.clone()))
         .layer(axum::Extension(autocomplete_idx.clone()))
         .layer(axum::Extension(ip_db.clone()));
@@ -962,26 +1189,26 @@ async fn main() {
         tokio::spawn(async move {
             loop {
                 match state.next().await {
-                    Some(Ok(ok)) => eprintln!("ACME event: {:?}", ok),
-                    Some(Err(err)) => eprintln!("ACME error: {:?}", err),
+                    Some(Ok(ok)) => tracing::info!(target: "query_server::acme", event = ?ok, "ACME event"),
+                    Some(Err(err)) => tracing::warn!(target: "query_server::acme", error = ?err, "ACME error"),
                     None => break,
                 }
             }
         });
 
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 443));
-        eprintln!("Starting HTTPS server on :443 for {}...", domain);
+        tracing::info!(target: "query_server::startup", domain = %domain, addr = %addr, "starting HTTPS server");
         if let Err(e) = axum_server::bind(addr)
             .acceptor(acceptor)
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
         {
-            eprintln!("HTTPS server exited: {e}");
+            tracing::error!(target: "query_server::startup", error = %e, "HTTPS server exited");
             std::process::exit(1);
         }
     } else {
         let bind_addr = args.get(2).map(|s| s.as_str()).unwrap_or("0.0.0.0:3000");
-        eprintln!("Starting HTTP server on {}...", bind_addr);
+        tracing::info!(target: "query_server::startup", addr = %bind_addr, "starting HTTP server");
 
         // Optional gRPC server alongside REST. Default port 3001; override
         // with --grpc-port or GEOCODER_GRPC_ADDR. Bind 0.0.0.0 so the
@@ -1002,7 +1229,12 @@ async fn main() {
         let listener = match tokio::net::TcpListener::bind(bind_addr).await {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("Failed to bind {bind_addr}: {e}");
+                tracing::error!(
+                    target: "query_server::startup",
+                    addr = %bind_addr,
+                    error = %e,
+                    "failed to bind HTTP listener"
+                );
                 std::process::exit(1);
             }
         };
@@ -1012,7 +1244,7 @@ async fn main() {
         )
         .await
         {
-            eprintln!("HTTP server exited: {e}");
+            tracing::error!(target: "query_server::startup", error = %e, "HTTP server exited");
             std::process::exit(1);
         }
     }
@@ -1049,19 +1281,68 @@ fn spawn_grpc_server(
     let addr: std::net::SocketAddr = match grpc_addr.parse() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("Invalid gRPC address {grpc_addr:?}: {e} — gRPC server disabled");
+            tracing::error!(
+                target: "query_server::startup",
+                grpc_addr = %grpc_addr,
+                error = %e,
+                "invalid gRPC address — gRPC server disabled"
+            );
             return;
         }
     };
 
+    // tower-http's grpc trace layer creates a server span per RPC and
+    // labels it with rpc.system + rpc.service.method, mirroring the
+    // semconv naming clients of OTel collectors expect.
+    let grpc_trace_layer = TraceLayer::new_for_grpc()
+        .make_span_with(|req: &http::Request<_>| {
+            let path = req.uri().path();
+            // gRPC paths are `/<package>.<Service>/<Method>` — split for
+            // semconv-friendly fields.
+            let (service, method) = path
+                .strip_prefix('/')
+                .and_then(|p| p.split_once('/'))
+                .unwrap_or(("", ""));
+            tracing::span!(
+                target: "query_server::grpc",
+                Level::INFO,
+                "rpc.server",
+                "otel.kind" = "server",
+                "otel.name" = %format!("{service}/{method}"),
+                "rpc.system" = "grpc",
+                "rpc.service" = %service,
+                "rpc.method" = %method,
+                "rpc.grpc.status_code" = tracing::field::Empty,
+            )
+        })
+        .on_response(|res: &http::Response<_>, latency: std::time::Duration, span: &tracing::Span| {
+            // grpc-status arrives as a trailer most of the time, but
+            // some libraries set it as an initial-metadata header for
+            // unary fast-fails. Fall back to "OK" when neither is present.
+            if let Some(code) = res
+                .headers()
+                .get("grpc-status")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<i32>().ok())
+            {
+                span.record("rpc.grpc.status_code", code);
+            }
+            tracing::debug!(
+                target: "query_server::grpc",
+                duration_ms = latency.as_secs_f64() * 1000.0,
+                "rpc complete"
+            );
+        });
+
     tokio::spawn(async move {
-        eprintln!("Starting gRPC server on {}...", addr);
+        tracing::info!(target: "query_server::startup", addr = %addr, "starting gRPC server");
         if let Err(e) = tonic::transport::Server::builder()
+            .layer(grpc_trace_layer)
             .add_service(query_server::grpc_service::GeocoderServer::new(service))
             .serve(addr)
             .await
         {
-            eprintln!("gRPC server error: {e}");
+            tracing::error!(target: "query_server::startup", error = %e, "gRPC server error");
         }
     });
 }

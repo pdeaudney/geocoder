@@ -27,9 +27,10 @@ impl IpGeo {
         if !path.exists() {
             return Ok(None);
         }
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let reader = Reader::open_readfile(&path)
             .map_err(|e| format!("open {}: {}", path.display(), e))?;
-        eprintln!("Loaded GeoLite2-City from {}", path.display());
+        crate::log_loaded_file("ip_geo", &path.display().to_string(), size);
         Ok(Some(IpGeo { reader }))
     }
 

@@ -22,6 +22,7 @@ pub mod ip_geo;
 pub mod h3_cell;
 pub mod openaddresses;
 pub mod postcode;
+pub mod telemetry;
 pub mod wof_countries;
 
 #[cfg(feature = "grpc")]
@@ -211,11 +212,39 @@ pub struct GeoCellOffsets {
 
 fn mmap_file(path: &str) -> Result<Mmap, String> {
     let file = File::open(path).map_err(|e| format!("Failed to open {}: {}", path, e))?;
-    unsafe { Mmap::map(&file).map_err(|e| format!("Failed to mmap {}: {}", path, e)) }
+    let mmap = unsafe { Mmap::map(&file).map_err(|e| format!("Failed to mmap {}: {}", path, e))? };
+    log_loaded_file("reverse", path, mmap.len() as u64);
+    Ok(mmap)
 }
 
 fn mmap_file_optional(path: &str) -> Option<Mmap> {
-    File::open(path).ok().and_then(|f| unsafe { Mmap::map(&f).ok() })
+    let mmap = File::open(path).ok().and_then(|f| unsafe { Mmap::map(&f).ok() })?;
+    log_loaded_file("reverse", path, mmap.len() as u64);
+    Some(mmap)
+}
+
+/// Emit one structured log line per index file loaded at startup. Operators
+/// compare this manifest against an expected build to spot truncated /
+/// wrong-version files: a 0-byte `addr_points.bin` or an unexpectedly
+/// small `strings.bin` jumps out instantly.
+///
+/// Public so optional companion indexes (FST autocomplete, MaxMind, …)
+/// can emit the same shape from their own load paths.
+pub fn log_loaded_file(index: &'static str, path: &str, size_bytes: u64) {
+    let mtime_unix = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    tracing::info!(
+        target: "query_server::manifest",
+        index,
+        path,
+        size_bytes,
+        mtime_unix,
+        "loaded index file"
+    );
 }
 
 /// Mmap a record-array file and verify its length is a positive multiple
@@ -774,6 +803,16 @@ impl Index {
     /// right per-country OpenAddresses index without scanning others.
     /// When `country_code` is `None`, we fall back to G-NAF (AU) →
     /// OpenAddresses nearest-across-all → OSM addr_points.
+    #[tracing::instrument(
+        name = "find_addr_point",
+        skip_all,
+        fields(
+            geocoder.address.country_code = country_code
+                .map(|c| String::from_utf8_lossy(c).to_string())
+                .unwrap_or_default(),
+            geocoder.address.source = tracing::field::Empty,
+        )
+    )]
     pub fn find_addr_point_in_country(
         &self,
         housenumber: &str,
@@ -782,6 +821,8 @@ impl Index {
         near_lng: f64,
         country_code: Option<&[u8; 2]>,
     ) -> Option<AddrPointMatch<'_>> {
+        let span = tracing::Span::current();
+
         // G-NAF is authoritative for AU and covers every AU address
         // directly from Geoscape (fresher than the OpenAddresses aggregator).
         // Only try it when we don't have a country hint or the hint is AU.
@@ -795,6 +836,7 @@ impl Index {
                     near_lng,
                     self.street_cell_level,
                 ) {
+                    span.record("geocoder.address.source", "gnaf");
                     return Some(AddrPointMatch {
                         lat: m.lat,
                         lng: m.lng,
@@ -818,6 +860,10 @@ impl Index {
                 near_lng,
                 self.street_cell_level,
             ) {
+                span.record(
+                    "geocoder.address.source",
+                    format!("open_addresses_{}", String::from_utf8_lossy(cc).to_ascii_lowercase()).as_str(),
+                );
                 return Some(AddrPointMatch {
                     lat: m.lat,
                     lng: m.lng,
@@ -877,12 +923,17 @@ impl Index {
             });
         }
 
-        best.map(|(_, p)| AddrPointMatch {
+        let result = best.map(|(_, p)| AddrPointMatch {
             lat: p.lat as f64,
             lng: p.lng as f64,
             housenumber: self.get_string(p.housenumber_id),
             street: self.get_string(p.street_id),
-        })
+        });
+        tracing::Span::current().record(
+            "geocoder.address.source",
+            if result.is_some() { "osm_addr_points" } else { "none" },
+        );
+        result
     }
 
     /// Reverse-geocode `(lat, lng)` and optionally return admin names in

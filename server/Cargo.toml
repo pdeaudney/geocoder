@@ -40,6 +40,25 @@ fst = "0.4"
 h3o = "0.9"
 tonic = { version = "0.12", optional = true }
 prost = { version = "0.13", optional = true }
+# Structured logging + tracing. tracing-subscriber emits JSON to stdout in
+# production; tracing-opentelemetry forwards spans to an OTLP collector
+# when OTEL_EXPORTER_OTLP_ENDPOINT is set. Pick a single major-version
+# pin across opentelemetry, opentelemetry_sdk, opentelemetry-otlp,
+# opentelemetry-semantic-conventions and tracing-opentelemetry — they
+# evolve in lockstep and a mismatched pair won't link.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
+tracing-opentelemetry = { version = "0.32", default-features = false, features = ["tracing-log"] }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "rt-tokio", "internal-logs"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-client", "internal-logs"] }
+opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
+# Per-request HTTP/gRPC server spans. The TraceLayer wraps the axum
+# router and the tonic service so every inbound call gets a parent
+# span with semconv-named attributes.
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace"] }
+http = "1"
 
 [features]
 default = ["forward", "grpc"]
@@ -55,6 +74,10 @@ tonic-build = "0.12"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+# getrusage() for max-RSS measurements in operational-resilience tests.
+# libc is already a transitive dep of tokio/hyper; pulling it in here just
+# adds a direct import path.
+libc = "0.2"
 
 [[bench]]
 name = "reverse_geocode"

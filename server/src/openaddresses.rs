@@ -61,7 +61,13 @@ impl OpenAddresses {
         let mut per_country: HashMap<[u8; 2], AddressPointIndex> = HashMap::new();
         for cc in country_codes {
             let prefix = oa_prefix(cc);
-            if let Some(index) = AddressPointIndex::open_with_prefix(dir, &prefix)? {
+            // Use a static label (same for every country shard) so log
+            // pipelines can group by `index=open_addresses` without
+            // exploding into one stream per country. The path itself
+            // already carries the per-country identifier.
+            if let Some(index) =
+                AddressPointIndex::open_with_prefix_labeled(dir, &prefix, "open_addresses")?
+            {
                 per_country.insert(cc, index);
             }
         }
