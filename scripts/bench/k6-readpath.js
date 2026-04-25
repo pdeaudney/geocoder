@@ -217,12 +217,17 @@ export function handleSummary(data) {
             http_req_rate: m.http_reqs && m.http_reqs.values ? m.http_reqs.values.rate : 0,
             errors: m.endpoint_errors && m.endpoint_errors.values ? m.endpoint_errors.values.count : 0,
         };
+        // The wrapper runs us once per mode (cold / warm) and merges
+        // the per-mode summaries afterwards. MODE_TAG lets the
+        // wrapper distinguish them; defaults to "all" for ad-hoc
+        // single-shot runs that bypass the wrapper.
+        const tag = (__ENV.MODE_TAG || 'all').replace(/[^a-z0-9_-]/gi, '');
         return {
-            stdout: formatTable(summary),
+            stdout: formatTable(summary, tag),
             // Mount-friendly out-path. /tmp inside the k6 container
             // isn't writable under the non-root k6 user without an
             // explicit mount of the right shape.
-            '/out/k6-summary.json': JSON.stringify(summary, null, 2),
+            [`/out/k6-summary-${tag}.json`]: JSON.stringify(summary, null, 2),
         };
     } catch (e) {
         // If anything in handleSummary throws, k6 silently falls back
@@ -234,10 +239,10 @@ export function handleSummary(data) {
     }
 }
 
-function formatTable(s) {
+function formatTable(s, tag) {
     const lines = [];
     lines.push('');
-    lines.push('===== HTTP read-path bench =====');
+    lines.push(`===== HTTP read-path bench (mode=${tag || 'all'}) =====`);
     const rps = (s.http_req_rate || 0).toFixed(0);
     lines.push(`Total requests: ${s.http_reqs}   rps: ${rps}   errors: ${s.errors}`);
     lines.push('');
