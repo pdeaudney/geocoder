@@ -51,6 +51,7 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::geo::haversine_m;
+use crate::metrics::Metrics;
 use crate::Address;
 
 // --- Public configuration ------------------------------------------------
@@ -296,18 +297,24 @@ pub struct ShadowDispatcher {
     /// readable per-request and a future runtime-tune endpoint can
     /// flip it without restart.
     sample_rate_bits: Arc<AtomicU64>,
+    /// Optional Prometheus metrics handle. When present, the worker
+    /// records outcome / distance / per-axis match counters. When
+    /// absent (e.g. unit-test contexts that don't care about metrics),
+    /// the worker still emits spans + logs but skips the metrics path.
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl ShadowDispatcher {
     /// Spawn the worker (and its midnight-reset companion) onto the
     /// current tokio runtime. Returns a handle the router can clone
-    /// into an axum Extension.
-    pub fn spawn(cfg: ShadowConfig) -> Arc<Self> {
+    /// into an axum Extension. `metrics`, when supplied, receives
+    /// shadow outcome + distance + match observations.
+    pub fn spawn(cfg: ShadowConfig, metrics: Option<Arc<Metrics>>) -> Arc<Self> {
         let (tx, rx) = mpsc::channel::<ShadowJob>(cfg.queue_capacity);
         let queue_full_count = Arc::new(AtomicU64::new(0));
         let sample_rate_bits = Arc::new(AtomicU64::new(f64::to_bits(cfg.sample_rate)));
 
-        let worker = Worker::new(cfg);
+        let worker = Worker::new(cfg, metrics.clone());
         worker.spawn_loops(rx);
 
         tracing::info!(
@@ -319,6 +326,7 @@ impl ShadowDispatcher {
             tx,
             queue_full_count,
             sample_rate_bits,
+            metrics,
         })
     }
 
@@ -400,6 +408,12 @@ impl ShadowDispatcher {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.queue_full_count.fetch_add(1, Ordering::Relaxed);
+                if let Some(m) = self.metrics.as_ref() {
+                    m.shadow_queue_full_total.inc();
+                    m.shadow_outcomes_total
+                        .with_label_values(&[endpoint.as_str(), Outcome::QueueFull.as_str()])
+                        .inc();
+                }
                 emit_outcome(endpoint, Outcome::QueueFull, None, None, None);
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -438,10 +452,11 @@ struct Worker {
     daily_count: Arc<AtomicU32>,
     auth_disabled: Arc<AtomicBool>,
     backoff_until_unix_ms: Arc<AtomicU64>,
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl Worker {
-    fn new(cfg: ShadowConfig) -> Self {
+    fn new(cfg: ShadowConfig, metrics: Option<Arc<Metrics>>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(cfg.timeout)
             // Connection pooling defaults are fine — small fleet of
@@ -459,6 +474,7 @@ impl Worker {
             backoff_until_unix_ms: Arc::new(AtomicU64::new(0)),
             client,
             cfg,
+            metrics,
         }
     }
 
@@ -506,21 +522,22 @@ impl Worker {
         let daily_count = self.daily_count.clone();
         let auth_disabled = self.auth_disabled.clone();
         let backoff = self.backoff_until_unix_ms.clone();
+        let metrics = self.metrics.clone();
 
         while let Some(job) = rx.recv().await {
             // Always drain — the channel keeps moving even when we
             // intend not to dispatch, so the handler-side queue_full
             // counter only ever reflects genuine backpressure.
             if auth_disabled.load(Ordering::Relaxed) {
-                emit_job_outcome(&job, Outcome::AuthDisabled, None, None, None);
+                emit_job_outcome(&job, Outcome::AuthDisabled, None, None, None, metrics.as_ref());
                 continue;
             }
             if now_unix_ms() < backoff.load(Ordering::Relaxed) {
-                emit_job_outcome(&job, Outcome::RateLimited, None, None, None);
+                emit_job_outcome(&job, Outcome::RateLimited, None, None, None, metrics.as_ref());
                 continue;
             }
             if daily_count.load(Ordering::Relaxed) >= cfg.daily_cap {
-                emit_job_outcome(&job, Outcome::DailyCapHit, None, None, None);
+                emit_job_outcome(&job, Outcome::DailyCapHit, None, None, None, metrics.as_ref());
                 continue;
             }
 
@@ -539,8 +556,9 @@ impl Worker {
             let client = client.clone();
             let auth_disabled = auth_disabled.clone();
             let backoff = backoff.clone();
+            let metrics = metrics.clone();
             tokio::spawn(async move {
-                execute_job(client, cfg, auth_disabled, backoff, job).await;
+                execute_job(client, cfg, auth_disabled, backoff, metrics, job).await;
                 drop(permit); // explicit for clarity; Drop releases the semaphore.
             });
         }
@@ -552,12 +570,14 @@ async fn execute_job(
     cfg: ShadowConfig,
     auth_disabled: Arc<AtomicBool>,
     backoff: Arc<AtomicU64>,
+    metrics: Option<Arc<Metrics>>,
     job: ShadowJob,
 ) {
     let started = Instant::now();
     let url = build_google_url(&cfg.base_url, &cfg.api_key, &job);
     let resp = client.get(&url).send().await;
     let latency_ms = started.elapsed().as_millis() as u64;
+    let m = metrics.as_ref();
 
     let body = match resp {
         Ok(r) => match r.json::<GoogleResponse>().await {
@@ -568,12 +588,12 @@ async fn execute_job(
                     error = %e,
                     "failed to parse Google response body"
                 );
-                emit_job_outcome(&job, Outcome::GoogleError, None, None, Some(latency_ms));
+                emit_job_outcome(&job, Outcome::GoogleError, None, None, Some(latency_ms), m);
                 return;
             }
         },
         Err(e) if e.is_timeout() => {
-            emit_job_outcome(&job, Outcome::Timeout, None, None, Some(latency_ms));
+            emit_job_outcome(&job, Outcome::Timeout, None, None, Some(latency_ms), m);
             return;
         }
         Err(e) => {
@@ -582,7 +602,7 @@ async fn execute_job(
                 error = %e,
                 "Google HTTP error"
             );
-            emit_job_outcome(&job, Outcome::GoogleError, None, None, Some(latency_ms));
+            emit_job_outcome(&job, Outcome::GoogleError, None, None, Some(latency_ms), m);
             return;
         }
     };
@@ -592,7 +612,7 @@ async fn execute_job(
             // Carry on — comparison below.
         }
         StatusKind::ZeroResults => {
-            emit_job_outcome(&job, Outcome::ZeroResults, None, Some(&body.status), Some(latency_ms));
+            emit_job_outcome(&job, Outcome::ZeroResults, None, Some(&body.status), Some(latency_ms), m);
             return;
         }
         StatusKind::OverQueryLimit => {
@@ -603,7 +623,7 @@ async fn execute_job(
                 backoff_secs = cfg.backoff_secs,
                 "Google OVER_QUERY_LIMIT — pausing dispatch"
             );
-            emit_job_outcome(&job, Outcome::RateLimited, None, Some(&body.status), Some(latency_ms));
+            emit_job_outcome(&job, Outcome::RateLimited, None, Some(&body.status), Some(latency_ms), m);
             return;
         }
         StatusKind::RequestDenied => {
@@ -612,25 +632,24 @@ async fn execute_job(
                 target: "query_server::shadow",
                 "Google REQUEST_DENIED — disabling shadow validation for the lifetime of the process"
             );
-            emit_job_outcome(&job, Outcome::AuthDisabled, None, Some(&body.status), Some(latency_ms));
+            emit_job_outcome(&job, Outcome::AuthDisabled, None, Some(&body.status), Some(latency_ms), m);
             return;
         }
         StatusKind::Other => {
-            emit_job_outcome(&job, Outcome::GoogleError, None, Some(&body.status), Some(latency_ms));
+            emit_job_outcome(&job, Outcome::GoogleError, None, Some(&body.status), Some(latency_ms), m);
             return;
         }
     }
 
     let google = GoogleSnapshot::from_body(&body);
-    let comparison = compare(&job, &google);
     emit_job_outcome(
         &job,
-        comparison.outcome,
+        compare(&job, &google).outcome,
         Some(&google),
         Some(&body.status),
         Some(latency_ms),
+        m,
     );
-    let _ = comparison; // currently only outcome is used; reserved for richer emission
 }
 
 /// Build the Google Geocoding API URL for a shadow job.
@@ -953,6 +972,7 @@ fn emit_job_outcome(
     google: Option<&GoogleSnapshot>,
     google_status: Option<&str>,
     latency_ms: Option<u64>,
+    metrics: Option<&Arc<Metrics>>,
 ) {
     let comparison = google.map(|g| compare(job, g));
     let span = tracing::info_span!(
@@ -985,6 +1005,39 @@ fn emit_job_outcome(
             "shadow {}",
             outcome.as_str()
         );
+    }
+
+    // Prometheus side. The label cardinality cap is documented in
+    // metrics.rs; outcomes ∈ 9 fixed values, axes ∈ 4 fixed, results
+    // ∈ 3, so the worst case is ~96 series for shadow_match_total
+    // per endpoint (×2 endpoints = 192).
+    if let Some(m) = metrics {
+        let endpoint = job.endpoint.as_str();
+        m.shadow_outcomes_total
+            .with_label_values(&[endpoint, outcome.as_str()])
+            .inc();
+        if let Some(c) = comparison.as_ref() {
+            for (axis, axis_match) in [
+                ("country", c.country_match),
+                ("state", c.state_match),
+                ("city", c.city_match),
+                ("road", c.road_match),
+            ] {
+                let result = match axis_match {
+                    Some(true) => "match",
+                    Some(false) => "mismatch",
+                    None => "none",
+                };
+                m.shadow_match_total
+                    .with_label_values(&[endpoint, axis, result])
+                    .inc();
+            }
+            if let Some(d) = c.distance_m {
+                m.shadow_distance_meters
+                    .with_label_values(&[endpoint])
+                    .observe(d);
+            }
+        }
     }
 }
 

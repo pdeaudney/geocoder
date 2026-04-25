@@ -162,7 +162,7 @@ async fn handler_latency_unaffected_by_slow_google() {
 
     let mut cfg = test_config(&url);
     cfg.queue_capacity = 256; // ensure capacity for our 100 calls
-    let disp = ShadowDispatcher::spawn(cfg);
+    let disp = ShadowDispatcher::spawn(cfg, None);
 
     // Time each fire-and-forget call individually. The dispatcher's
     // `shadow_*` methods do at most: rand() + small clone + try_send.
@@ -191,7 +191,7 @@ async fn happy_path_dispatches_to_google() {
         responder: Arc::new(|_| MockResponse::Json(ok_au_body())),
     })
     .await;
-    let disp = ShadowDispatcher::spawn(test_config(&url));
+    let disp = ShadowDispatcher::spawn(test_config(&url), None);
 
     fire_one_reverse(&disp);
 
@@ -222,7 +222,7 @@ async fn daily_cap_blocks_after_limit() {
     let mut cfg = test_config(&url);
     cfg.daily_cap = 3; // tiny, easy to overshoot in a test
     cfg.queue_capacity = 32;
-    let disp = ShadowDispatcher::spawn(cfg);
+    let disp = ShadowDispatcher::spawn(cfg, None);
 
     // Fire 10 — only the first 3 should reach Google; the rest get
     // outcome=daily_cap_hit emitted instead.
@@ -256,7 +256,7 @@ async fn request_denied_disables_dispatcher_for_lifetime() {
         }),
     })
     .await;
-    let disp = ShadowDispatcher::spawn(test_config(&url));
+    let disp = ShadowDispatcher::spawn(test_config(&url), None);
 
     // Fire a first job — gets REQUEST_DENIED, flips auth_disabled.
     fire_one_reverse(&disp);
@@ -303,7 +303,7 @@ async fn over_query_limit_triggers_backoff_window() {
     .await;
     let mut cfg = test_config(&url);
     cfg.backoff_secs = 1; // 1 s so the test runs quickly
-    let disp = ShadowDispatcher::spawn(cfg);
+    let disp = ShadowDispatcher::spawn(cfg, None);
 
     // First job trips OVER_QUERY_LIMIT.
     fire_one_reverse(&disp);
@@ -361,7 +361,7 @@ async fn queue_full_drops_without_panic() {
     cfg.queue_capacity = 4;
     cfg.inflight_cap = 1;
     cfg.rps_cap = 2;
-    let disp = ShadowDispatcher::spawn(cfg);
+    let disp = ShadowDispatcher::spawn(cfg, None);
 
     // Pump well past channel capacity. The first few enter the
     // channel; the rest hit Full.

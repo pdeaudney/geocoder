@@ -72,6 +72,13 @@ rand = "0.8"
 # transitive via OTel's tracing-opentelemetry and tantivy; explicit
 # import for the chrono::Utc::now() / next_midnight calc.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Prometheus exporter — exposes /metrics in the canonical text format
+# and provides counter/histogram/gauge primitives. tikv/rust-prometheus
+# (0.13) is mature, used by Linkerd / TiKV / others; preferred here
+# over the newer prometheus-client crate because the simpler register-
+# once-and-write API matches our handler shape and we don't need
+# encoder pluggability.
+prometheus = { version = "0.13", default-features = false }
 
 [features]
 default = ["forward", "grpc"]

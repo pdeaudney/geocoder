@@ -14,6 +14,7 @@ use axum::Router;
 use query_server::admin_config::AdminConfig;
 use query_server::autocomplete::Autocomplete;
 use query_server::ip_geo::IpGeo;
+use query_server::metrics::{canonical_country, Metrics};
 use query_server::shadow::{ShadowConfig, ShadowDispatcher};
 use query_server::telemetry;
 use query_server::{Index, DEFAULT_ADMIN_CELL_LEVEL, DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL};
@@ -152,6 +153,25 @@ async fn healthz() -> Response {
         .into_response()
 }
 
+/// Prometheus scrape endpoint. Always available — no auth, no
+/// disable knob — operators are expected to gate access at the
+/// network layer (security-group / ingress rule). The body is the
+/// Prometheus text exposition format produced by
+/// `query_server::metrics::Metrics::render`.
+async fn metrics_handler(
+    metrics: axum::extract::Extension<Arc<Metrics>>,
+) -> Response {
+    let body = metrics.0.render();
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        body,
+    )
+        .into_response()
+}
+
 /// Per-index health. Reports which optional indexes are loaded and,
 /// for the ones that are partitioned by country, which ISO 3166-1
 /// alpha-2 codes are covered. Clients can use this for granular
@@ -273,7 +293,11 @@ fn cc_to_string(cc: &[u8; 2]) -> String {
         geocoder.h3_resolutions = tracing::field::Empty,
     )
 )]
-async fn h3_endpoint(Query(params): Query<H3Params>) -> Response {
+async fn h3_endpoint(
+    Query(params): Query<H3Params>,
+    metrics: axum::extract::Extension<Arc<Metrics>>,
+) -> Response {
+    let started = std::time::Instant::now();
     let resolutions = match query_server::h3_cell::parse_h3_res(&params.h3_res) {
         Ok(r) => r,
         Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
@@ -298,6 +322,9 @@ async fn h3_endpoint(Query(params): Query<H3Params>) -> Response {
             .into_response();
     };
 
+    // /h3 has no reverse-geocode step → no country to attribute.
+    metrics.record_request("h3", None, started.elapsed().as_secs_f64());
+
     let body = serde_json::json!({
         "lat": params.lat,
         "lon": params.lon,
@@ -320,7 +347,9 @@ async fn reverse_geocode(
     Query(params): Query<QueryParams>,
     index: axum::extract::Extension<LiveIndex>,
     shadow: axum::extract::Extension<Option<Arc<ShadowDispatcher>>>,
+    metrics: axum::extract::Extension<Arc<Metrics>>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -340,6 +369,15 @@ async fn reverse_geocode(
     if let Some(d) = shadow.0.as_ref() {
         d.shadow_reverse(params.lat, params.lon, &address);
     }
+
+    // Record metrics with the resolved country before consuming
+    // `address` into the response. record_request normalises the
+    // country to lowercase and clamps anything weird to "unknown".
+    metrics.record_request(
+        "reverse",
+        address.address.country_code.as_deref(),
+        started.elapsed().as_secs_f64(),
+    );
 
     // axum::Json writes directly to a BytesMut; skips the intermediate
     // `String` allocation + UTF-8 copy the old `to_string() -> tuple
@@ -364,7 +402,9 @@ async fn validate_address(
     Query(params): Query<ValidateParams>,
     index: axum::extract::Extension<LiveIndex>,
     forward_idx: axum::extract::Extension<Option<Arc<Forward>>>,
+    metrics: axum::extract::Extension<Arc<Metrics>>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -460,6 +500,11 @@ async fn validate_address(
         // the map entirely when h3_res wasn't requested.
         "h3": query_server::h3_cell::build_h3_map(final_lat, final_lng, &h3_resolutions),
     });
+    metrics.record_request(
+        "validate",
+        Some(params.country_code.as_str()),
+        started.elapsed().as_secs_f64(),
+    );
     axum::Json(body).into_response()
 }
 
@@ -528,7 +573,9 @@ fn parse_country_code_bytes(s: &str) -> Option<[u8; 2]> {
 async fn autocomplete(
     Query(params): Query<AutocompleteParams>,
     autocomplete_idx: axum::extract::Extension<Option<Arc<Autocomplete>>>,
+    metrics: axum::extract::Extension<Arc<Metrics>>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -581,6 +628,12 @@ async fn autocomplete(
         })
         .collect();
 
+    metrics.record_request(
+        "autocomplete",
+        params.country_code.as_deref(),
+        started.elapsed().as_secs_f64(),
+    );
+
     let body = serde_json::json!({ "results": enriched });
     axum::Json(body).into_response()
 }
@@ -598,7 +651,9 @@ async fn ip_geocode(
     index: axum::extract::Extension<LiveIndex>,
     ip_db: axum::extract::Extension<Option<Arc<IpGeo>>>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
+    metrics: axum::extract::Extension<Arc<Metrics>>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -641,6 +696,11 @@ async fn ip_geocode(
 
     let snapshot = index.load();
     let address = snapshot.query(lat, lon);
+    metrics.record_request(
+        "ip_geocode",
+        address.address.country_code.as_deref(),
+        started.elapsed().as_secs_f64(),
+    );
     let body = serde_json::json!({
         "ip": ip.to_string(),
         "lat": lat,
@@ -674,7 +734,9 @@ async fn search(
     forward_idx: axum::extract::Extension<Option<Arc<Forward>>>,
     autocomplete_idx: axum::extract::Extension<Option<Arc<Autocomplete>>>,
     shadow: axum::extract::Extension<Option<Arc<ShadowDispatcher>>>,
+    metrics: axum::extract::Extension<Arc<Metrics>>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -783,6 +845,14 @@ async fn search(
                             snap,
                         );
                     }
+                    // Country derived from the top hit's resolved
+                    // country_code so a query like "sydney" with no
+                    // explicit country_code still labels correctly.
+                    let cc = enriched
+                        .get("address")
+                        .and_then(|a| a.get("country_code"))
+                        .and_then(|v| v.as_str());
+                    metrics.record_request("search", cc, started.elapsed().as_secs_f64());
                     let body = serde_json::json!({ "results": [enriched] });
                     return axum::Json(body).into_response();
                 }
@@ -866,6 +936,18 @@ async fn search(
             snap,
         );
     }
+
+    // Prefer the top-hit's resolved country_code over the request
+    // param — a query without an explicit country still gets
+    // labelled correctly. Falls back to the param when the hit
+    // doesn't carry one.
+    let cc_from_top = enriched
+        .first()
+        .and_then(|h| h.get("address"))
+        .and_then(|a| a.get("country_code"))
+        .and_then(|v| v.as_str());
+    let cc = cc_from_top.or_else(|| country_codes.first().copied());
+    metrics.record_request("search", cc, started.elapsed().as_secs_f64());
 
     let body = serde_json::json!({ "results": enriched });
     axum::Json(body).into_response()
@@ -1171,14 +1253,21 @@ async fn main() {
         search_distance,
     );
 
+    // Prometheus registry. Always created (no env-var gate) — the
+    // /metrics endpoint costs nothing when nobody scrapes it, and
+    // the per-handler observation overhead is sub-microsecond.
+    // Operators gate scrape access at the network layer.
+    let metrics = Metrics::new();
+    let _ = canonical_country(None); // warm the static table on startup
+
     // Optional shadow validator against Google's Geocoding API.
     // `None` when GOOGLE_GEOCODING_ENABLED=false, or the master switch
     // is implicit-on but no API key is set, or any other disabling
     // condition documented in the env-var truth matrix. Either way the
     // handlers see Option::None and skip the shadow path entirely —
     // zero overhead in the disabled state.
-    let shadow_dispatcher: Option<Arc<ShadowDispatcher>> =
-        ShadowConfig::from_env().map(ShadowDispatcher::spawn);
+    let shadow_dispatcher: Option<Arc<ShadowDispatcher>> = ShadowConfig::from_env()
+        .map(|cfg| ShadowDispatcher::spawn(cfg, Some(metrics.clone())));
 
     // Optional MaxMind GeoLite2 loader. Missing DB → /geocode/ip returns 503.
     let ip_db: Option<Arc<IpGeo>> = match IpGeo::open(Path::new(data_dir)) {
@@ -1287,6 +1376,7 @@ async fn main() {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/healthz/indexes", get(healthz_indexes))
+        .route("/metrics", get(metrics_handler))
         .route("/reverse", get(reverse_geocode))
         .route("/search", get(search))
         .route("/validate", get(validate_address))
@@ -1298,11 +1388,13 @@ async fn main() {
         .layer(axum::Extension(forward_idx.clone()))
         .layer(axum::Extension(autocomplete_idx.clone()))
         .layer(axum::Extension(ip_db.clone()))
-        .layer(axum::Extension(shadow_dispatcher.clone()));
+        .layer(axum::Extension(shadow_dispatcher.clone()))
+        .layer(axum::Extension(metrics.clone()));
     #[cfg(not(feature = "forward"))]
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/healthz/indexes", get(healthz_indexes))
+        .route("/metrics", get(metrics_handler))
         .route("/reverse", get(reverse_geocode))
         .route("/autocomplete", get(autocomplete))
         .route("/geocode/ip", get(ip_geocode))
@@ -1311,7 +1403,8 @@ async fn main() {
         .layer(axum::Extension(index.clone()))
         .layer(axum::Extension(autocomplete_idx.clone()))
         .layer(axum::Extension(ip_db.clone()))
-        .layer(axum::Extension(shadow_dispatcher.clone()));
+        .layer(axum::Extension(shadow_dispatcher.clone()))
+        .layer(axum::Extension(metrics.clone()));
 
     let _ = forward_idx; // silence unused when feature disabled
 
