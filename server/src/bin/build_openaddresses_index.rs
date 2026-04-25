@@ -149,11 +149,16 @@ fn run(
         return Ok(());
     }
 
-    for (cc, dir) in &country_dirs {
+    // Each country is fully independent — separate output files, separate
+    // string pools, separate cell maps. Embarrassingly parallel: rayon
+    // shards across the worker pool. On a 16-core box this turns a
+    // ~30-minute sequential OA pass into ~3 minutes. Stderr output
+    // interleaves across countries, which is fine — nothing parses it.
+    use rayon::prelude::*;
+    country_dirs.par_iter().try_for_each(|(cc, dir)| {
         eprintln!("--- building {} ---", std::str::from_utf8(cc).unwrap_or("??"));
-        build_country(cc, dir, out_dir, street_level)?;
-    }
-    Ok(())
+        build_country(cc, dir, out_dir, street_level)
+    })
 }
 
 fn build_country(

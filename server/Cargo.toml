@@ -14,6 +14,11 @@ readme = "../README.md"
 # board on the build pipeline; smaller but non-zero impact on the
 # query server.
 mimalloc = { version = "0.1", default-features = false }
+# rayon used by builders to parallelise per-country / per-state ingestion
+# (build-openaddresses-index, build-gnaf-index). The query-server itself
+# doesn't use rayon — but the dep is shared because the build binaries
+# live in the same crate.
+rayon = "1.10"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"

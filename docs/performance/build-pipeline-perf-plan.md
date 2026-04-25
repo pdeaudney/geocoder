@@ -30,7 +30,7 @@ proportionally lower).
 |--:|---|---|---|
 | 1 | libdeflate in `build-index` | DONE | AU: ~0 % (within noise; AU isn't decompression-bound). Planet expected: −3–8 min on OSM ingest. Confirmed linked + active. |
 | 2 | mimalloc as global allocator (all Rust binaries) | DONE | AU FST build 20.4 s after; server startup 362 ms after. Per-stage delta vs std allocator deferred to stage 6 timing emission. |
-| 3 | Parallel countries in `build-openaddresses-index` | TODO | target: −85 to −90 % of OA stage |
+| 3 | Parallel countries in `build-openaddresses-index` | DONE | rayon par_iter; test passes; AU-local has 1 country so no measurable local delta. Planet 60-country build expects 8-16× speedup. |
 | 4 | simd-json in `wof-importer` | TODO | target: −80 % of WoF parse |
 | 5 | Parallel states in `build-gnaf-index` | TODO | target: −60 to −70 % of G-NAF stage |
 | 6 | Per-stage timing emission (all builders) | TODO | 0 perf — observability only, unblocks the next round |
@@ -244,7 +244,7 @@ ingestion qualify; mmap-only paths (server load) won't budge much.
 
 ## Stage 3: Parallel countries in `build-openaddresses-index`
 
-**Status: TODO**
+**Status: DONE** (commit pending)
 
 ### Background
 
