@@ -21,6 +21,7 @@ pub mod gnaf;
 pub mod i18n;
 pub mod ip_geo;
 pub mod h3_cell;
+pub mod metrics;
 pub mod openaddresses;
 pub mod postcode;
 pub mod shadow;

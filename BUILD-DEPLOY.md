@@ -488,7 +488,73 @@ For mismatches, the structured log line additionally carries
 investigating a known-bad reading can grep for it without joining
 two systems.
 
-### Metrics
+### Prometheus metrics
+
+Scrape `GET /metrics` for request rate, latency, and shadow-validation
+accuracy in the standard Prometheus text-exposition format. The
+endpoint is **always** available — no auth, no env-var gate. Operators
+gate scraper access at the network layer (security-group / ingress
+rule); leaving the path open over the open internet would expose the
+country-traffic split.
+
+Sample scrape config:
+
+```yaml
+- job_name: geocoder
+  metrics_path: /metrics
+  scrape_interval: 15s
+  static_configs:
+    - targets: ['geocoder.internal:3000']
+```
+
+**Metric reference:**
+
+| Name                                  | Type      | Labels                  | Notes                                                                  |
+|---------------------------------------|-----------|-------------------------|------------------------------------------------------------------------|
+| `geocoder_requests_total`             | counter   | endpoint, country       | RPS via PromQL `rate()`. Country is ISO alpha-2 lowercase or `unknown`. |
+| `geocoder_request_duration_seconds`   | histogram | endpoint                | Buckets tuned for 0.5 ms–2.5 s range.                                  |
+| `geocoder_shadow_outcomes_total`      | counter   | endpoint, outcome       | Shadow validator outcome enum (9 values).                              |
+| `geocoder_shadow_match_total`         | counter   | endpoint, axis, result  | Per-axis admin-field match. Axis ∈ {country,state,city,road}; result ∈ {match,mismatch,none}. |
+| `geocoder_shadow_distance_meters`     | histogram | endpoint                | /search top-1 distance against Google's top-1 (metres).                |
+| `geocoder_shadow_queue_full_total`    | counter   | —                       | Cumulative shadow `try_send` failures. Should stay flat in steady state. |
+
+**Cardinality:** ~7 endpoints × 250 countries (in practice ~10–60 served) = ~1750 series for `requests_total` worst case, ~600 in any realistic deployment. Bounded by the alpha-2 normaliser — anything else collapses to `country="unknown"`.
+
+**Headline PromQL:**
+
+```promql
+# Overall RPS
+sum(rate(geocoder_requests_total[1m]))
+
+# Per-country RPS, /search only
+sum by (country) (rate(geocoder_requests_total{endpoint="search"}[1m]))
+
+# p99 latency per endpoint
+histogram_quantile(0.99, sum by (le, endpoint) (rate(geocoder_request_duration_seconds_bucket[5m])))
+
+# Shadow accuracy (1 - mismatch share) per endpoint
+1 - (
+  sum by (endpoint) (rate(geocoder_shadow_outcomes_total{outcome="mismatch"}[5m]))
+  / sum by (endpoint) (rate(geocoder_shadow_outcomes_total{outcome=~"match|mismatch"}[5m]))
+)
+
+# /search top-1 distance p95 against Google
+histogram_quantile(0.95,
+  sum by (le) (rate(geocoder_shadow_distance_meters_bucket{endpoint="search"}[5m])))
+
+# Per-axis match rate (e.g. "how often does our state agree with Google's?")
+sum by (axis) (rate(geocoder_shadow_match_total{result="match"}[5m]))
+  / sum by (axis) (rate(geocoder_shadow_match_total{result=~"match|mismatch"}[5m]))
+```
+
+**Why counters, not RPS gauges:** Prometheus convention stores rates as
+counters and the dashboard computes RPS via `rate(metric[1m])` at
+query time. Storing an in-process gauge of "current RPS" would
+require a sliding-window estimator and would disagree with whichever
+window the dashboard chose anyway. The counter form composes correctly
+with PromQL aggregations and recording rules.
+
+### Metrics (legacy ALB-side)
 
 The service doesn't export Prometheus / CloudWatch metrics today.
 Minimum viable metrics come from the ALB:
