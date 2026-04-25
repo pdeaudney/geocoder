@@ -123,6 +123,25 @@ export GNAF_ARCHIVE_URL=https://...
 ./scripts/fetch-build-data.sh --region au
 ```
 
+#### A note on OpenAddresses + AWS
+
+OpenAddresses retired its free HTTPS bulk mirror; the only
+programmatic path to the processed data is the Requester-Pays S3
+bucket `s3://v2.openaddresses.io`. A free-tier AWS account is enough
+— the requester-pays charge is single-digit dollars for the planet,
+cents for a single country. If you can't use AWS at all:
+
+- **AU-only:** pass `--skip-oa`. G-NAF is the better address-points
+  dataset for AU anyway.
+- **Other regions:** pass `--skip-oa`. OSM alone covers most
+  `/reverse` queries; the address-point refinement on `/search` and
+  `/validate` won't be available, but the service still works.
+- **Specific countries:** the per-source `data` URLs in the
+  [`openaddresses/openaddresses` GitHub repo's `sources/`](https://github.com/openaddresses/openaddresses/tree/master/sources)
+  point at upstream open-data portals. No AWS needed, but each is in
+  the upstream's native format (Shapefile / GeoJSON / WMS / KML) and
+  requires a per-source format adapter.
+
 Build the indexes:
 
 ```bash

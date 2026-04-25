@@ -87,9 +87,27 @@ fi
 
 # -----------------------------------------------------------------------------
 # 2. OpenAddresses — supplementary address points for ~60 countries.
-#    Requires AWS creds with Requester-Pays GetObject on
-#    s3://v2.openaddresses.io. Skipped on clean errors so dev setups
-#    without AWS credentials don't fail the whole script.
+#
+#    **Requires AWS credentials.** OpenAddresses retired its free
+#    HTTPS bulk-download mirror; the only programmatic path to the
+#    processed GeoJSON is `s3://v2.openaddresses.io` with Requester-
+#    Pays GetObject. The downloads are cheap (single-digit dollars
+#    for the planet, ~$0.05 for AU); a free-tier AWS account is
+#    sufficient. The browser UI at batch.openaddresses.io can
+#    pre-sign URLs for manual downloads but isn't scriptable.
+#
+#    For deployments that can't use AWS at all:
+#      - AU-only: skip OA entirely (`--skip-oa`); G-NAF is the
+#        better address-points dataset for AU anyway.
+#      - Other countries: OSM alone covers most use cases. /reverse
+#        degrades gracefully without OA address points.
+#      - Specific countries: pull from upstream sources directly via
+#        the URLs in openaddresses/openaddresses sources/*.json
+#        (per-source format adapter required; not generic).
+#
+#    This script skips on clean errors so dev setups without AWS
+#    creds don't fail the whole pipeline — the build downstream
+#    just won't have OA data to ingest.
 # -----------------------------------------------------------------------------
 
 if [ "$SKIP_OA" = "0" ]; then
