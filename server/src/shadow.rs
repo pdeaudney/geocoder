@@ -569,6 +569,15 @@ impl Worker {
                 emit_job_outcome(&job, Outcome::RateLimited, None, None, None, metrics.as_ref());
                 continue;
             }
+            // Daily-cap check + increment. Note: the load here and the
+            // fetch_add at line ~554 *appear* to form a check-then-act
+            // race, but they aren't — the worker is a single tokio
+            // task (spawn_loops above does exactly one tokio::spawn for
+            // run()), so these two operations are sequential within the
+            // same async context. The only concurrent writer is the
+            // midnight-reset task storing 0, which is the *desired*
+            // clearing behavior (it can never push the count *up*
+            // mid-decision). Relaxed ordering is therefore sufficient.
             if daily_count.load(Ordering::Relaxed) >= cfg.daily_cap {
                 emit_job_outcome(&job, Outcome::DailyCapHit, None, None, None, metrics.as_ref());
                 continue;
@@ -1096,15 +1105,40 @@ fn warn_queue_full_throttled() {
 /// Compute the Duration from now until 00:00:00 UTC tomorrow. Used by
 /// the daily-cap reset task — sleeping until that instant means we
 /// reset exactly once per UTC day even if the worker started mid-day.
+///
+/// Wraps `duration_until_next_utc_midnight_from(Utc::now())` so the
+/// inner pure function is testable across calendar edge cases (end of
+/// month, end of year, leap day) without time mocking.
 fn duration_until_next_utc_midnight() -> Duration {
-    let now = Utc::now();
-    let tomorrow = now.date_naive().succ_opt().expect("date_naive succ");
-    let midnight = Utc
-        .with_ymd_and_hms(tomorrow.year(), tomorrow.month(), tomorrow.day(), 0, 0, 0)
-        .single()
-        .expect("UTC midnight is unambiguous");
-    let secs = (midnight - now).num_milliseconds().max(0) as u64;
-    Duration::from_millis(secs)
+    duration_until_next_utc_midnight_from(Utc::now())
+}
+
+/// Pure form of [`duration_until_next_utc_midnight`]. Defensively
+/// returns a 1-hour fallback if chrono can't compute the next
+/// midnight from the supplied `now` — in practice this only happens
+/// when `now` is at `NaiveDate::MAX` (≈ year 262143), but the
+/// alternative is a worker-killing panic on an extreme edge case.
+/// One hour is short enough for the daily cap to recover quickly
+/// after the worker wakes up.
+fn duration_until_next_utc_midnight_from(now: chrono::DateTime<chrono::Utc>) -> Duration {
+    const FALLBACK: Duration = Duration::from_secs(3600);
+    let Some(tomorrow) = now.date_naive().succ_opt() else {
+        tracing::warn!(
+            target: "query_server::shadow",
+            "could not compute next UTC midnight (date overflow); falling back to 1-hour sleep"
+        );
+        return FALLBACK;
+    };
+    let midnight_opt = Utc.with_ymd_and_hms(tomorrow.year(), tomorrow.month(), tomorrow.day(), 0, 0, 0);
+    let Some(midnight) = midnight_opt.single() else {
+        tracing::warn!(
+            target: "query_server::shadow",
+            "next UTC midnight is ambiguous (system clock skew?); falling back to 1-hour sleep"
+        );
+        return FALLBACK;
+    };
+    let ms = (midnight - now).num_milliseconds().max(0) as u64;
+    Duration::from_millis(ms)
 }
 
 // --- Tests --------------------------------------------------------------
@@ -1527,6 +1561,81 @@ mod tests {
     }
 
     // --- Queue-full warning throttle ---
+
+    // --- UTC-midnight calculation ---
+
+    #[test]
+    fn midnight_from_midday_is_about_twelve_hours() {
+        let noon = Utc.with_ymd_and_hms(2026, 4, 25, 12, 0, 0).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(noon);
+        // 12 hours exactly. Pinning to the second to flag any tz-offset bug.
+        assert_eq!(d, Duration::from_secs(12 * 3600));
+    }
+
+    #[test]
+    fn midnight_from_one_second_before_midnight_is_one_second() {
+        // 23:59:59 → next midnight is 1 s away.
+        let just_before = Utc.with_ymd_and_hms(2026, 4, 25, 23, 59, 59).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(just_before);
+        assert_eq!(d, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn midnight_handles_end_of_month_rollover() {
+        // 2026-04-30 → 2026-05-01. The naive `now.date() + 1.day()`
+        // approach has historically tripped people up on end-of-month;
+        // chrono's `succ_opt()` handles it correctly. Pin that.
+        let last_day_of_april = Utc.with_ymd_and_hms(2026, 4, 30, 23, 59, 0).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(last_day_of_april);
+        // From 23:59 to next midnight = 60 s, regardless of the
+        // calendar boundary.
+        assert_eq!(d, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn midnight_handles_end_of_year_rollover() {
+        // 2026-12-31 23:59:30 → 2027-01-01 00:00:00 (30 s)
+        let nye = Utc.with_ymd_and_hms(2026, 12, 31, 23, 59, 30).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(nye);
+        assert_eq!(d, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn midnight_handles_leap_day() {
+        // 2028-02-28 (leap year) → 2028-02-29, not 2028-03-01.
+        // Pin chrono's leap-year correctness; if it ever flipped to
+        // skipping Feb 29 the daily counter would be 24 h late on the
+        // first reset of every leap year.
+        let feb_28_2028 = Utc.with_ymd_and_hms(2028, 2, 28, 23, 0, 0).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(feb_28_2028);
+        // 23:00 → next midnight is 1 hour later, on Feb 29.
+        assert_eq!(d, Duration::from_secs(3600));
+
+        // Then from Feb 29 23:00, next midnight is Mar 1.
+        let feb_29_2028 = Utc.with_ymd_and_hms(2028, 2, 29, 23, 0, 0).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(feb_29_2028);
+        assert_eq!(d, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn midnight_falls_back_on_date_overflow() {
+        // chrono's NaiveDate::MAX is ~year 262143. succ_opt() returns
+        // None there; we don't panic, we fall back to a 1-hour sleep.
+        // We can't construct DateTime<Utc>::MAX directly because the
+        // Utc.with_ymd_and_hms builder rejects out-of-range dates, so
+        // we use the actual MAX naive date.
+        use chrono::NaiveDateTime;
+        let max_naive = chrono::NaiveDate::MAX
+            .and_hms_opt(0, 0, 0)
+            .expect("max date 00:00:00 is constructible");
+        let extreme = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+            NaiveDateTime::from(max_naive),
+            chrono::Utc,
+        );
+        let d = duration_until_next_utc_midnight_from(extreme);
+        // Falls back to 1 hour rather than panicking.
+        assert_eq!(d, Duration::from_secs(3600));
+    }
 
     #[test]
     fn warn_queue_full_throttled_runs_without_panic() {
