@@ -161,6 +161,20 @@ pub struct BuildStats {
 /// per-country indexes that query faster (smaller term dicts, tighter
 /// BM25) — see `tantivy_<cc>/` layout consumed by `Forward::open`.
 pub fn build(source: &Path, dest: &Path) -> Result<BuildStats, String> {
+    build_with_heap(source, dest, default_heap_bytes())
+}
+
+/// Default tantivy `IndexWriter` heap budget. 512 MB is sized to keep
+/// AU's ~100 MB tantivy dataset entirely in one in-memory segment,
+/// with substantial headroom; planet operators should bump this via
+/// `--tantivy-heap-mb` until the build's [stage] timing for the
+/// commit phase stops dominating wallclock. See
+/// docs/performance/tantivy-heap-2026-04-25.md for the analysis.
+pub fn default_heap_bytes() -> usize {
+    512 * 1024 * 1024
+}
+
+pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<BuildStats, String> {
     let source_str = source
         .to_str()
         .ok_or_else(|| format!("non-utf8 source path: {}", source.display()))?;
@@ -183,7 +197,7 @@ pub fn build(source: &Path, dest: &Path) -> Result<BuildStats, String> {
     register_tokenizer(&t_index);
 
     let mut writer: IndexWriter = t_index
-        .writer(200_000_000)
+        .writer(heap_bytes)
         .map_err(|e| format!("tantivy writer: {e}"))?;
 
     let mut stats = BuildStats::default();
@@ -279,6 +293,14 @@ pub fn build_partitioned(
     source: &Path,
     dest_root: &Path,
 ) -> Result<std::collections::HashMap<[u8; 2], BuildStats>, String> {
+    build_partitioned_with_heap(source, dest_root, default_heap_bytes())
+}
+
+pub fn build_partitioned_with_heap(
+    source: &Path,
+    dest_root: &Path,
+    heap_bytes: usize,
+) -> Result<std::collections::HashMap<[u8; 2], BuildStats>, String> {
     use std::collections::HashMap as Map;
 
     let source_str = source
@@ -311,6 +333,7 @@ pub fn build_partitioned(
         dest_root: &Path,
         schema: &Schema,
         cc: [u8; 2],
+        heap_bytes: usize,
     ) -> Result<&'a mut CountryBuild, String> {
         if !per_country.contains_key(&cc) {
             let cc_lower = [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()];
@@ -328,7 +351,7 @@ pub fn build_partitioned(
                 .map_err(|e| format!("create tantivy {}: {}", dir.display(), e))?;
             register_tokenizer(&t_index);
             let writer = t_index
-                .writer(100_000_000)
+                .writer(heap_bytes)
                 .map_err(|e| format!("tantivy writer: {e}"))?;
             per_country.insert(
                 cc,
@@ -366,7 +389,7 @@ pub fn build_partitioned(
             let Some(cc) = country_bytes(admin.country_code) else {
                 continue;
             };
-            let cb = get_or_create(&mut per_country, dest_root, &schema_handle.schema, cc)?;
+            let cb = get_or_create(&mut per_country, dest_root, &schema_handle.schema, cc, heap_bytes)?;
             cb.writer
                 .add_document(tantivy_doc(
                     &schema_handle,
@@ -410,7 +433,7 @@ pub fn build_partitioned(
         if !seen.insert((way.name_id, suburb_key, cc)) {
             continue;
         }
-        let cb = get_or_create(&mut per_country, dest_root, &schema_handle.schema, cc)?;
+        let cb = get_or_create(&mut per_country, dest_root, &schema_handle.schema, cc, heap_bytes)?;
         cb.writer
             .add_document(tantivy_doc(
                 &schema_handle,

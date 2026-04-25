@@ -30,7 +30,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!(
-            "Usage: {} <reverse-index-dir> [<tantivy-dir>] [--partition-by-country]",
+            "Usage: {} <reverse-index-dir> [<tantivy-dir>] [--partition-by-country] [--tantivy-heap-mb N]",
             args.first().map(String::as_str).unwrap_or("build-forward-index")
         );
         std::process::exit(2);
@@ -39,10 +39,23 @@ fn main() {
     let source = PathBuf::from(&args[1]);
     let partition = args.iter().any(|a| a == "--partition-by-country");
 
+    // --tantivy-heap-mb sets the per-IndexWriter heap budget. Default
+    // 512 MB is sized for AU's ~100 MB tantivy dataset to fit in one
+    // in-memory segment with headroom. Planet operators should bump
+    // this — empirical sweet spot lives near the dataset's working
+    // set size; see docs/performance/tantivy-heap-2026-04-25.md.
+    let heap_mb: usize = args
+        .iter()
+        .position(|a| a == "--tantivy-heap-mb")
+        .and_then(|p| args.get(p + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(512);
+    let heap_bytes = heap_mb.saturating_mul(1024 * 1024);
+
     let t0 = std::time::Instant::now();
     let result: Result<(), String> = if partition {
-        eprintln!("Building per-country tantivy indexes under {}", source.display());
-        forward::build_partitioned(&source, &source).map(|stats| {
+        eprintln!("Building per-country tantivy indexes under {} (heap={} MB)", source.display(), heap_mb);
+        forward::build_partitioned_with_heap(&source, &source, heap_bytes).map(|stats| {
             let mut countries: Vec<_> = stats.keys().collect();
             countries.sort();
             for cc in countries {
@@ -61,8 +74,8 @@ fn main() {
             .find(|a| !a.starts_with("--"))
             .map(PathBuf::from)
             .unwrap_or_else(|| source.join("tantivy"));
-        eprintln!("Building monolithic forward index: {} -> {}", source.display(), dest.display());
-        forward::build(&source, &dest).map(|stats| {
+        eprintln!("Building monolithic forward index: {} -> {} (heap={} MB)", source.display(), dest.display(), heap_mb);
+        forward::build_with_heap(&source, &dest, heap_bytes).map(|stats| {
             eprintln!(
                 "Indexed {} places + {} streets in {:.1}s",
                 stats.places,
