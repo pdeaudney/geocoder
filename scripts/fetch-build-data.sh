@@ -40,8 +40,16 @@
 #   lbzip2  — parallel bzip2 decoder. WoF planet SQLite ships as ~8.6 GB
 #             of single-stream bzip2; lbzip2 decompresses it 3–5× faster
 #             than stock bzip2 -d on a multi-core box. Wire-compatible
-#             with bzip2 output. Auto-detected; falls back to bzip2 -d
-#             when not installed.
+#             with bzip2 output. Auto-detected.
+#   pbzip2  — alternative parallel decoder. Note: pbzip2 only fully
+#             parallelises files that were *encoded* with pbzip2 (multi-
+#             stream layout); on a stock-bzip2 single-stream file like
+#             the WoF distribution it falls back to single-threaded
+#             decompression. We still prefer it over plain bzip2 because
+#             it overlaps decompress + I/O on a separate thread (~10–20 %
+#             win), and many older LTS distros ship pbzip2 by default.
+#   The script picks the best available decoder in priority order
+#   lbzip2 → pbzip2 → bzip2.
 #
 # Env vars:
 #   DATA_DIR             default ./data
@@ -99,12 +107,25 @@ fi
 
 mkdir -p "$DATA_DIR"
 
-# Pick the fastest available bzip2 decoder. lbzip2 parallelises bz2
-# decompression by pipelining block decodes across cores; on the WoF
-# planet 8.6 GB file the difference is roughly 3–5× wall-time saved.
-# Wire-compatible with bzip2 output, so callers don't need to know.
+# Pick the fastest available bzip2 decoder.
+#
+#   lbzip2 — true block-level parallelism on any bz2 input, including
+#            stock single-stream files like the WoF distribution.
+#            ~3–5× faster than stock bzip2 -d on a multi-core box.
+#   pbzip2 — parallel only on pbzip2-encoded multi-stream files; on
+#            single-stream input (which WoF is) it falls back to
+#            single-threaded decompression with a small I/O-overlap
+#            win (~10–20 %). We still pick it over plain bzip2
+#            because the overlap is real and pbzip2 is shipped by
+#            default in more LTS distros than lbzip2.
+#   bzip2  — single-threaded baseline.
+#
+# All three are wire-compatible — they read the same .bz2 file
+# format, so callers don't need to know which one ran.
 if command -v lbzip2 >/dev/null 2>&1; then
     BZIP2_D="lbzip2 -d"
+elif command -v pbzip2 >/dev/null 2>&1; then
+    BZIP2_D="pbzip2 -d"
 else
     BZIP2_D="bzip2 -d"
 fi
