@@ -20,6 +20,7 @@ use query_server::telemetry;
 use query_server::{Index, DEFAULT_ADMIN_CELL_LEVEL, DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tower_http::trace::{DefaultOnFailure, TraceLayer};
@@ -142,15 +143,52 @@ fn resolve_h3_res(raw: Option<&str>) -> Result<Vec<u8>, Response> {
     }
 }
 
-/// Liveness probe. 200 + `{"status":"ok"}` whenever the process can
-/// accept HTTP — no dependencies touched. Suitable for ALB/NLB/k8s
-/// liveness checks.
+/// Liveness probe. 200 + `{"status":"ok"}` the moment the process
+/// can accept HTTP — no dependencies touched. Use this for k8s
+/// liveness probes and bare-bones ALB checks. Kept as the default
+/// `/healthz` route for backwards compatibility with scrapers
+/// configured before we split liveness vs readiness.
 async fn healthz() -> Response {
+    healthz_live().await
+}
+
+async fn healthz_live() -> Response {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         r#"{"status":"ok"}"#,
     )
         .into_response()
+}
+
+/// Readiness probe. **200 only after `Index::load` has succeeded**;
+/// 503 while the index is still loading or after a swap that hasn't
+/// completed. Use this for ALB target-group health checks and k8s
+/// readiness probes so traffic doesn't get routed to instances that
+/// would otherwise return 5XX during the cold-boot mmap-page-in
+/// window.
+///
+/// Differs from `/healthz/live` deliberately: the live probe says
+/// "the process is up"; the ready probe says "this instance can
+/// serve real traffic right now." A k8s pod that's `live=true,
+/// ready=false` is a normal cold-boot state — the kubelet leaves
+/// the container running while the LB skips routing to it.
+async fn healthz_ready(
+    ready: axum::extract::Extension<Arc<AtomicBool>>,
+) -> Response {
+    if ready.0.load(Ordering::Relaxed) {
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            r#"{"status":"ready"}"#,
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            r#"{"status":"loading"}"#,
+        )
+            .into_response()
+    }
 }
 
 /// Prometheus scrape endpoint. Always available — no auth, no
@@ -1223,6 +1261,14 @@ async fn main() {
         "loading index"
     );
     let admin_config = load_admin_config();
+    // Readiness flag — flipped to `true` once the initial Index::load
+    // succeeds. The /healthz/ready probe gates ALB / k8s traffic
+    // routing on this. The flag is also flipped *back* to false if a
+    // hot-reload loses the index (currently unreachable since the
+    // reloader keeps the previous Arc on failure, but worth wiring
+    // through for future failure modes).
+    let ready = Arc::new(AtomicBool::new(false));
+
     let index = match Index::load_with_admin_config(
         data_dir,
         street_cell_level,
@@ -1230,7 +1276,10 @@ async fn main() {
         search_distance,
         admin_config,
     ) {
-        Ok(idx) => Arc::new(ArcSwap::from(Arc::new(idx))),
+        Ok(idx) => {
+            ready.store(true, Ordering::Relaxed);
+            Arc::new(ArcSwap::from(Arc::new(idx)))
+        }
         Err(e) => {
             tracing::error!(
                 target: "query_server::startup",
@@ -1376,6 +1425,8 @@ async fn main() {
     #[cfg(feature = "forward")]
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/healthz/live", get(healthz_live))
+        .route("/healthz/ready", get(healthz_ready))
         .route("/healthz/indexes", get(healthz_indexes))
         .route("/metrics", get(metrics_handler))
         .route("/reverse", get(reverse_geocode))
@@ -1390,10 +1441,13 @@ async fn main() {
         .layer(axum::Extension(autocomplete_idx.clone()))
         .layer(axum::Extension(ip_db.clone()))
         .layer(axum::Extension(shadow_dispatcher.clone()))
-        .layer(axum::Extension(metrics.clone()));
+        .layer(axum::Extension(metrics.clone()))
+        .layer(axum::Extension(ready.clone()));
     #[cfg(not(feature = "forward"))]
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/healthz/live", get(healthz_live))
+        .route("/healthz/ready", get(healthz_ready))
         .route("/healthz/indexes", get(healthz_indexes))
         .route("/metrics", get(metrics_handler))
         .route("/reverse", get(reverse_geocode))
@@ -1405,7 +1459,8 @@ async fn main() {
         .layer(axum::Extension(autocomplete_idx.clone()))
         .layer(axum::Extension(ip_db.clone()))
         .layer(axum::Extension(shadow_dispatcher.clone()))
-        .layer(axum::Extension(metrics.clone()));
+        .layer(axum::Extension(metrics.clone()))
+        .layer(axum::Extension(ready.clone()));
 
     let _ = forward_idx; // silence unused when feature disabled
 

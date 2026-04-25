@@ -1,0 +1,181 @@
+## Prometheus alert rules for the traccar-geocoder query server.
+##
+## Drop into your Alertmanager / Prometheus rules-loader (the path
+## depends on your Prometheus config — typically a `rule_files:` glob
+## under `prometheus.yml`).
+##
+## All rules use the metric names emitted by `server/src/metrics.rs`.
+## Latency thresholds match the SLOs documented in `docs/sli-slo.md`;
+## changing them here without updating the SLO doc will cause the two
+## to drift.
+##
+## Severity convention:
+##   - `page`  — wakes someone up. Service-affecting.
+##   - `warn`  — file a ticket / handle in business hours.
+
+groups:
+  - name: geocoder.recording
+    interval: 30s
+    rules:
+      # Pre-aggregated recording rules. Querying these is cheaper than
+      # the raw histograms when several alerts share the same
+      # quantile + window — and they provide a stable label set for
+      # dashboards.
+      - record: geocoder:request_duration_seconds:p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, endpoint) (
+              rate(geocoder_request_duration_seconds_bucket[5m])))
+
+      - record: geocoder:requests:rate_5m
+        expr: sum by (endpoint) (rate(geocoder_requests_total[5m]))
+
+      - record: geocoder:shadow_match_rate_5m
+        expr: |
+          sum by (endpoint) (rate(geocoder_shadow_outcomes_total{outcome="match"}[5m]))
+          /
+          sum by (endpoint) (rate(geocoder_shadow_outcomes_total{outcome=~"match|mismatch"}[5m]))
+
+  - name: geocoder.alerts
+    interval: 30s
+    rules:
+      # --- Latency ---
+
+      - alert: GeocoderHighP99Latency
+        expr: geocoder:request_duration_seconds:p99_5m > 0.1
+        for: 5m
+        labels:
+          severity: page
+          service: geocoder
+        annotations:
+          summary: "Geocoder p99 on {{ $labels.endpoint }} above 100 ms for 5 min"
+          description: |
+            p99 = {{ $value | humanizeDuration }} on {{ $labels.endpoint }}.
+            Common causes:
+              - mmap page-in storm (cold cache, kernel page cache evicted by neighbour)
+              - undersized instance (CPU saturation under traffic spike)
+              - tantivy index segment fragmentation (rebuild + redeploy)
+            Runbook: ../../RUNBOOK.md#high-p99-latency
+
+      # --- Traffic disappearance ---
+      #
+      # Requires `predict_linear` to extrapolate the trend; we just
+      # use a hard floor below historical baseline. If the deploy
+      # doesn't take traffic, we want a page within minutes.
+
+      - alert: GeocoderTrafficDropped
+        expr: |
+          sum(geocoder:requests:rate_5m) <
+            (avg_over_time(sum(geocoder:requests:rate_5m)[1h:5m]) * 0.5)
+        for: 5m
+        labels:
+          severity: page
+          service: geocoder
+        annotations:
+          summary: "Geocoder traffic dropped to <50% of last hour's average"
+          description: |
+            Currently {{ $value | printf "%.1f" }} req/s vs ~2× that an hour ago.
+            Common causes:
+              - LB target-group instances unhealthy (check `Healthy host count`)
+              - Upstream client misconfiguration
+              - DNS / routing change
+            Runbook: ../../RUNBOOK.md#traffic-disappearance
+
+      # --- Shadow infrastructure ---
+
+      - alert: GeocoderShadowExportErrors
+        # `google_error` and `timeout` outcomes indicate shadow
+        # infrastructure (network to Google, key validity) is in
+        # trouble — not the same as outcome=mismatch (which is the
+        # accuracy signal we *want* to watch).
+        expr: |
+          sum(rate(geocoder_shadow_outcomes_total{outcome=~"google_error|timeout"}[5m]))
+            > 0.1
+        for: 5m
+        labels:
+          severity: warn
+          service: geocoder
+        annotations:
+          summary: "Shadow validator hitting Google errors / timeouts"
+          description: |
+            Rate = {{ $value }} errors/s. Check Google API status,
+            key validity, and outbound network. The user-facing
+            request path is unaffected (shadow is fire-and-forget).
+            Runbook: ../../RUNBOOK.md#shadow-export-errors
+
+      - alert: GeocoderShadowAuthDisabled
+        # `auth_disabled` is sticky — once REQUEST_DENIED triggers
+        # it, only a process restart re-enables shadow. Rate > 0
+        # for any sustained window means the disable has happened
+        # and someone needs to fix the key.
+        expr: rate(geocoder_shadow_outcomes_total{outcome="auth_disabled"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: page
+          service: geocoder
+        annotations:
+          summary: "Shadow validator disabled — bad GOOGLE_GEOCODING_API_KEY"
+          description: |
+            Google returned REQUEST_DENIED. The shadow worker has
+            disabled itself for the lifetime of the process; a
+            restart with a valid key is required to re-arm.
+            Runbook: ../../RUNBOOK.md#shadow-auth-disabled
+
+      - alert: GeocoderShadowQueueSaturated
+        # Bounded mpsc filling means sampling is overwhelming the
+        # worker — shadow accuracy data has gaps. Not service-
+        # affecting; warn-only.
+        expr: rate(geocoder_shadow_queue_full_total[5m]) > 0.01
+        for: 10m
+        labels:
+          severity: warn
+          service: geocoder
+        annotations:
+          summary: "Shadow queue full — dropping samples"
+          description: |
+            Bounded mpsc saturated. Either lower
+            GOOGLE_GEOCODING_SAMPLE_RATE or raise
+            GOOGLE_GEOCODING_QUEUE_CAPACITY / _INFLIGHT_CAP.
+            Runbook: ../../RUNBOOK.md#shadow-queue-full
+
+      # --- Accuracy regression ---
+      #
+      # Falls under "warn" rather than "page" because a drop in
+      # match-rate against Google could be a real accuracy regression
+      # *or* Google's data getting "wronger" — either way it's a
+      # business-hours conversation, not a 3am incident.
+
+      - alert: GeocoderAccuracyRegression
+        expr: geocoder:shadow_match_rate_5m < 0.85
+        for: 30m
+        labels:
+          severity: warn
+          service: geocoder
+        annotations:
+          summary: "Shadow match rate on {{ $labels.endpoint }} dropped below 85% for 30 min"
+          description: |
+            Currently {{ $value | humanizePercentage }}.
+            Compare to historical baseline; rule out Google API
+            change before assuming a regression on our side.
+            Runbook: ../../RUNBOOK.md#accuracy-regression
+
+      # --- Healthy host count ---
+      #
+      # Source of truth depends on your platform: ALB target groups,
+      # k8s endpoints, or service-mesh. Below is the AWS ALB pattern
+      # using metrics from the CloudWatch exporter or the AWS Managed
+      # Prometheus agent. Adjust the metric name to your environment.
+
+      - alert: GeocoderInstancesUnhealthy
+        expr: aws_alb_healthy_host_count{target_group=~"geocoder.*"} < 2
+        for: 10m
+        labels:
+          severity: page
+          service: geocoder
+        annotations:
+          summary: "Geocoder ALB has fewer than 2 healthy instances"
+          description: |
+            Healthy host count = {{ $value }}.
+            Check: instance health-check failures (mmap page-in?),
+            recent deploy, kernel OOM, ASG launch-template config.
+            Runbook: ../../RUNBOOK.md#instances-unhealthy
