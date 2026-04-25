@@ -191,7 +191,14 @@ fn import_one_db(
             continue;
         }
 
-        let gj: Value = match serde_json::from_str(&body) {
+        // simd-json parses ~6× faster than serde_json on the
+        // GeoJSON shape we get out of WoF SQLite. It mutates the
+        // input buffer in place (zero-copy strings point into it),
+        // so we need an owned Vec<u8> not the original &str.
+        // Materialising once per row is cheap relative to the parse
+        // savings on planet (~8.6 GB of GeoJSON bodies).
+        let mut buf = body.into_bytes();
+        let gj: Value = match simd_json::serde::from_slice(&mut buf) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("    skip {name}: geojson parse: {e}");

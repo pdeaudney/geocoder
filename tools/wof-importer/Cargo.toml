@@ -9,7 +9,12 @@ publish = false
 [dependencies]
 mimalloc = { version = "0.1", default-features = false }
 rusqlite = { version = "0.31", features = ["bundled"] }
+# Parse via simd-json (~3 GB/s on x86-64 AVX2, ~1.5 GB/s on aarch64 NEON)
+# but keep serde_json for the Value type — simd-json's `serde` integration
+# deserialises directly into serde_json::Value with no Value-type churn
+# in the consumer code (extract_outer_rings et al stay unchanged).
 serde_json = "1"
+simd-json = { version = "0.13", default-features = false, features = ["serde_impl"] }
 
 [[bin]]
 name = "wof-importer"
