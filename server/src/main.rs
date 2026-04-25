@@ -1201,8 +1201,8 @@ async fn main() {
     // Telemetry first — every line that follows lands in stdout via tracing
     // and (when OTEL_TRACE_ENABLED + endpoint are set) any startup spans
     // are eligible for OTLP export. Hold the guard for the lifetime of
-    // main() so the batch span processor can flush on shutdown.
-    let _telemetry = telemetry::init();
+    // main() so the batch span processor + metrics reader flush on shutdown.
+    let telemetry_guard = telemetry::init();
 
     let args: Vec<String> = std::env::args().collect();
     let data_dir = args.get(1).map(|s| s.as_str()).unwrap_or(".");
@@ -1253,11 +1253,12 @@ async fn main() {
         search_distance,
     );
 
-    // Prometheus registry. Always created (no env-var gate) — the
-    // /metrics endpoint costs nothing when nobody scrapes it, and
-    // the per-handler observation overhead is sub-microsecond.
-    // Operators gate scrape access at the network layer.
-    let metrics = Metrics::new();
+    // Prometheus + OTel metrics. Always created (no env-var gate) for
+    // the Prometheus side — the /metrics endpoint costs nothing when
+    // nobody scrapes it, and the per-handler observation overhead is
+    // sub-microsecond. The OTel side is wired only when telemetry::init
+    // produced a meter provider (OTEL_METRICS_ENABLED + endpoint).
+    let metrics = Metrics::with_optional_meter(telemetry_guard.meter_provider());
     let _ = canonical_country(None); // warm the static table on startup
 
     // Optional shadow validator against Google's Geocoding API.

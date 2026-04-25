@@ -40,7 +40,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{BatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use tracing::callsite::Identifier;
@@ -80,17 +81,32 @@ const DEFAULT_DEDUP_WINDOW_SECS: u64 = 30;
 /// emissions from the handler code.
 const DEDUP_TARGET_PREFIX: &str = "opentelemetry";
 
+/// Default periodic-export interval for OTLP metrics in milliseconds.
+/// 30 s is shorter than the OTel SDK's 60 s default — fresher dashboards
+/// at our cardinality, still well under the bandwidth a collector can
+/// reasonably ingest. Override via `OTEL_METRIC_EXPORT_INTERVAL`.
+const DEFAULT_METRIC_EXPORT_INTERVAL_MS: u64 = 30_000;
+
+/// Lower / upper bounds for the metric-export interval parser. Values
+/// outside this range are clamped + logged. The lower bound stops a
+/// misconfigured operator from saturating their collector with sub-second
+/// pushes; the upper bound keeps dashboards feeling live.
+const MIN_METRIC_EXPORT_INTERVAL_MS: u64 = 1_000;
+const MAX_METRIC_EXPORT_INTERVAL_MS: u64 = 300_000;
+
 /// Held by `main()` for the lifetime of the process. `Drop` flushes the
-/// batch span processor so spans buffered at shutdown still reach the
-/// collector. Without this, sigterm during a graceful shutdown can lose
-/// the last second or two of trace data.
+/// batch span processor and the periodic metrics reader so signals
+/// buffered at shutdown still reach the collector. Without this, sigterm
+/// during a graceful shutdown can lose the last second or two of trace
+/// data and the last export interval of metric data.
 pub struct TelemetryGuard {
-    provider: Option<SdkTracerProvider>,
+    tracer_provider: Option<SdkTracerProvider>,
+    meter_provider: Option<SdkMeterProvider>,
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if let Some(provider) = self.provider.take() {
+        if let Some(provider) = self.tracer_provider.take() {
             // shutdown() is sync and blocks up to the configured export
             // timeout; the BatchConfig below caps that at 5s so a misconfigured
             // collector can't hang process exit indefinitely.
@@ -98,6 +114,25 @@ impl Drop for TelemetryGuard {
                 eprintln!("telemetry: tracer provider shutdown error: {err}");
             }
         }
+        if let Some(provider) = self.meter_provider.take() {
+            // Same shape as the tracer shutdown — flush any pending
+            // metrics export, bounded by the periodic reader's timeout.
+            if let Err(err) = provider.shutdown() {
+                eprintln!("telemetry: meter provider shutdown error: {err}");
+            }
+        }
+    }
+}
+
+/// Public accessor for the meter provider (when configured) so
+/// `Metrics::new` can build instruments against the same SDK provider
+/// the OTLP exporter is reading from. `None` when OTLP metrics export
+/// is disabled — callers should still build a working `Metrics` (the
+/// Prometheus surface remains unconditional) but skip the OTel-side
+/// counters.
+impl TelemetryGuard {
+    pub fn meter_provider(&self) -> Option<&SdkMeterProvider> {
+        self.meter_provider.as_ref()
     }
 }
 
@@ -143,7 +178,40 @@ pub fn init() -> TelemetryGuard {
         );
     }
 
-    TelemetryGuard { provider }
+    // Build the meter provider in parallel. Independent enable flag
+    // (OTEL_METRICS_ENABLED) so operators can ship trace-only or
+    // metrics-only deployments. When disabled, `meter_provider` is
+    // `None` and `Metrics::new` runs the Prometheus-only path.
+    let meter_provider = match build_meter_provider() {
+        Ok(Some(p)) => {
+            tracing::info!(
+                target: "query_server::telemetry",
+                otlp_endpoint = %resolved_endpoint(),
+                otlp_protocol = %resolved_protocol_name(),
+                interval_ms = resolve_metric_export_interval(
+                    std::env::var("OTEL_METRIC_EXPORT_INTERVAL").ok().as_deref()
+                ).as_millis() as u64,
+                "OTLP metrics enabled"
+            );
+            Some(p)
+        }
+        Ok(None) => {
+            tracing::info!(
+                target: "query_server::telemetry",
+                "OTLP metrics disabled — set OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_METRICS_ENABLED=true to enable"
+            );
+            None
+        }
+        Err(err) => {
+            eprintln!("telemetry: OTLP metrics init failed, continuing without OTLP metrics: {err}");
+            None
+        }
+    };
+
+    TelemetryGuard {
+        tracer_provider: provider,
+        meter_provider,
+    }
 }
 
 fn build_env_filter() -> EnvFilter {
@@ -340,6 +408,109 @@ where
 
     let layer = tracing_opentelemetry::layer().with_tracer(tracer).boxed();
     Ok(Some((layer, provider)))
+}
+
+/// If the operator has opted in (or implicitly opted in by setting an
+/// endpoint), build the OTLP metrics exporter wrapped in a periodic
+/// reader. The returned provider is the source the metrics module
+/// uses to build instruments, so any observation goes both to the
+/// Prometheus crate side (via dual-write in `Metrics`) and to OTLP via
+/// the periodic reader registered here.
+fn build_meter_provider() -> Result<Option<SdkMeterProvider>, String> {
+    if !metrics_enabled() {
+        return Ok(None);
+    }
+
+    let endpoint = resolved_endpoint();
+    let protocol = resolved_protocol();
+    let interval = resolve_metric_export_interval(
+        std::env::var("OTEL_METRIC_EXPORT_INTERVAL").ok().as_deref(),
+    );
+
+    let exporter = match protocol {
+        Protocol::Grpc => MetricExporter::builder()
+            .with_tonic()
+            .with_endpoint(&endpoint)
+            .with_timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| format!("build grpc metrics exporter: {e}"))?,
+        Protocol::HttpBinary | Protocol::HttpJson => MetricExporter::builder()
+            .with_http()
+            .with_endpoint(&endpoint)
+            .with_protocol(protocol)
+            .with_timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| format!("build http metrics exporter: {e}"))?,
+    };
+
+    let reader = PeriodicReader::builder(exporter)
+        .with_interval(interval)
+        .build();
+
+    let provider = SdkMeterProvider::builder()
+        .with_resource(build_resource())
+        .with_reader(reader)
+        .build();
+
+    // Set the global meter provider so any library (including ours)
+    // that uses `opentelemetry::global::meter(...)` picks it up.
+    opentelemetry::global::set_meter_provider(provider.clone());
+
+    Ok(Some(provider))
+}
+
+/// Resolve the OTLP metrics master switch. Mirrors the
+/// `OTEL_TRACE_ENABLED` semantics so an operator who knows one knows both.
+fn metrics_enabled() -> bool {
+    resolve_metrics_enabled(
+        std::env::var("OTEL_METRICS_ENABLED").ok().as_deref(),
+        std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok(),
+    )
+}
+
+/// Pure form of [`metrics_enabled`]. The truth matrix is identical to
+/// `resolve_tracing_enabled` — kept as a separate function (rather than
+/// reusing the trace one) so an operator's expectation of "the two
+/// flags are independent and parallel" is reflected in the code.
+pub(crate) fn resolve_metrics_enabled(flag: Option<&str>, endpoint_set: bool) -> bool {
+    match flag {
+        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => true,
+            "false" | "0" | "no" | "off" | "" => false,
+            other => {
+                eprintln!(
+                    "telemetry: unrecognised OTEL_METRICS_ENABLED={other:?}; treating as disabled"
+                );
+                false
+            }
+        },
+        None => endpoint_set,
+    }
+}
+
+/// Parse `OTEL_METRIC_EXPORT_INTERVAL` (milliseconds, per the OTel
+/// spec). Clamps out-of-range values to `[1s, 300s]`. Garbage falls
+/// back to the default (30 s).
+pub(crate) fn resolve_metric_export_interval(raw: Option<&str>) -> Duration {
+    let ms = match raw {
+        None => DEFAULT_METRIC_EXPORT_INTERVAL_MS,
+        Some(v) => match v.trim().parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!(
+                    "telemetry: unrecognised OTEL_METRIC_EXPORT_INTERVAL={v:?}; using default {DEFAULT_METRIC_EXPORT_INTERVAL_MS}ms"
+                );
+                DEFAULT_METRIC_EXPORT_INTERVAL_MS
+            }
+        },
+    };
+    let clamped = ms.clamp(MIN_METRIC_EXPORT_INTERVAL_MS, MAX_METRIC_EXPORT_INTERVAL_MS);
+    if clamped != ms {
+        eprintln!(
+            "telemetry: OTEL_METRIC_EXPORT_INTERVAL={ms}ms clamped to {clamped}ms (range {MIN_METRIC_EXPORT_INTERVAL_MS}–{MAX_METRIC_EXPORT_INTERVAL_MS}ms)"
+        );
+    }
+    Duration::from_millis(clamped)
 }
 
 /// Resolve the OTLP master switch.
@@ -727,6 +898,83 @@ mod tests {
         assert!(!filter.should_emit(shared_otel_meta()));
         std::thread::sleep(Duration::from_millis(40));
         assert!(filter.should_emit(shared_otel_meta()));
+    }
+
+    // --- OTEL_METRICS_ENABLED truth matrix ---
+
+    #[test]
+    fn metrics_enabled_unset_follows_endpoint() {
+        assert!(resolve_metrics_enabled(None, true));
+        assert!(!resolve_metrics_enabled(None, false));
+    }
+
+    #[test]
+    fn metrics_enabled_true_variants() {
+        for v in ["true", "1", "yes", "on", "TRUE", " On "] {
+            assert!(resolve_metrics_enabled(Some(v), false), "{v:?} should enable");
+        }
+    }
+
+    #[test]
+    fn metrics_enabled_false_variants_disable_even_with_endpoint() {
+        for v in ["false", "0", "no", "off", "FALSE", " Off ", ""] {
+            assert!(!resolve_metrics_enabled(Some(v), true), "{v:?} should disable");
+        }
+    }
+
+    #[test]
+    fn metrics_enabled_garbage_disables() {
+        for v in ["maybe", "metrics-please", "yolo"] {
+            assert!(!resolve_metrics_enabled(Some(v), true), "{v:?} should disable");
+        }
+    }
+
+    // --- OTEL_METRIC_EXPORT_INTERVAL parser ---
+
+    #[test]
+    fn metric_export_interval_default_when_unset() {
+        assert_eq!(
+            resolve_metric_export_interval(None),
+            Duration::from_millis(DEFAULT_METRIC_EXPORT_INTERVAL_MS)
+        );
+    }
+
+    #[test]
+    fn metric_export_interval_explicit_value_honoured() {
+        assert_eq!(
+            resolve_metric_export_interval(Some("60000")),
+            Duration::from_millis(60_000)
+        );
+        assert_eq!(
+            resolve_metric_export_interval(Some(" 5000 ")),
+            Duration::from_millis(5_000)
+        );
+    }
+
+    #[test]
+    fn metric_export_interval_clamps_below_min() {
+        // 1 ms → clamp up to 1s.
+        assert_eq!(
+            resolve_metric_export_interval(Some("1")),
+            Duration::from_millis(MIN_METRIC_EXPORT_INTERVAL_MS)
+        );
+    }
+
+    #[test]
+    fn metric_export_interval_clamps_above_max() {
+        // An hour → clamp down to 5 min.
+        assert_eq!(
+            resolve_metric_export_interval(Some("3600000")),
+            Duration::from_millis(MAX_METRIC_EXPORT_INTERVAL_MS)
+        );
+    }
+
+    #[test]
+    fn metric_export_interval_garbage_falls_back_to_default() {
+        assert_eq!(
+            resolve_metric_export_interval(Some("forever")),
+            Duration::from_millis(DEFAULT_METRIC_EXPORT_INTERVAL_MS)
+        );
     }
 
     #[test]

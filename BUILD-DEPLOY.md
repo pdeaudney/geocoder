@@ -554,6 +554,59 @@ require a sliding-window estimator and would disagree with whichever
 window the dashboard chose anyway. The counter form composes correctly
 with PromQL aggregations and recording rules.
 
+### Same metrics over OTLP
+
+The same six series are also pushed to an OTel collector when
+`OTEL_METRICS_ENABLED=true` (or `OTEL_EXPORTER_OTLP_ENDPOINT` is set
+and the master switch is unset). One in-process meter provider feeds
+both surfaces — the Prometheus `/metrics` text format **and** the
+OTLP push — so dashboards aggregating across the two backends can't
+disagree.
+
+| Variable                          | Default       | Effect                                                           |
+|-----------------------------------|---------------|------------------------------------------------------------------|
+| `OTEL_METRICS_ENABLED`            | follows endpoint | Operator on/off, identical truth-matrix to `OTEL_TRACE_ENABLED`. Unset → enabled iff endpoint is set. |
+| `OTEL_METRIC_EXPORT_INTERVAL`     | `30000` (ms)  | Periodic export interval. Clamped to `[1000, 300000]`. Spec-named per OTel.                          |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`     | `http://localhost:4317` | Shared with traces — same wire path.                                                                 |
+| `OTEL_EXPORTER_OTLP_PROTOCOL`     | `grpc`        | Shared with traces. Per-signal protocol override is out of scope.                                    |
+
+The push is independent from the scrape: a dead OTel collector keeps
+`/metrics` working unchanged, observation latency stays sub-millisecond,
+and OTel's internal-logs warnings about export failures get
+swallowed by the dedup filter so stdout doesn't flood under sustained
+outage.
+
+Smoke test:
+
+```bash
+docker run --rm -p 4317:4317 -p 4318:4318 otel/opentelemetry-collector-contrib --config <(cat <<EOF
+receivers:
+  otlp:
+    protocols:
+      grpc: {}
+      http: {}
+exporters:
+  debug: { verbosity: detailed }
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]
+EOF
+)
+
+OTEL_TRACE_ENABLED=true \
+OTEL_METRICS_ENABLED=true \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+OTEL_METRIC_EXPORT_INTERVAL=5000 \
+./target/release/query-server data/index &
+
+# Within 5–10 s, the collector logs both traces and metrics. The
+# Prometheus path keeps working in parallel.
+curl -s 'http://localhost:3000/reverse?lat=-33.8568&lon=151.2153' >/dev/null
+curl -s http://localhost:3000/metrics | grep geocoder_requests_total
+```
+
 ### Metrics (legacy ALB-side)
 
 The service doesn't export Prometheus / CloudWatch metrics today.
