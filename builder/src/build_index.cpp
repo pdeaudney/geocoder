@@ -31,6 +31,13 @@
 #include <s2/s2loop.h>
 #include <s2/s2builder.h>
 
+// Vendored at builder/third_party/ankerl/unordered_dense.h (v4.8.1, MIT).
+// Replaces std::unordered_map on the build-time hot path — chained-bucket
+// libstdc++ unordered_map is "slow across the board" on insert-heavy
+// workloads (Ankerl 2022, Allan 2024 benchmarks). See
+// docs/performance/hashmap-choice-2026-04-25.md for the analysis.
+#include <ankerl/unordered_dense.h>
+
 // --- Binary format structs ---
 
 struct WayHeader {
@@ -151,7 +158,11 @@ public:
     const std::vector<char>& data() const { return data_; }
 
 private:
-    std::unordered_map<std::string, uint32_t> index_;
+    // ankerl::unordered_dense::map<std::string, uint32_t> — flat, dense,
+    // separate-payload layout. Hashes short strings via the library's
+    // own avalanching hash, which is faster than libstdc++'s
+    // std::hash<std::string> on the typical 1–30 char names we intern.
+    ankerl::unordered_dense::map<std::string, uint32_t> index_;
     std::vector<char> data_;
 };
 
@@ -159,28 +170,39 @@ private:
 
 static StringPool strings;
 
+// All cell→[ids] maps below use ankerl::unordered_dense::segmented_map.
+// Segmented (vs the regular `map`) means the underlying buckets array
+// grows in 4096-element chunks instead of a single contiguous
+// allocation that has to be reallocated+copied wholesale on every
+// rehash. At planet scale (cell_to_addrs reaches ~100M cells), the
+// segmented variant prevents a single multi-GB rehash from dominating
+// the build's memory + time profile. The dense iterator order and
+// SIMD-probed lookups are unchanged.
+template <typename V>
+using cell_map = ankerl::unordered_dense::segmented_map<uint64_t, V>;
+
 // Streets
 static std::vector<WayHeader> ways;
 static std::vector<NodeCoord> street_nodes;
-static std::unordered_map<uint64_t, std::vector<uint32_t>> cell_to_ways;
+static cell_map<std::vector<uint32_t>> cell_to_ways;
 
 // Addresses
 static std::vector<AddrPoint> addr_points;
-static std::unordered_map<uint64_t, std::vector<uint32_t>> cell_to_addrs;
+static cell_map<std::vector<uint32_t>> cell_to_addrs;
 
 // Interpolation
 static std::vector<InterpWay> interp_ways;
 static std::vector<NodeCoord> interp_nodes;
-static std::unordered_map<uint64_t, std::vector<uint32_t>> cell_to_interps;
+static cell_map<std::vector<uint32_t>> cell_to_interps;
 
 // Admin boundaries
 static std::vector<AdminPolygon> admin_polygons;
 static std::vector<NodeCoord> admin_vertices;
-static std::unordered_map<uint64_t, std::vector<uint32_t>> cell_to_admin;
+static cell_map<std::vector<uint32_t>> cell_to_admin;
 
 // Place=* points (nodes and way centroids tagged as city/town/suburb/etc)
 static std::vector<PlacePoint> place_points;
-static std::unordered_map<uint64_t, std::vector<uint32_t>> cell_to_places;
+static cell_map<std::vector<uint32_t>> cell_to_places;
 static uint64_t place_count_total = 0;
 
 // Localized names from OSM `name:<lang>` tags. Populated inline as we
@@ -919,7 +941,10 @@ static void resolve_interpolation_endpoints() {
         }
     };
 
-    std::unordered_map<CoordKey, uint32_t, CoordHash> addr_by_coord;
+    // Planet-scale: ~1B addr_points hashed by quantised coord. The
+    // segmented variant prevents the single-rehash blowup that would
+    // happen on a flat hashmap.
+    ankerl::unordered_dense::segmented_map<CoordKey, uint32_t, CoordHash> addr_by_coord;
     for (uint32_t i = 0; i < addr_points.size(); i++) {
         CoordKey key{
             static_cast<int32_t>(addr_points[i].lat * 100000),
@@ -1042,18 +1067,18 @@ static std::ofstream open_tmp_out(IndexWriter& iw, const std::string& name) {
 // Write entries file and return offset map. Uses u64 for `current` so
 // crossing the 4 GB mark on planet-scale street_entries raises a clean
 // overflow error instead of wrapping silently.
-static std::unordered_map<uint64_t, uint32_t> write_entries(
+static ankerl::unordered_dense::map<uint64_t, uint32_t> write_entries(
     IndexWriter& iw,
     const std::string& name,
     const std::vector<uint64_t>& sorted_cells,
-    const std::unordered_map<uint64_t, std::vector<uint32_t>>& cell_map
+    const cell_map<std::vector<uint32_t>>& cells
 ) {
-    std::unordered_map<uint64_t, uint32_t> offsets;
+    ankerl::unordered_dense::map<uint64_t, uint32_t> offsets;
     std::ofstream f = open_tmp_out(iw, name);
     uint64_t current = 0;
     for (uint64_t cell_id : sorted_cells) {
-        auto it = cell_map.find(cell_id);
-        if (it == cell_map.end()) continue;
+        auto it = cells.find(cell_id);
+        if (it == cells.end()) continue;
         offsets[cell_id] = checked_u32(current, (name + " cell offset").c_str());
         uint16_t count = static_cast<uint16_t>(std::min(it->second.size(), size_t(65535)));
         f.write(reinterpret_cast<const char*>(&count), sizeof(count));
@@ -1067,10 +1092,10 @@ static void write_cell_index(
     IndexWriter& iw,
     const std::string& cells_name,
     const std::string& entries_name,
-    const std::unordered_map<uint64_t, std::vector<uint32_t>>& cell_map
+    const cell_map<std::vector<uint32_t>>& cells
 ) {
     std::vector<std::pair<uint64_t, std::vector<uint32_t>>> sorted(
-        cell_map.begin(), cell_map.end());
+        cells.begin(), cells.end());
     std::sort(sorted.begin(), sorted.end());
 
     {
@@ -1187,7 +1212,7 @@ static void write_index(const std::string& output_dir) {
         std::ofstream f = open_tmp_out(iw, "geo_cells.bin");
         for (uint64_t cell_id : sorted_geo_cells) {
             f.write(reinterpret_cast<const char*>(&cell_id), sizeof(cell_id));
-            auto write_offset = [&](const std::unordered_map<uint64_t, uint32_t>& offsets) {
+            auto write_offset = [&](const ankerl::unordered_dense::map<uint64_t, uint32_t>& offsets) {
                 auto it = offsets.find(cell_id);
                 uint32_t offset = (it != offsets.end()) ? it->second : NO_DATA;
                 f.write(reinterpret_cast<const char*>(&offset), sizeof(offset));

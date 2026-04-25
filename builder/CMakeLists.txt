@@ -28,6 +28,18 @@ find_package(s2 QUIET)
 
 add_executable(build-index src/build_index.cpp)
 
+# Vendored ankerl::unordered_dense (single-header, MIT-licensed) at
+# third_party/ankerl/. Replaces std::unordered_map across the
+# builder's ingestion path: dense flat storage, separate-payload
+# layout that handles the `vector<u32>` value type cheaply on
+# rehash, and best-in-class iteration which the write_index flush
+# leans on.
+#
+# See docs/performance/hashmap-choice-2026-04-25.md for the
+# benchmark references and analysis behind this choice. Pinned to
+# v4.8.1; refresh by re-vendoring upstream.
+target_include_directories(build-index PRIVATE third_party)
+
 # Warnings + optimisation. -Wconversion in particular catches the
 # narrowing size_t → uint32_t casts the on-disk format is sensitive
 # to; we leave it off by default and let specific call sites assert
