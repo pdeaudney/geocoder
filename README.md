@@ -262,6 +262,25 @@ GET /search?q=Sydney&country_code=au&h3_res=7,9,12
 
 Values are the standard 15-char lowercase hex cell IDs. Cells are computed at query time — nothing new is stored on disk. The same parameter and response field work over gRPC (`repeated uint32 h3_res` on requests, `map<uint32, string> h3` on responses).
 
+### GET /h3
+
+Pure `(lat, lon)` → H3 cell-map computation. Skips reverse-geocoding entirely — no mmap reads, no admin lookup, microsecond-scale per request. Use this when a client only needs spatial-join keys and would otherwise waste a `/reverse` round-trip per coord.
+
+```
+GET /h3?lat=-33.8568&lon=151.2153&h3_res=9
+GET /h3?lat=-33.8568&lon=151.2153&h3_res=7,9,12
+```
+
+```json
+{
+  "lat": -33.8568,
+  "lon": 151.2153,
+  "h3": { "7": "87be0e35cffffff", "9": "89be0e35c0bffff", "12": "8cbe0e35c0943ff" }
+}
+```
+
+`h3_res` is required here (a missing/empty value returns 400 — the call has no other purpose). Same 0–15 range, same 4-resolution cap, same wire-format conventions as the enrichment field on the other endpoints. Identical surface over gRPC: `Geocoder.H3(H3Request) → H3Response`.
+
 ## gRPC
 
 A typed mirror of every REST endpoint. Service definition: [`server/proto/geocoder.proto`](server/proto/geocoder.proto).

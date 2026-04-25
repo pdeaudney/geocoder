@@ -91,6 +91,18 @@ struct IpParams {
     h3_res: Option<String>,
 }
 
+/// `/h3` query — pure (lat, lon) → H3 cell-map computation, no
+/// reverse-geocode. The `h3_res` field is required here (unlike the
+/// enrichment field on other endpoints): a request without resolutions
+/// has no work to do, and silently 200-ing an empty body would be
+/// confusing.
+#[derive(Deserialize)]
+struct H3Params {
+    lat: f64,
+    lon: f64,
+    h3_res: String,
+}
+
 #[cfg(feature = "forward")]
 #[derive(Deserialize)]
 struct SearchParams {
@@ -240,6 +252,57 @@ async fn healthz_indexes(
 
 fn cc_to_string(cc: &[u8; 2]) -> String {
     std::str::from_utf8(cc).unwrap_or("??").to_owned()
+}
+
+/// `/h3?lat=&lon=&h3_res=…` — pure h3o conversion, no reverse-geocode.
+/// Resolves in microseconds (no mmap reads, no admin lookup). Useful
+/// for clients doing high-volume spatial-join enrichment where the
+/// address itself isn't needed and the per-request cost of a /reverse
+/// would dominate.
+///
+/// Differences from the enrichment field on /reverse: `h3_res` is
+/// required here (empty would 200 with an empty body — confusing) and
+/// the response carries no address shape, just `{lat, lon, h3}`.
+#[tracing::instrument(
+    name = "h3",
+    skip_all,
+    fields(
+        geocoder.lat = params.lat,
+        geocoder.lon = params.lon,
+        geocoder.h3_resolutions = tracing::field::Empty,
+    )
+)]
+async fn h3_endpoint(Query(params): Query<H3Params>) -> Response {
+    let resolutions = match query_server::h3_cell::parse_h3_res(&params.h3_res) {
+        Ok(r) => r,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    if resolutions.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "h3_res: at least one resolution required",
+        )
+            .into_response();
+    }
+    tracing::Span::current().record("geocoder.h3_resolutions", resolutions.len());
+
+    let Some(map) = query_server::h3_cell::build_h3_map(params.lat, params.lon, &resolutions)
+    else {
+        // Every requested resolution failed (typically NaN/infinity input
+        // — out-of-range lat/lng are normalised by h3o, not rejected).
+        return (
+            StatusCode::BAD_REQUEST,
+            "h3: no resolution produced a cell — check the coord (NaN/infinity rejected)",
+        )
+            .into_response();
+    };
+
+    let body = serde_json::json!({
+        "lat": params.lat,
+        "lon": params.lon,
+        "h3": map,
+    });
+    axum::Json(body).into_response()
 }
 
 #[tracing::instrument(
@@ -1150,6 +1213,7 @@ async fn main() {
         .route("/validate", get(validate_address))
         .route("/autocomplete", get(autocomplete))
         .route("/geocode/ip", get(ip_geocode))
+        .route("/h3", get(h3_endpoint))
         .layer(trace_layer.clone())
         .layer(axum::Extension(index.clone()))
         .layer(axum::Extension(forward_idx.clone()))
@@ -1162,6 +1226,7 @@ async fn main() {
         .route("/reverse", get(reverse_geocode))
         .route("/autocomplete", get(autocomplete))
         .route("/geocode/ip", get(ip_geocode))
+        .route("/h3", get(h3_endpoint))
         .layer(trace_layer.clone())
         .layer(axum::Extension(index.clone()))
         .layer(axum::Extension(autocomplete_idx.clone()))
