@@ -151,6 +151,72 @@ CONTINENTS="africa antarctica asia oceania central-america europe north-america 
 FETCH_PARALLEL="${FETCH_PARALLEL:-4}"
 
 if [ "$SKIP_OSM" = "0" ]; then
+    # Sanity-check that the existing $DATA_DIR/pbf/ contents match the
+    # region we're being asked to fetch. Mixing patterns in the same
+    # directory is the worst kind of silent failure: the individual
+    # downloads remain idempotent, but build-index globs *.osm.pbf and
+    # would happily double-process every node and way, producing a
+    # corrupt index (and burning many extra hours of build time).
+    #
+    # Bail with a concrete remediation rather than guessing the
+    # operator's intent. Two flavours of mismatch worth catching:
+    #
+    #   1. --region all-continents but planet-latest.osm.pbf already
+    #      exists (operator is migrating from --region planet).
+    #   2. --region planet but continent PBFs already exist (operator
+    #      is going the other direction).
+    if [ -d "$DATA_DIR/pbf" ]; then
+        existing_planet=""
+        existing_continents=""
+        if [ -f "$DATA_DIR/pbf/planet-latest.osm.pbf" ]; then
+            existing_planet="$DATA_DIR/pbf/planet-latest.osm.pbf"
+        fi
+        # ls without globbing matches; `2>/dev/null || true` covers the
+        # empty-dir case under set -eu.
+        existing_continents=$(ls -1 "$DATA_DIR"/pbf/*-latest.osm.pbf 2>/dev/null \
+            | grep -v 'planet-latest.osm.pbf' || true)
+
+        if [ "$REGION" = "all-continents" ] && [ -n "$existing_planet" ]; then
+            cat >&2 <<EOF
+Error: $existing_planet exists from an earlier --region planet fetch.
+
+Mixing planet + continent PBFs in the same directory would cause
+build-index to double-process every node and way (corrupt index +
+much longer build). Resolve before re-running:
+
+  - To keep the existing planet PBF, re-run with --region planet:
+        ./scripts/fetch-build-data.sh --region planet --skip-oa
+    or, via the orchestrator:
+        PLANET_PBF=1 ./scripts/run-planet-build.sh
+
+  - To switch to the parallel continent fetch, remove the planet PBF first:
+        rm $existing_planet
+        # then re-run with --region all-continents
+
+EOF
+            exit 1
+        fi
+        if [ "$REGION" = "planet" ] && [ -n "$existing_continents" ]; then
+            cat >&2 <<EOF
+Error: $DATA_DIR/pbf/ already contains continent PBFs from an
+earlier --region all-continents fetch:
+$(echo "$existing_continents" | sed 's/^/    /')
+
+Adding planet-latest.osm.pbf alongside these would cause build-index
+to double-process. Resolve before re-running:
+
+  - To keep the continent PBFs and skip the planet download:
+        ./scripts/fetch-build-data.sh --region all-continents --skip-oa
+
+  - To switch to the single-stream planet PBF:
+        rm $DATA_DIR/pbf/*-latest.osm.pbf
+        # then re-run with --region planet (or PLANET_PBF=1)
+
+EOF
+            exit 1
+        fi
+    fi
+
     if [ "$REGION" = "all-continents" ]; then
         echo "==> fetching $(echo "$CONTINENTS" | wc -w | tr -d ' ') continent PBFs in parallel (FETCH_PARALLEL=$FETCH_PARALLEL)"
         # `printf '%s\n'` + xargs is POSIX and propagates non-zero exit
