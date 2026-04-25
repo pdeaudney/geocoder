@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -1342,6 +1343,22 @@ static int run_build(int argc, char* argv[]) {
         }
     }
 
+    // RAII timing — prints "[stage] <name>: <Xs>" when the Stage
+    // object goes out of scope. Used to surface per-phase wallclock
+    // so the next perf round has data; format is grep-friendly so
+    // CI can scrape the output.
+    using clk = std::chrono::steady_clock;
+    struct Stage {
+        const char* name;
+        clk::time_point start;
+        explicit Stage(const char* n) : name(n), start(clk::now()) {}
+        ~Stage() {
+            const double s = std::chrono::duration<double>(clk::now() - start).count();
+            std::cerr << "[stage] " << name << ": " << s << "s" << std::endl;
+        }
+    };
+    const auto t_total = clk::now();
+
     BuildHandler handler;
 
     for (const auto& input_file : input_files) {
@@ -1354,6 +1371,7 @@ static int run_build(int argc, char* argv[]) {
         osmium::area::MultipolygonManager<osmium::area::Assembler> mp_manager{assembler_config};
 
         {
+            Stage _s{"pass1_relations"};
             osmium::io::Reader reader1{input_file, osmium::osm_entity_bits::relation};
             osmium::apply(reader1, mp_manager);
             reader1.close();
@@ -1390,10 +1408,13 @@ static int run_build(int argc, char* argv[]) {
 
         osmium::io::Reader reader2{input_file};
 
-        osmium::apply(reader2, location_handler, handler, mp_manager.handler([&handler](osmium::memory::Buffer&& buffer) {
-            osmium::apply(buffer, handler);
-        }));
-        reader2.close();
+        {
+            Stage _s{"pass2_ingest"};
+            osmium::apply(reader2, location_handler, handler, mp_manager.handler([&handler](osmium::memory::Buffer&& buffer) {
+                osmium::apply(buffer, handler);
+            }));
+            reader2.close();
+        }
     }
 
     std::cerr << "Done reading:" << std::endl;
@@ -1412,22 +1433,36 @@ static int run_build(int argc, char* argv[]) {
     std::cerr << "  " << place_count_total << " place=* points" << std::endl;
 
     std::cerr << "Resolving interpolation endpoints..." << std::endl;
-    resolve_interpolation_endpoints();
+    {
+        Stage _s{"resolve_interp"};
+        resolve_interpolation_endpoints();
+    }
 
     std::cerr << "Deduplicating..." << std::endl;
-    deduplicate(cell_to_ways);
-    deduplicate(cell_to_addrs);
-    deduplicate(cell_to_interps);
-    deduplicate(cell_to_admin);
-    deduplicate(cell_to_places);
+    {
+        Stage _s{"dedup"};
+        deduplicate(cell_to_ways);
+        deduplicate(cell_to_addrs);
+        deduplicate(cell_to_interps);
+        deduplicate(cell_to_admin);
+        deduplicate(cell_to_places);
+    }
 
-    // Reorder addr_points so that per-cell ids are contiguous in the
-    // file — cache-locality win on the reverse-geocode hot path.
-    sort_addr_points_by_cell();
+    {
+        Stage _s{"sort_addr_points"};
+        // Reorder addr_points so that per-cell ids are contiguous in the
+        // file — cache-locality win on the reverse-geocode hot path.
+        sort_addr_points_by_cell();
+    }
 
     std::cerr << "Writing index files to " << output_dir << "..." << std::endl;
-    write_index(output_dir);
+    {
+        Stage _s{"write_index"};
+        write_index(output_dir);
+    }
 
+    const double total = std::chrono::duration<double>(clk::now() - t_total).count();
+    std::cerr << "[stage] total: " << total << "s" << std::endl;
     std::cerr << "Done." << std::endl;
     return 0;
 }

@@ -33,7 +33,7 @@ proportionally lower).
 | 3 | Parallel countries in `build-openaddresses-index` | DONE | rayon par_iter; test passes; AU-local has 1 country so no measurable local delta. Planet 60-country build expects 8-16× speedup. |
 | 4 | simd-json in `wof-importer` | DONE | tests pass; deserialises into the same `serde_json::Value` so `extract_outer_rings` stays unchanged. Real win on planet's ~8.6 GB GeoJSON. |
 | 5 | Parallel states in `build-gnaf-index` | DONE | refactored to run passes 1–4 (state, locality, street, geocode) concurrently via `rayon::scope`. Pass 4 dominates wallclock; the other three now overlap. tests pass. |
-| 6 | Per-stage timing emission (all builders) | TODO | 0 perf — observability only, unblocks the next round |
+| 6 | Per-stage timing emission (all builders) | DONE | C++ build-index: 6 phases + total. Rust binaries: shared Stage RAII helper, prints `[stage] <name>: <X>s` on drop. Output greppable by CI. AU `build-index` now reports `pass2_ingest: 65s (84%)` as the dominant cost. |
 
 ## Working method between stages
 
@@ -407,7 +407,43 @@ combined index merges them. Currently sequential.
 
 ## Stage 6: Per-stage timing emission
 
-**Status: TODO**
+**Status: DONE** (commit pending)
+
+### Measured AU build-index breakdown (M1 Max, post-stages 1–5)
+
+```
+[stage] pass1_relations: 0.65s
+[stage] pass2_ingest:    65.02s   ← 84%, dominant cost
+[stage] resolve_interp:  0.37s
+[stage] dedup:           0.12s
+[stage] sort_addr_points: 0.16s
+[stage] write_index:     10.36s   ← 13%
+[stage] total:           76.79s
+```
+
+Pass 2 ingest dominates exactly as the AWS planet projection
+suggested — every future C++ optimisation lands here. write_index
+is a clean second target. The post-ingest stages (resolve_interp,
+dedup, sort_addr_points) are noise floor.
+
+### Rust binaries
+
+`build-autocomplete-fst data/index` total: 19.5s. Per-stage
+breakdown not yet sub-divided (binary is a single dense build pass
+with no obvious internal phases). Sub-staging deferred until the
+next perf pass identifies a hotspot worth measuring.
+
+`build-gnaf-index` instrumented with sub-stages for the parallel
+pre-passes block + pass 5 join + sort + write. Not run locally
+(no G-NAF PSV in dev env); will surface on the next AWS planet
+build.
+
+`build-openaddresses-index`, `build-postcode-lookup`,
+`build-forward-index`, `wof-importer` instrumented with `total`
+only — they're either short enough that internal sub-staging is
+unhelpful, or so dominated by one phase that the breakdown adds
+noise. Sub-stages can be added on demand when timing data shows
+a worth-investigating hotspot.
 
 ### Background
 
@@ -483,6 +519,25 @@ the data to decide stages 7+ if perf work continues.
 (fill in after running)
 
 ---
+
+## Six-stage plan: COMPLETE
+
+All six stages landed across commits f3192e1 → (latest). The
+working AU breakdown captured at the end of stage 6 is the
+baseline for the next round.
+
+**Recommended next steps when perf work resumes:**
+
+1. **Parallel PBF block decode** in build-index — Pass 2 is 84% of
+   AU wallclock; halving Pass 2 would drop AU from ~77s to ~45s
+   and planet from ~45min to ~25min. Needs handler thread-safety
+   review (current handlers append to globals).
+2. **Tantivy IndexWriter heap budget** in build-forward-index —
+   default is ~50 MB; planet build is alloc-pressure-bound, larger
+   heap = fewer commits = smaller segments to write.
+3. **Pipeline-level overlap** in the orchestrator — G-NAF + OA +
+   WoF + tantivy can all run in parallel after build-index
+   finishes, sharing no data. Packer/scripts change, not code.
 
 ## Notes for the next engineer (or future me)
 

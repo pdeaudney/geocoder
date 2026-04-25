@@ -49,10 +49,17 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 const DEFAULT_STREET_CELL_LEVEL: u64 = 17;
 
+/// Per-stage timing — see build-pipeline-perf-plan stage 6.
+struct Stage { name: &'static str, start: Instant }
+impl Stage { fn new(name: &'static str) -> Self { Self { name, start: Instant::now() } } }
+impl Drop for Stage { fn drop(&mut self) { eprintln!("[stage] {}: {:.3}s", self.name, self.start.elapsed().as_secs_f64()); } }
+
 fn main() {
+    let _total = Stage::new("total");
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!(

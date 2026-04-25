@@ -34,6 +34,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::time::Instant;
+
+/// Per-stage timing — see build-pipeline-perf-plan stage 6.
+struct Stage { name: &'static str, start: Instant }
+impl Stage { fn new(name: &'static str) -> Self { Self { name, start: Instant::now() } } }
+impl Drop for Stage { fn drop(&mut self) { eprintln!("[stage] {}: {:.3}s", self.name, self.start.elapsed().as_secs_f64()); } }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layout {
@@ -43,6 +49,7 @@ enum Layout {
 }
 
 fn main() {
+    let _total = Stage::new("total");
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!(

@@ -20,6 +20,14 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+/// RAII stage timer — prints `[stage] <name>: <X>s` on drop.
+/// Format matches the C++ build-index emission so a single regex
+/// can scrape both binaries' logs.
+struct Stage { name: &'static str, start: Instant }
+impl Stage { fn new(name: &'static str) -> Self { Self { name, start: Instant::now() } } }
+impl Drop for Stage { fn drop(&mut self) { eprintln!("[stage] {}: {:.3}s", self.name, self.start.elapsed().as_secs_f64()); } }
 
 const DEFAULT_STREET_CELL_LEVEL: u64 = 17;
 
@@ -67,6 +75,7 @@ struct Stats {
 }
 
 fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, String> {
+    let _total = Stage::new("total");
     fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {}", out_dir.display(), e))?;
 
     // Pre-passes 1–4 each read disjoint files and populate disjoint maps:
@@ -163,18 +172,22 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
     let mut r2: Result<(), String> = Ok(());
     let mut r3: Result<(), String> = Ok(());
     let mut r4: Result<(), String> = Ok(());
-    rayon::scope(|s| {
-        s.spawn(|_| { r1 = pass1(&mut state_abbr); });
-        s.spawn(|_| { r2 = pass2(&mut locality_name); });
-        s.spawn(|_| { r3 = pass3(&mut street); });
-        s.spawn(|_| { r4 = pass4(&mut geocode); });
-    });
+    {
+        let _s = Stage::new("prepasses_state_locality_street_geocode");
+        rayon::scope(|s| {
+            s.spawn(|_| { r1 = pass1(&mut state_abbr); });
+            s.spawn(|_| { r2 = pass2(&mut locality_name); });
+            s.spawn(|_| { r3 = pass3(&mut street); });
+            s.spawn(|_| { r4 = pass4(&mut geocode); });
+        });
+    }
     r1?; r2?; r3?; r4?;
 
     eprintln!("loaded {} states, {} localities, {} streets, {} geocodes",
         state_abbr.len(), locality_name.len(), street.len(), geocode.len());
 
     // --- Pass 5: ADDRESS_DETAIL × geocode → build output records ---
+    let _pass5 = Stage::new("pass5_address_detail_join");
     let mut strings = StringPool::new();
     let mut records: Vec<(u64, GnafPoint)> = Vec::with_capacity(14_000_000);
     let mut addr_rows = 0u64;
@@ -245,10 +258,14 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
         addr_rows, skipped_no_geocode
     );
 
+    drop(_pass5);
     // --- Sort records by cell_id so lookups scan contiguous addresses ---
+    let _sort = Stage::new("sort_records");
     records.sort_by_key(|(cell, _)| *cell);
+    drop(_sort);
 
     // --- Write gnaf_points.bin + build cells/entries index ---
+    let _write = Stage::new("write_gnaf");
     let points_path = out_dir.join("gnaf_points.bin");
     let cells_path = out_dir.join("gnaf_cells.bin");
     let entries_path = out_dir.join("gnaf_entries.bin");
