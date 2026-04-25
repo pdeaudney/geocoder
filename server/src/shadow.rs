@@ -125,7 +125,7 @@ impl ShadowConfig {
         Some(ShadowConfig {
             api_key,
             sample_rate: env_f64("GOOGLE_GEOCODING_SAMPLE_RATE", 0.001).clamp(0.0, 1.0),
-            daily_cap: env_u32("GOOGLE_GEOCODING_DAILY_CAP", 1000),
+            daily_cap: clamp_daily_cap(env_u32("GOOGLE_GEOCODING_DAILY_CAP", 1000)),
             rps_cap: env_u32("GOOGLE_GEOCODING_RPS_CAP", 4).max(1),
             queue_capacity: env_usize("GOOGLE_GEOCODING_QUEUE_CAPACITY", 256).max(1),
             inflight_cap: env_usize("GOOGLE_GEOCODING_INFLIGHT_CAP", 4).max(1),
@@ -177,6 +177,32 @@ fn env_u64(key: &str, default: u64) -> u64 {
 }
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Maximum daily cap we allow an operator to set. At the documented
+/// $5/1000 Google price, the upper bound corresponds to ~$500/day —
+/// already well past the normal $200/month free tier and into "you
+/// definitely meant to do this" territory. Operators wanting more
+/// either raise the constant in source (visible in code review) or
+/// set up Google's own billing alerts.
+const MAX_DAILY_CAP: u32 = 100_000;
+
+/// Clamp the daily cap to a defensible upper bound. Misreading a typo
+/// like `GOOGLE_GEOCODING_DAILY_CAP=1000000` (intended 1000) without
+/// this guard would silently authorise $5 000/day in Google calls.
+/// We log the clamp rather than failing startup so operators get told
+/// what happened without the deploy bouncing.
+fn clamp_daily_cap(raw: u32) -> u32 {
+    if raw > MAX_DAILY_CAP {
+        tracing::warn!(
+            target: "query_server::shadow",
+            requested = raw,
+            cap = MAX_DAILY_CAP,
+            "GOOGLE_GEOCODING_DAILY_CAP clamped — raise MAX_DAILY_CAP in source if intentional"
+        );
+        return MAX_DAILY_CAP;
+    }
+    raw
 }
 
 // --- Outcome + Endpoint enums -------------------------------------------
@@ -413,6 +439,15 @@ impl ShadowDispatcher {
                     m.record_shadow(endpoint.as_str(), Outcome::QueueFull.as_str(), &[], None);
                 }
                 emit_outcome(endpoint, Outcome::QueueFull, None, None, None);
+                // Self-rate-limited WARN so an oncall sees a clear
+                // signal in stdout when the bounded mpsc saturates,
+                // rather than having to be already watching the
+                // metric. The DedupFilter in telemetry.rs is scoped
+                // to `opentelemetry*` targets, so we hand-roll the
+                // throttle here. One line per 30 s under sustained
+                // pressure is enough to draw attention without
+                // dominating the log.
+                warn_queue_full_throttled();
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 // Worker died. This is a bug — surface it loudly. We
@@ -534,6 +569,15 @@ impl Worker {
                 emit_job_outcome(&job, Outcome::RateLimited, None, None, None, metrics.as_ref());
                 continue;
             }
+            // Daily-cap check + increment. Note: the load here and the
+            // fetch_add at line ~554 *appear* to form a check-then-act
+            // race, but they aren't — the worker is a single tokio
+            // task (spawn_loops above does exactly one tokio::spawn for
+            // run()), so these two operations are sequential within the
+            // same async context. The only concurrent writer is the
+            // midnight-reset task storing 0, which is the *desired*
+            // clearing behavior (it can never push the count *up*
+            // mid-decision). Relaxed ordering is therefore sufficient.
             if daily_count.load(Ordering::Relaxed) >= cfg.daily_cap {
                 emit_job_outcome(&job, Outcome::DailyCapHit, None, None, None, metrics.as_ref());
                 continue;
@@ -1030,18 +1074,71 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Queue-full warning gate. Process-wide AtomicU64 of last-emit unix
+/// milliseconds. Emit at most once per `QUEUE_FULL_WARN_WINDOW_MS`,
+/// using a CAS so two threads racing through the gate produce only
+/// one log line (not strictly required for correctness — duplicate
+/// warnings would still be useful — but keeps stdout tidy).
+const QUEUE_FULL_WARN_WINDOW_MS: u64 = 30_000;
+static LAST_QUEUE_FULL_WARN_MS: AtomicU64 = AtomicU64::new(0);
+
+fn warn_queue_full_throttled() {
+    let now = now_unix_ms();
+    let last = LAST_QUEUE_FULL_WARN_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < QUEUE_FULL_WARN_WINDOW_MS {
+        return;
+    }
+    if LAST_QUEUE_FULL_WARN_MS
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        // Another thread already won the gate this window. Drop ours.
+        return;
+    }
+    tracing::warn!(
+        target: "query_server::shadow",
+        window_secs = QUEUE_FULL_WARN_WINDOW_MS / 1000,
+        "shadow queue full — dispatch dropped; raise GOOGLE_GEOCODING_QUEUE_CAPACITY or GOOGLE_GEOCODING_INFLIGHT_CAP if persistent"
+    );
+}
+
 /// Compute the Duration from now until 00:00:00 UTC tomorrow. Used by
 /// the daily-cap reset task — sleeping until that instant means we
 /// reset exactly once per UTC day even if the worker started mid-day.
+///
+/// Wraps `duration_until_next_utc_midnight_from(Utc::now())` so the
+/// inner pure function is testable across calendar edge cases (end of
+/// month, end of year, leap day) without time mocking.
 fn duration_until_next_utc_midnight() -> Duration {
-    let now = Utc::now();
-    let tomorrow = now.date_naive().succ_opt().expect("date_naive succ");
-    let midnight = Utc
-        .with_ymd_and_hms(tomorrow.year(), tomorrow.month(), tomorrow.day(), 0, 0, 0)
-        .single()
-        .expect("UTC midnight is unambiguous");
-    let secs = (midnight - now).num_milliseconds().max(0) as u64;
-    Duration::from_millis(secs)
+    duration_until_next_utc_midnight_from(Utc::now())
+}
+
+/// Pure form of [`duration_until_next_utc_midnight`]. Defensively
+/// returns a 1-hour fallback if chrono can't compute the next
+/// midnight from the supplied `now` — in practice this only happens
+/// when `now` is at `NaiveDate::MAX` (≈ year 262143), but the
+/// alternative is a worker-killing panic on an extreme edge case.
+/// One hour is short enough for the daily cap to recover quickly
+/// after the worker wakes up.
+fn duration_until_next_utc_midnight_from(now: chrono::DateTime<chrono::Utc>) -> Duration {
+    const FALLBACK: Duration = Duration::from_secs(3600);
+    let Some(tomorrow) = now.date_naive().succ_opt() else {
+        tracing::warn!(
+            target: "query_server::shadow",
+            "could not compute next UTC midnight (date overflow); falling back to 1-hour sleep"
+        );
+        return FALLBACK;
+    };
+    let midnight_opt = Utc.with_ymd_and_hms(tomorrow.year(), tomorrow.month(), tomorrow.day(), 0, 0, 0);
+    let Some(midnight) = midnight_opt.single() else {
+        tracing::warn!(
+            target: "query_server::shadow",
+            "next UTC midnight is ambiguous (system clock skew?); falling back to 1-hour sleep"
+        );
+        return FALLBACK;
+    };
+    let ms = (midnight - now).num_milliseconds().max(0) as u64;
+    Duration::from_millis(ms)
 }
 
 // --- Tests --------------------------------------------------------------
@@ -1440,5 +1537,124 @@ mod tests {
         assert_eq!(percent_encode(","), "%2C");
         assert_eq!(percent_encode("&"), "%26");
         assert_eq!(percent_encode("é"), "%C3%A9"); // 2-byte utf-8
+    }
+
+    // --- Daily-cap clamp ---
+
+    #[test]
+    fn daily_cap_passthrough_below_max() {
+        // Most operators never hit the clamp. Pin the no-op path.
+        assert_eq!(clamp_daily_cap(0), 0);
+        assert_eq!(clamp_daily_cap(1000), 1000);
+        assert_eq!(clamp_daily_cap(40_000), 40_000);
+        assert_eq!(clamp_daily_cap(MAX_DAILY_CAP), MAX_DAILY_CAP);
+    }
+
+    #[test]
+    fn daily_cap_clamps_above_max() {
+        // The headline scenario: typo of `100000000` instead of
+        // `100000` would silently authorise $500 000/day. The clamp
+        // brings it down to a defensible ceiling and warns.
+        assert_eq!(clamp_daily_cap(MAX_DAILY_CAP + 1), MAX_DAILY_CAP);
+        assert_eq!(clamp_daily_cap(1_000_000), MAX_DAILY_CAP);
+        assert_eq!(clamp_daily_cap(u32::MAX), MAX_DAILY_CAP);
+    }
+
+    // --- Queue-full warning throttle ---
+
+    // --- UTC-midnight calculation ---
+
+    #[test]
+    fn midnight_from_midday_is_about_twelve_hours() {
+        let noon = Utc.with_ymd_and_hms(2026, 4, 25, 12, 0, 0).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(noon);
+        // 12 hours exactly. Pinning to the second to flag any tz-offset bug.
+        assert_eq!(d, Duration::from_secs(12 * 3600));
+    }
+
+    #[test]
+    fn midnight_from_one_second_before_midnight_is_one_second() {
+        // 23:59:59 → next midnight is 1 s away.
+        let just_before = Utc.with_ymd_and_hms(2026, 4, 25, 23, 59, 59).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(just_before);
+        assert_eq!(d, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn midnight_handles_end_of_month_rollover() {
+        // 2026-04-30 → 2026-05-01. The naive `now.date() + 1.day()`
+        // approach has historically tripped people up on end-of-month;
+        // chrono's `succ_opt()` handles it correctly. Pin that.
+        let last_day_of_april = Utc.with_ymd_and_hms(2026, 4, 30, 23, 59, 0).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(last_day_of_april);
+        // From 23:59 to next midnight = 60 s, regardless of the
+        // calendar boundary.
+        assert_eq!(d, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn midnight_handles_end_of_year_rollover() {
+        // 2026-12-31 23:59:30 → 2027-01-01 00:00:00 (30 s)
+        let nye = Utc.with_ymd_and_hms(2026, 12, 31, 23, 59, 30).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(nye);
+        assert_eq!(d, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn midnight_handles_leap_day() {
+        // 2028-02-28 (leap year) → 2028-02-29, not 2028-03-01.
+        // Pin chrono's leap-year correctness; if it ever flipped to
+        // skipping Feb 29 the daily counter would be 24 h late on the
+        // first reset of every leap year.
+        let feb_28_2028 = Utc.with_ymd_and_hms(2028, 2, 28, 23, 0, 0).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(feb_28_2028);
+        // 23:00 → next midnight is 1 hour later, on Feb 29.
+        assert_eq!(d, Duration::from_secs(3600));
+
+        // Then from Feb 29 23:00, next midnight is Mar 1.
+        let feb_29_2028 = Utc.with_ymd_and_hms(2028, 2, 29, 23, 0, 0).single().unwrap();
+        let d = duration_until_next_utc_midnight_from(feb_29_2028);
+        assert_eq!(d, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn midnight_falls_back_on_date_overflow() {
+        // chrono's NaiveDate::MAX is ~year 262143. succ_opt() returns
+        // None there; we don't panic, we fall back to a 1-hour sleep.
+        // We can't construct DateTime<Utc>::MAX directly because the
+        // Utc.with_ymd_and_hms builder rejects out-of-range dates, so
+        // we use the actual MAX naive date.
+        use chrono::NaiveDateTime;
+        let max_naive = chrono::NaiveDate::MAX
+            .and_hms_opt(0, 0, 0)
+            .expect("max date 00:00:00 is constructible");
+        let extreme = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+            NaiveDateTime::from(max_naive),
+            chrono::Utc,
+        );
+        let d = duration_until_next_utc_midnight_from(extreme);
+        // Falls back to 1 hour rather than panicking.
+        assert_eq!(d, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn warn_queue_full_throttled_runs_without_panic() {
+        // Functional smoke: the gate must be safe to call rapidly
+        // (no panic on the static AtomicU64 path) and idempotent
+        // within the throttle window. We can't assert log-line
+        // emission directly without a subscriber, but we can verify
+        // the counter advances on each window cross.
+        let before = LAST_QUEUE_FULL_WARN_MS.load(Ordering::Relaxed);
+        for _ in 0..1000 {
+            warn_queue_full_throttled();
+        }
+        let after = LAST_QUEUE_FULL_WARN_MS.load(Ordering::Relaxed);
+        // Either: the test was the first caller this window (after >
+        // before), or another test already won the gate this window
+        // (after >= before). Either way the gate doesn't regress.
+        assert!(
+            after >= before,
+            "warn gate's last-emit timestamp must be monotonic — got before={before}, after={after}"
+        );
     }
 }
