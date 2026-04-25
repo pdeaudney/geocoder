@@ -200,6 +200,21 @@ run_preflight() {
         log "G-NAF: archive URL configured"
     fi
 
+    # bzip2 decoder priority — informational. fetch-build-data.sh
+    # auto-picks lbzip2 (best) → pbzip2 (better than baseline) → bzip2
+    # (single-thread baseline). Surface which one is in play here so
+    # operators know whether they're going to pay 5+ minutes for the
+    # WoF SQLite decompression or 60 seconds.
+    if command -v lbzip2 >/dev/null 2>&1; then
+        log "bz2 decoder: lbzip2 (parallel; ~3–5× faster than bzip2 -d on WoF)"
+    elif command -v pbzip2 >/dev/null 2>&1; then
+        warn "bz2 decoder: pbzip2 (single-threaded on WoF's stock-bzip2 stream — install lbzip2 for ~3–5× speedup)"
+    else
+        warn "bz2 decoder: bzip2 (single-threaded; install lbzip2 to save ~5 min on the WoF decompression step)"
+        warn "  Debian/Ubuntu: apt-get install lbzip2"
+        warn "  macOS:         brew install lbzip2"
+    fi
+
     log "preflight passed"
     step_done
 }
