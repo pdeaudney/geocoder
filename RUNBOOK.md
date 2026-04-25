@@ -1,6 +1,6 @@
 # Runbook
 
-Operational procedures for the traccar-geocoder query server. Keep
+Operational procedures for the geocoder query server. Keep
 this short — alert-driven rather than encyclopedic. If you find
 yourself adding background to an entry, the background belongs in
 [`ARCHITECTURE.md`](ARCHITECTURE.md) or [`BUILD-DEPLOY.md`](BUILD-DEPLOY.md);
