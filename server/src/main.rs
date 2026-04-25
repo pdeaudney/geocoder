@@ -14,6 +14,7 @@ use axum::Router;
 use query_server::admin_config::AdminConfig;
 use query_server::autocomplete::Autocomplete;
 use query_server::ip_geo::IpGeo;
+use query_server::shadow::{ShadowConfig, ShadowDispatcher};
 use query_server::telemetry;
 use query_server::{Index, DEFAULT_ADMIN_CELL_LEVEL, DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL};
 use serde::Deserialize;
@@ -318,6 +319,7 @@ async fn h3_endpoint(Query(params): Query<H3Params>) -> Response {
 async fn reverse_geocode(
     Query(params): Query<QueryParams>,
     index: axum::extract::Extension<LiveIndex>,
+    shadow: axum::extract::Extension<Option<Arc<ShadowDispatcher>>>,
 ) -> Response {
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
@@ -330,6 +332,15 @@ async fn reverse_geocode(
     // H3 describes the caller's query coord (the thing they asked about),
     // not any refined match — /reverse has no refinement step.
     address.h3 = query_server::h3_cell::build_h3_map(params.lat, params.lon, &h3_resolutions);
+
+    // Sample-shadow against Google before returning. The dispatcher's
+    // probability gate short-circuits 99.9 % of calls in microseconds;
+    // on a sampled call, takes one snapshot clone of the small admin
+    // fields and a single try_send. Never awaits Google.
+    if let Some(d) = shadow.0.as_ref() {
+        d.shadow_reverse(params.lat, params.lon, &address);
+    }
+
     // axum::Json writes directly to a BytesMut; skips the intermediate
     // `String` allocation + UTF-8 copy the old `to_string() -> tuple
     // response` path forced.
@@ -662,6 +673,7 @@ async fn search(
     index: axum::extract::Extension<LiveIndex>,
     forward_idx: axum::extract::Extension<Option<Arc<Forward>>>,
     autocomplete_idx: axum::extract::Extension<Option<Arc<Autocomplete>>>,
+    shadow: axum::extract::Extension<Option<Arc<ShadowDispatcher>>>,
 ) -> Response {
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
@@ -763,6 +775,14 @@ async fn search(
                     let enriched = enrich_fst_hit(fst_hit, &idx_snap, &h3_resolutions);
                     tracing::Span::current().record("geocoder.path", "fst_fast_path");
                     tracing::Span::current().record("geocoder.match_count", 1);
+                    if let Some(d) = shadow.0.as_ref() {
+                        let snap = snapshot_from_search_hit(&enriched);
+                        d.shadow_search_with_snapshot(
+                            params.q.as_deref().unwrap_or(""),
+                            country_codes.first().copied(),
+                            snap,
+                        );
+                    }
                     let body = serde_json::json!({ "results": [enriched] });
                     return axum::Json(body).into_response();
                 }
@@ -838,8 +858,58 @@ async fn search(
             .collect()
     });
 
+    if let Some(d) = shadow.0.as_ref() {
+        let snap = enriched.first().and_then(snapshot_from_search_hit);
+        d.shadow_search_with_snapshot(
+            params.q.as_deref().unwrap_or(""),
+            country_codes.first().copied(),
+            snap,
+        );
+    }
+
     let body = serde_json::json!({ "results": enriched });
     axum::Json(body).into_response()
+}
+
+/// Pull the (lat, lon, country_code, state, city, road, display_name)
+/// shape out of a `/search` enriched hit JSON value into the owned
+/// `OurSnapshot` form the shadow worker needs. Returns `None` when the
+/// hit lacks coords — `enrich_hit` always produces them, but the JSON
+/// shape isn't enforced at the type level so we tolerate the missing
+/// case rather than panic.
+#[cfg(feature = "forward")]
+fn snapshot_from_search_hit(
+    hit: &serde_json::Value,
+) -> Option<(f64, f64, query_server::shadow::OurSnapshot)> {
+    let lat = hit.get("lat")?.as_f64()?;
+    let lng = hit.get("lon")?.as_f64()?;
+    let addr = hit.get("address");
+    let display_name = hit
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let snap = query_server::shadow::OurSnapshot {
+        country_code: addr
+            .and_then(|a| a.get("country_code"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        state: addr
+            .and_then(|a| a.get("state"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        city: addr
+            .and_then(|a| a.get("city"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        road: addr
+            .and_then(|a| a.get("road"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        display_name,
+        lat: Some(lat),
+        lng: Some(lng),
+    };
+    Some((lat, lng, snap))
 }
 
 /// Upgrade a forward `Hit` into a dispatch-grade record: apply house-number
@@ -1101,6 +1171,15 @@ async fn main() {
         search_distance,
     );
 
+    // Optional shadow validator against Google's Geocoding API.
+    // `None` when GOOGLE_GEOCODING_ENABLED=false, or the master switch
+    // is implicit-on but no API key is set, or any other disabling
+    // condition documented in the env-var truth matrix. Either way the
+    // handlers see Option::None and skip the shadow path entirely —
+    // zero overhead in the disabled state.
+    let shadow_dispatcher: Option<Arc<ShadowDispatcher>> =
+        ShadowConfig::from_env().map(ShadowDispatcher::spawn);
+
     // Optional MaxMind GeoLite2 loader. Missing DB → /geocode/ip returns 503.
     let ip_db: Option<Arc<IpGeo>> = match IpGeo::open(Path::new(data_dir)) {
         Ok(Some(db)) => {
@@ -1218,7 +1297,8 @@ async fn main() {
         .layer(axum::Extension(index.clone()))
         .layer(axum::Extension(forward_idx.clone()))
         .layer(axum::Extension(autocomplete_idx.clone()))
-        .layer(axum::Extension(ip_db.clone()));
+        .layer(axum::Extension(ip_db.clone()))
+        .layer(axum::Extension(shadow_dispatcher.clone()));
     #[cfg(not(feature = "forward"))]
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -1230,7 +1310,8 @@ async fn main() {
         .layer(trace_layer.clone())
         .layer(axum::Extension(index.clone()))
         .layer(axum::Extension(autocomplete_idx.clone()))
-        .layer(axum::Extension(ip_db.clone()));
+        .layer(axum::Extension(ip_db.clone()))
+        .layer(axum::Extension(shadow_dispatcher.clone()));
 
     let _ = forward_idx; // silence unused when feature disabled
 

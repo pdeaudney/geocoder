@@ -59,6 +59,19 @@ opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_ex
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
 http = "1"
+# Direct reqwest dep for the shadow-validation worker (server/src/shadow.rs).
+# Already transitive via opentelemetry-otlp's reqwest-client feature; pinning
+# it here unifies the version and lets us pick rustls-tls explicitly.
+# default-features=false to avoid pulling native-tls (and thus OpenSSL).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2"] }
+# rand for the shadow sampler's per-request probability gate. Already
+# transitive via opentelemetry_sdk's `trace` feature; promoting it to
+# direct gets us a stable import path without a version bump.
+rand = "0.8"
+# UTC-midnight clock for the shadow daily-cap reset task. Already
+# transitive via OTel's tracing-opentelemetry and tantivy; explicit
+# import for the chrono::Utc::now() / next_midnight calc.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [features]
 default = ["forward", "grpc"]
