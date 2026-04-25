@@ -82,7 +82,48 @@ apt-get install cmake libosmium2-dev libprotozero-dev libs2-dev \
                 protobuf-compiler
 ```
 
-Then:
+Fetch the source data:
+
+```bash
+# All-in-one fetch — OSM PBF, OpenAddresses, WhosOnFirst, optional MaxMind + G-NAF.
+# Defaults output to ./data/. Re-runnable; existing files are skipped.
+./scripts/fetch-build-data.sh --region au         # AU-only build
+./scripts/fetch-build-data.sh --region oceania    # AU + NZ
+./scripts/fetch-build-data.sh --region europe     # EU
+./scripts/fetch-build-data.sh --region planet     # full planet (~85 GB)
+```
+
+The script delegates to three smaller fetchers — use them directly for
+piecewise control:
+
+```bash
+# Just OSM (Geofabrik) for a named region into data/pbf/.
+./scripts/download-region.sh australia data/pbf
+
+# Just OpenAddresses (S3 Requester-Pays; needs AWS creds) into data/openaddresses/.
+OA_OUTPUT_DIR=data/openaddresses ./scripts/fetch-openaddresses.sh --sources "au nz"
+
+# WhosOnFirst admin SQLite — covers admin polygons for countries whose
+# Geofabrik extract lacks a admin_level=2 country relation.
+WOF_COUNTRIES="au gb us" ./scripts/fetch-build-data.sh --region au --skip-osm --skip-oa
+```
+
+Two sources are license-gated and skipped without an env var:
+
+```bash
+# MaxMind GeoLite2-City — free signup at maxmind.com/en/geolite2/signup.
+# Required only for the /geocode/ip endpoint.
+export MAXMIND_LICENSE_KEY=...
+
+# G-NAF — Australian Geocoded National Address File. Manual license
+# acceptance at https://geoscape.com.au/data/g-naf/. Hand the script the
+# accepted-URL it gave you.
+export GNAF_ARCHIVE_URL=https://...
+
+./scripts/fetch-build-data.sh --region au
+```
+
+Build the indexes:
 
 ```bash
 # Indexer
@@ -91,7 +132,7 @@ mkdir build && cd build && cmake ../builder && make && cd ..
 # Server + all build tools
 cargo build --release --manifest-path server/Cargo.toml
 
-# Index an OSM PBF
+# Index an OSM PBF (mandatory — the rest are additive)
 ./build/build-index data/index data/pbf/*.osm.pbf
 
 # (Optional) forward search — tantivy per-country
@@ -99,6 +140,13 @@ cargo build --release --manifest-path server/Cargo.toml
 
 # (Optional) autocomplete FST
 ./server/target/release/build-autocomplete-fst data/index
+
+# (Optional, AU only) postcode lookup + G-NAF address points
+./server/target/release/build-postcode-lookup data/gnaf/psv data/index
+./server/target/release/build-gnaf-index data/gnaf/psv data/index
+
+# (Optional, worldwide) OpenAddresses address points
+./server/target/release/build-openaddresses-index data/openaddresses data/index
 
 # Serve
 ./server/target/release/query-server data/index
