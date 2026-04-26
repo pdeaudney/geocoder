@@ -42,10 +42,10 @@ COPY --from=builder-rust /src/server/target/release/build-postcode-lookup /usr/l
 COPY --from=builder-rust /src/server/target/release/build-gnaf-index /usr/local/bin/
 COPY --from=builder-rust /src/server/target/release/build-openaddresses-index /usr/local/bin/
 COPY --from=builder-rust /src/server/target/release/build-autocomplete-fst /usr/local/bin/
+COPY --from=builder-rust /src/server/target/release/fetch-data /usr/local/bin/
 COPY entrypoint.sh /usr/local/bin/
-COPY scripts/download-region.sh /usr/local/bin/
 
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/download-region.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["auto"]

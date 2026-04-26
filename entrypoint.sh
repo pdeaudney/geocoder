@@ -6,7 +6,7 @@ DATA_DIR="${DATA_DIR:-/data}"
 download_pbf() {
     mkdir -p "$DATA_DIR/pbf"
     if [ -z "$PBF_URLS" ] && [ -n "$REGION" ]; then
-        DATA_DIR="$DATA_DIR" download-region.sh "$REGION" "$DATA_DIR/pbf"
+        DATA_DIR="$DATA_DIR" fetch-data --region "$REGION" --data-dir "$DATA_DIR"
         return
     fi
     for url in $PBF_URLS; do

@@ -114,6 +114,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # adds a direct import path.
 libc = "0.2"
 tempfile = "3"
+# parking_lot's Mutex returns the guard directly (no Result), keeping
+# the integration tests readable. Already a transitive dep via several
+# of our crates.
+parking_lot = "0.12"
 
 [[bench]]
 name = "reverse_geocode"

@@ -88,33 +88,50 @@ to unpack the WhosOnFirst SQLite archive 3–5× faster than stock `bzip2`.
 Optional but cuts ~5 minutes off a planet build's fetch step. The script
 falls back to `pbzip2` then `bzip2` if `lbzip2` isn't installed.
 
-Fetch the source data:
+Fetch the source data with the `fetch-data` binary
+(`server/src/bin/fetch_data.rs`):
 
 ```bash
-# All-in-one fetch — OSM PBF, OpenAddresses, WhosOnFirst, optional MaxMind + G-NAF.
-# Defaults output to ./data/. Re-runnable; existing files are skipped.
-./scripts/fetch-build-data.sh --region au         # AU-only build
-./scripts/fetch-build-data.sh --region oceania    # full Australia/Oceania continent (AU, NZ, Fiji, PNG, etc.)
-./scripts/fetch-build-data.sh --region europe     # EU
-./scripts/fetch-build-data.sh --region planet     # full planet (~85 GB)
+# Build the binary once.
+cargo build --release --manifest-path server/Cargo.toml --bin fetch-data
+
+# All-in-one fetch — OSM PBF + WhosOnFirst (+ optional OpenAddresses, MaxMind, G-NAF).
+# Defaults output to ./data/. Conditional GET + resumable downloads:
+# re-runs are bandwidth-cheap (304 short-circuit) and a killed run resumes
+# from the .partial sidecar on the next invocation.
+./server/target/release/fetch-data --region au --wof          # AU-only
+./server/target/release/fetch-data --region oceania --wof     # full Australia/Oceania
+./server/target/release/fetch-data --region europe --wof      # EU
+./server/target/release/fetch-data --region planet --wof      # planet ~85 GB
+./server/target/release/fetch-data --region all-continents --wof  # planet via 9 parallel continent extracts (recommended)
 ```
 
-The script delegates to three smaller fetchers — use them directly for
-piecewise control:
+Each PBF lands at `data/pbf/<region>-latest.osm.pbf` with three
+sidecars next to it:
+
+  - `<file>.etag` — captured from the response's `ETag` header so the
+    next run can send `If-None-Match` and short-circuit on 304.
+  - `<file>.partial` — in-flight download (atomically renamed to the
+    final filename on success; survives a killed process for resume).
+  - `<file>.state.txt` — Osmosis-format replication state
+    (`timestamp=…` / `sequenceNumber=…`) that the rest of the OSM
+    ecosystem (`pyosmium-get-changes`, `osmupdate`, our own
+    `update-index.sh`) consumes.
+
+Mix and match sources by combining flags:
 
 ```bash
-# Just OSM (Geofabrik) for a named region into data/pbf/.
-./scripts/download-region.sh australia data/pbf
+# Add OpenAddresses (Requester-Pays, needs AWS creds) and MaxMind (license-key) and G-NAF.
+export MAXMIND_LICENSE_KEY=...
+export GNAF_ARCHIVE_URL=https://...
+./server/target/release/fetch-data --region au --wof --openaddresses au --maxmind --gnaf
 
-# Just OpenAddresses (S3 Requester-Pays; needs AWS creds) into data/openaddresses/.
-OA_OUTPUT_DIR=data/openaddresses ./scripts/fetch-openaddresses.sh --sources "au nz"
-
-# WhosOnFirst admin SQLite — covers admin polygons for countries whose
-# Geofabrik extract lacks a admin_level=2 country relation.
-WOF_COUNTRIES="au gb us" ./scripts/fetch-build-data.sh --region au --skip-osm --skip-oa
+# WoF only, scoped to specific countries.
+./server/target/release/fetch-data --wof --wof-countries "au gb us" --data-dir ./data
 ```
 
-Two sources are license-gated and skipped without an env var:
+License-gated sources are skipped with a structured warning when their
+env var isn't set, so the binary degrades gracefully:
 
 ```bash
 # MaxMind GeoLite2-City — free signup at maxmind.com/en/geolite2/signup.
@@ -122,11 +139,9 @@ Two sources are license-gated and skipped without an env var:
 export MAXMIND_LICENSE_KEY=...
 
 # G-NAF — Australian Geocoded National Address File. Manual license
-# acceptance at https://geoscape.com.au/data/g-naf/. Hand the script the
-# accepted-URL it gave you.
+# acceptance at https://geoscape.com.au/data/g-naf/. Paste the accepted
+# URL into GNAF_ARCHIVE_URL.
 export GNAF_ARCHIVE_URL=https://...
-
-./scripts/fetch-build-data.sh --region au
 ```
 
 #### A note on OpenAddresses + AWS
@@ -137,9 +152,9 @@ bucket `s3://v2.openaddresses.io`. A free-tier AWS account is enough
 — the requester-pays charge is single-digit dollars for the planet,
 cents for a single country. If you can't use AWS at all:
 
-- **AU-only:** pass `--skip-oa`. G-NAF is the better address-points
-  dataset for AU anyway.
-- **Other regions:** pass `--skip-oa`. OSM alone covers most
+- **AU-only:** omit `--openaddresses`. G-NAF is the better
+  address-points dataset for AU anyway.
+- **Other regions:** omit `--openaddresses`. OSM alone covers most
   `/reverse` queries; the address-point refinement on `/search` and
   `/validate` won't be available, but the service still works.
 - **Specific countries:** the per-source `data` URLs in the
