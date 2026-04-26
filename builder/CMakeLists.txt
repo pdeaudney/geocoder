@@ -61,16 +61,29 @@ target_compile_options(build-index PRIVATE
     -Wall -Wextra -Wshadow -Wpedantic
 )
 
-# Suppress GCC's psabi notes ("parameter passing for argument of
-# type X when C++17 is enabled changed to match C++14 in GCC 10.1").
-# These fire on every small-struct-by-value site in the S2 headers
-# on aarch64 + GCC 10.1+, producing ~80 lines of pure noise on a
-# clean build. They're informational notes about an ABI change
-# between compiler versions, not warnings — no codegen impact, no
-# risk of a real bug being hidden. The flag is GCC-only so we gate
-# on compiler id.
+# GCC-only false-positive suppressions. Both fire on upstream code
+# (S2 headers, libosmium) and have nothing to do with our build_index.cpp.
+# Gated on compiler id so clang/AppleClang on dev macOS is unaffected.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(build-index PRIVATE -Wno-psabi)
+    # `-Wno-psabi`: GCC 10.1+ emits a *note* (informational, not a
+    # warning) "parameter passing for argument of type X when C++17
+    # is enabled changed to match C++14 in GCC 10.1" on every
+    # small-struct-by-value site in the S2 headers on aarch64. ~30+
+    # notes per build for zero signal — describes an ABI change
+    # between compiler versions, no codegen impact, no risk of
+    # hiding a real bug.
+    #
+    # `-Wno-stringop-overread`: GCC 11+ emits a false positive in
+    # libosmium's `OSMObjectBuilder::set_user` — the static analyser
+    # can't follow osmium's tagged-pointer / computed-offset pattern
+    # used to lay out variable-length user names after the fixed-size
+    # Relation struct, and concludes "offset [34, 42] into source
+    # object of size 32" must be out-of-bounds. It isn't; osmium's
+    # allocator extends the buffer past the struct's nominal size on
+    # purpose. The warning fires only after several inlining passes
+    # so a #pragma at the include site doesn't catch it. Suppression
+    # is upstream-recommended for this specific GCC + osmium combo.
+    target_compile_options(build-index PRIVATE -Wno-psabi -Wno-stringop-overread)
 endif()
 target_compile_options(build-index PRIVATE
     $<$<CONFIG:Release>:-O3 -DNDEBUG>
