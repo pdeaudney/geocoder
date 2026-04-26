@@ -419,6 +419,72 @@ rpc IpGeocode(IpGeocodeRequest) returns (IpGeocodeResponse);
 
 Disable with `--no-default-features --features forward` at build time.
 
+## Observability
+
+Production-ready instrumentation across three surfaces. Everything degrades gracefully when its env var isn't set, so a dev `cargo run` doesn't need any of this configured.
+
+### Health probes
+
+| Path | Status code | Purpose |
+|---|---|---|
+| `GET /healthz` | 200 always (process-alive only) | Backwards-compatible blanket healthcheck. |
+| `GET /healthz/live` | 200 always | k8s liveness probe — distinct from ready. |
+| `GET /healthz/ready` | 503 while loading; 200 once mmap'd | ALB / k8s readiness probe. Drains the host from rotation by flipping back to 503 on graceful shutdown. |
+| `GET /healthz/indexes` | 200 with per-index summary JSON | Observability — what's loaded, file sizes, mtimes. |
+
+The pre-deploy smoke test at `scripts/smoke-test.sh` exercises all four plus the query endpoints.
+
+### Prometheus `/metrics`
+
+Scrape `GET /metrics` for the canonical text-exposition format. Six metrics shipped today:
+
+  - `geocoder_requests_total{endpoint,country}` — request counter with country code derived from the response.
+  - `geocoder_request_duration_seconds{endpoint}` — histogram with explicit buckets matched to our SLO targets.
+  - Plus four shadow-validation metrics (see below).
+
+Default port: same as the REST surface (`/metrics` on `:3000`). Recording rules + multi-window burn-rate alerts are pre-built in [`docs/alerts/prometheus-alerts.yaml`](docs/alerts/prometheus-alerts.yaml). SLO definitions and runbook entries: [`docs/sli-slo.md`](docs/sli-slo.md), [`RUNBOOK.md`](RUNBOOK.md).
+
+### OpenTelemetry export (traces + metrics)
+
+OTLP gRPC or HTTP/protobuf, against any OTel-native backend (Honeycomb, Datadog APM, New Relic, Tempo, Mimir, etc.):
+
+```bash
+OTEL_TRACE_ENABLED=true \
+OTEL_METRICS_ENABLED=true \
+OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.your-domain:4317 \
+OTEL_SERVICE_NAME=geocoder \
+./target/release/query-server data/index
+```
+
+Per-request server spans (REST + gRPC) carry semconv attributes; a parent span wraps each handler call. Internal-log dedup (process-static, per-callsite) suppresses spammy collector-down warnings — see `GEOCODER_LOG_DEDUP_WINDOW_SEC`.
+
+The Prometheus surface and the OTLP exporter are independent: enable either, both, or neither. Failures on one path never block the other or the request hot loop. Detailed deployment guidance + the K8s sidecar pattern: [`docs/kubernetes-deployment.md`](docs/kubernetes-deployment.md).
+
+### Shadow validation against Google Geocoding
+
+The server can fire a sampled async copy of every reverse / forward query at Google's Geocoding API and compare results — letting you measure accuracy drift over time without affecting request latency. The shadow worker is a fire-and-forget mpsc dispatcher; the request hot loop never awaits Google.
+
+```bash
+GOOGLE_GEOCODING_ENABLED=true \
+GOOGLE_GEOCODING_API_KEY=AIza... \
+GOOGLE_GEOCODING_SAMPLE_RATE=0.001 \
+GOOGLE_GEOCODING_DAILY_CAP=1000 \
+./target/release/query-server data/index
+```
+
+Defaults: `SAMPLE_RATE=0.001` (0.1 % of requests), `DAILY_CAP=1000` calls/day. The cap is hard-clamped to `MAX_DAILY_CAP=100_000` regardless of env value (process-wide constant in `server/src/shadow.rs`) so a misconfiguration can't drain a 7-figure quota overnight.
+
+Four metrics surface the comparison:
+
+  - `geocoder_shadow_outcomes_total{endpoint,outcome}` — per-call outcome (sent, queue_full, throttled, request_denied, etc.).
+  - `geocoder_shadow_match_total{endpoint,axis,result}` — per-axis agreement (country / state / locality / street).
+  - `geocoder_shadow_distance_meters{endpoint}` — histogram of the haversine distance between our coordinate and Google's.
+  - `geocoder_shadow_queue_full_total` — back-pressure counter (the dispatcher has a bounded mpsc channel).
+
+Sticky-disable behaviour: once Google returns `REQUEST_DENIED` or `OVER_QUERY_LIMIT`, the worker stops issuing new calls until the next UTC-midnight reset, so a billing accident can't drain your daily allowance.
+
+Costs: at $5/1000 queries × 0.1 % default sample × 1 M req/day = **~$5/day**. Tune `GOOGLE_GEOCODING_SAMPLE_RATE` and `GOOGLE_GEOCODING_DAILY_CAP` for whatever budget you've signed off on.
+
 ## Data sources
 
 The server loads whatever is present in the data directory; any missing source degrades gracefully to a simpler response.
@@ -497,6 +563,23 @@ In-flight queries keep the old `Arc<Index>` until they return; new queries see t
 | `GEOCODER_RELOAD_INTERVAL_SEC` | `5` | Reload marker poll interval |
 | `GEOCODER_ADMIN_CONFIG` | (embedded) | Path to a JSON file overriding the `admin_level` → output-field mapping |
 | `GEOLITE2_DB` | `$DATA_DIR/GeoLite2-City.mmdb` | MaxMind GeoLite2 path for IP geocoding |
+| `GEOCODER_LOG_FORMAT` | autopick: `pretty` if tty, `json` otherwise | Log encoder. `json` (one structured event per line), `pretty` (human-readable), or `compact`. |
+| `GEOCODER_LOG_DEDUP_WINDOW_SEC` | `30` | Per-callsite throttle window for repeated log events (suppresses opentelemetry-exporter spam during a collector outage). `0` disables. |
+| **OpenTelemetry traces + metrics** | | See the [Observability section](#observability) for end-to-end usage. |
+| `OTEL_TRACE_ENABLED` | follows endpoint | Master switch for OTLP trace export (`true` / `false`). Unset → enabled iff `OTEL_EXPORTER_OTLP_ENDPOINT` is set. |
+| `OTEL_METRICS_ENABLED` | follows endpoint | Master switch for OTLP metric export (independent of traces). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (off) | Collector endpoint, e.g. `http://otel-collector:4317`. Shared by traces + metrics. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | `grpc` or `http/protobuf`. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | inherits | Per-signal override (rarely needed). |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | inherits | Per-signal override. |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `30000` (ms) | Periodic metric export interval. Clamped to `[1000, 300_000]`. |
+| `OTEL_SERVICE_NAME` | `geocoder` | Resource attribute for the service. |
+| `OTEL_RESOURCE_ATTRIBUTES` | (empty) | Standard OTel `key=value,key2=value2` resource attributes (env, version, etc.). |
+| **Shadow validation** (`/reverse`, `/search`) | | See the [Observability section](#observability) for metric semantics. |
+| `GOOGLE_GEOCODING_ENABLED` | `false` | Master switch for the Google shadow worker. Independent from the API key so an operator can toggle the feature without rotating the key. |
+| `GOOGLE_GEOCODING_API_KEY` | — | Google Maps Platform API key with the Geocoding API enabled. Required when shadow is on. |
+| `GOOGLE_GEOCODING_SAMPLE_RATE` | `0.001` | Fraction of requests that trigger a shadow call (`0.0`–`1.0`). |
+| `GOOGLE_GEOCODING_DAILY_CAP` | `1000` | Daily call ceiling. Hard-clamped to `MAX_DAILY_CAP=100_000`. Resets at UTC midnight. |
 
 ## Tooling
 
@@ -521,6 +604,18 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for:
 - Reverse + forward query paths as numbered flows
 - Deployment sizing recommendations for AWS (EC2/EBS/NVMe)
 - Comparison to Radar's HorizonDB architecture
+
+## Operations
+
+| Topic | Doc |
+|---|---|
+| Per-alert response procedures + on-call playbook | [`RUNBOOK.md`](RUNBOOK.md) |
+| SLO targets per endpoint + multi-window burn-rate alert pattern | [`docs/sli-slo.md`](docs/sli-slo.md) |
+| Prometheus alert + recording-rule definitions | [`docs/alerts/`](docs/alerts/) |
+| K8s deployment patterns (sidecar OTel, resource floors, HPA) | [`docs/kubernetes-deployment.md`](docs/kubernetes-deployment.md) |
+| Capacity plan: per-instance resource floors, throughput methodology | [`docs/performance/capacity-plan.md`](docs/performance/capacity-plan.md) |
+| Worldwide-build wall-time + memory envelopes | [`docs/worldwide-build.md`](docs/worldwide-build.md) |
+| Performance snapshots (LTO config, hashmap choice, read-path optimisations) | [`docs/performance/`](docs/performance/) |
 
 ## License
 
