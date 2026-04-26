@@ -16,6 +16,7 @@ use std::fs::File;
 pub mod address_points;
 pub mod admin_config;
 pub mod autocomplete;
+pub mod fetcher;
 pub mod geo;
 pub mod gnaf;
 pub mod i18n;

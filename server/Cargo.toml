@@ -63,7 +63,7 @@ http = "1"
 # Already transitive via opentelemetry-otlp's reqwest-client feature; pinning
 # it here unifies the version and lets us pick rustls-tls explicitly.
 # default-features=false to avoid pulling native-tls (and thus OpenSSL).
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2", "stream"] }
 # rand for the shadow sampler's per-request probability gate. Already
 # transitive via opentelemetry_sdk's `trace` feature; promoting it to
 # direct gets us a stable import path without a version bump.
@@ -79,6 +79,21 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # once-and-write API matches our handler shape and we don't need
 # encoder pluggability.
 prometheus = { version = "0.13", default-features = false }
+# Data fetcher (`fetch-data` binary) deps. CLI parsing, content
+# integrity, MaxMind tarball extract, AWS S3 (OpenAddresses
+# Requester-Pays), HTTP date formatting, terminal progress.
+clap = { version = "4.6", features = ["derive", "env"] }
+md-5 = "0.10"
+httpdate = "1.0"
+indicatif = "0.18"
+flate2 = "1.0"
+tar = "0.4"
+anyhow = "1.0"
+futures = "0.3"
+aws-config = { version = "1.5", default-features = false, features = ["rustls", "rt-tokio", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.122", default-features = false, features = ["rustls", "rt-tokio", "behavior-version-latest"] }
+aws-credential-types = "1.2"
+url = "2"
 
 [features]
 default = ["forward", "grpc"]
@@ -98,6 +113,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # libc is already a transitive dep of tokio/hyper; pulling it in here just
 # adds a direct import path.
 libc = "0.2"
+tempfile = "3"
 
 [[bench]]
 name = "reverse_geocode"
@@ -131,6 +147,10 @@ path = "src/bin/build_openaddresses_index.rs"
 [[bin]]
 name = "build-autocomplete-fst"
 path = "src/bin/build_autocomplete_fst.rs"
+
+[[bin]]
+name = "fetch-data"
+path = "src/bin/fetch_data.rs"
 
 [profile.release]
 opt-level = 3
