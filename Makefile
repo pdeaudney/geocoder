@@ -1,6 +1,11 @@
-.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-worldwide pelias-refresh pelias-full-refresh bench inspect-dump wof-import test
+.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-worldwide pelias-refresh pelias-full-refresh bench inspect-dump wof-import test builder builder-clean clean
 
 help:
+	@echo "Build:"
+	@echo "  builder               Build the C++ build-index binary into ./build/"
+	@echo "  builder-clean         Remove the C++ build artefacts (./build/ and builder/build/)"
+	@echo "  clean                 builder-clean + cargo clean"
+	@echo ""
 	@echo "Regression / testing:"
 	@echo "  test                  Run cargo test across the workspace"
 	@echo "  regression-au         Run the AU regression suite (release build)"
@@ -20,6 +25,30 @@ help:
 	@echo "  ami-validate          Validate the Packer config without building"
 	@echo "  ami                   Build the serving AMI (requires PKRVARS=path/to/vars.hcl)"
 	@echo "  ami-worldwide-build   Build the worldwide index on EC2 r8g.16xlarge (~18-24h, ~$$30-80)"
+
+# C++ builder: configures + builds out-of-tree under ./build/. The
+# canonical layout (matched by Dockerfile, run-planet-build.sh, and
+# the README quickstart) puts the workspace's `build/` at the repo
+# root with `builder/` as the source dir.
+#
+# Re-runs are incremental — cmake's regeneration is fast and `make`
+# only rebuilds what changed. For a true cold rebuild, run
+# `make builder-clean builder`.
+NPROC := $(shell command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+builder:
+	@mkdir -p build
+	@cd build && cmake ../builder
+	@cd build && $(MAKE) -j$(NPROC)
+	@echo "==> build-index ready at ./build/build-index"
+
+# `builder/build/` shouldn't exist (the canonical pattern is
+# out-of-tree under repo-root `build/`), but it appears if anyone
+# runs cmake from inside builder/ — wipe both to be sure.
+builder-clean:
+	rm -rf build builder/build
+
+clean: builder-clean
+	cargo clean
 
 test:
 	cargo test
