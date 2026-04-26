@@ -351,6 +351,11 @@ pub fn build_partitioned_with_heap(
     };
 
     let phase1 = Instant::now();
+    eprintln!(
+        "[stage] forward_classify: starting (rayon threads = {}, RAYON_NUM_THREADS = {:?})",
+        rayon::current_num_threads(),
+        std::env::var("RAYON_NUM_THREADS").ok(),
+    );
     let mut buckets: Map<[u8; 2], Vec<PendingDoc<'_>>> = Map::new();
 
     // Places. par_iter parallelises the per-doc find_admin (the
