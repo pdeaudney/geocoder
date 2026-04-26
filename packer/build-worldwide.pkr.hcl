@@ -193,11 +193,11 @@ source "amazon-ebs" "worldwide_build" {
   }
 
   tags = {
-    Name        = local.ami_name
-    Purpose     = "worldwide-index-builder"
-    GitRef      = var.git_ref
-    OutputS3    = var.output_s3_prefix
-    OsmRegion   = var.osm_region
+    Name      = local.ami_name
+    Purpose   = "worldwide-index-builder"
+    GitRef    = var.git_ref
+    OutputS3  = var.output_s3_prefix
+    OsmRegion = var.osm_region
   }
 }
 
@@ -310,6 +310,9 @@ build {
       "set -e",
       "cd /mnt/nvme/geocoder",
       "mkdir -p data/pbf test-data",
+      // Rust toolchain was installed via rustup in stage 1; pull
+      // its env into this shell so cargo / rustc are on PATH.
+      "source $HOME/.cargo/env",
       // Build the Rust fetch-data binary first (cargo handles
       // incremental compile; this is a one-shot AMI bake so we
       // pay the full release-build cost once here).
