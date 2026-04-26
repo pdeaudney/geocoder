@@ -103,11 +103,28 @@ cargo build --release --manifest-path server/Cargo.toml --bin fetch-data
 # Defaults output to ./data/. Conditional GET + resumable downloads:
 # re-runs are bandwidth-cheap (304 short-circuit) and a killed run resumes
 # from the .partial sidecar on the next invocation.
+
+# Worldwide builds — RECOMMENDED.
+# 9 Geofabrik continent extracts in parallel. Faster CDN throughput
+# than planet.osm.org's single throttled stream, lower per-pass
+# memory pressure (each continent's working set is a fraction of
+# planet's), and per-continent resumability if one fails. Build
+# pipeline's pass-4 dedup handles the ~5 % border overlap; the
+# resulting merged index is functionally identical to a planet
+# build for the geocoder query workload.
+./target/release/fetch-data --region all-continents --wof
+
+# Regional builds — cheap and fast for single-region serving.
 ./target/release/fetch-data --region au --wof          # AU-only
 ./target/release/fetch-data --region oceania --wof     # full Australia/Oceania
 ./target/release/fetch-data --region europe --wof      # EU
-./target/release/fetch-data --region planet --wof      # planet ~85 GB
-./target/release/fetch-data --region all-continents --wof  # planet via 9 parallel continent extracts (recommended)
+
+# Legacy / fallback: single 80 GB stream from planet.openstreetmap.org.
+# Use only when Geofabrik is unreachable or you need a canonically
+# complete planet (relevant for OSM analytics or compliance use cases
+# that care about cross-continent multipolygon relations — not the
+# typical geocoding workload).
+./target/release/fetch-data --region planet --wof
 ```
 
 Full CLI surface (`./target/release/fetch-data --help`):
