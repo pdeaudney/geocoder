@@ -301,7 +301,9 @@ pub fn build_partitioned_with_heap(
     dest_root: &Path,
     heap_bytes: usize,
 ) -> Result<std::collections::HashMap<[u8; 2], BuildStats>, String> {
+    use rayon::prelude::*;
     use std::collections::HashMap as Map;
+    use std::time::Instant;
 
     let source_str = source
         .to_str()
@@ -317,51 +319,24 @@ pub fn build_partitioned_with_heap(
     std::fs::create_dir_all(dest_root)
         .map_err(|e| format!("mkdir {}: {}", dest_root.display(), e))?;
 
-    // Writers are created lazily, per unique country code we see in the
-    // data. Memory is bounded by the number of distinct countries, not
-    // docs — cheap even for a worldwide build.
-    struct CountryBuild {
-        writer: IndexWriter,
-        stats: BuildStats,
-    }
-    let mut per_country: Map<[u8; 2], CountryBuild> = Map::new();
-
-    // Emit helper. Resolves (or lazily creates) the writer for the doc's
-    // country; skips docs with no country.
-    fn get_or_create<'a>(
-        per_country: &'a mut Map<[u8; 2], CountryBuild>,
-        dest_root: &Path,
-        schema: &Schema,
-        cc: [u8; 2],
-        heap_bytes: usize,
-    ) -> Result<&'a mut CountryBuild, String> {
-        if !per_country.contains_key(&cc) {
-            let cc_lower = [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()];
-            let dir = dest_root.join(format!(
-                "tantivy_{}{}",
-                cc_lower[0] as char, cc_lower[1] as char
-            ));
-            if dir.exists() {
-                std::fs::remove_dir_all(&dir)
-                    .map_err(|e| format!("clear {}: {}", dir.display(), e))?;
-            }
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
-            let t_index = TIndex::create_in_dir(&dir, schema.clone())
-                .map_err(|e| format!("create tantivy {}: {}", dir.display(), e))?;
-            register_tokenizer(&t_index);
-            let writer = t_index
-                .writer(heap_bytes)
-                .map_err(|e| format!("tantivy writer: {e}"))?;
-            per_country.insert(
-                cc,
-                CountryBuild {
-                    writer,
-                    stats: BuildStats::default(),
-                },
-            );
-        }
-        Ok(per_country.get_mut(&cc).expect("just inserted"))
+    // Phase 1: classify all docs into per-country buckets. The expensive
+    // step here is `idx.find_admin(lat, lng)` (point-in-polygon test);
+    // PendingDoc borrows `&str` from the loaded Index so the intermediate
+    // is cheap — just (lat, lng, refs) × N docs.
+    //
+    // Streets dedup happens here so each country bucket is already
+    // distinct on (name_id, suburb, cc) before we hand it to tantivy.
+    // Same dedup key as the previous serial implementation; behaviour
+    // is preserved.
+    struct PendingDoc<'a> {
+        name: &'a str,
+        kind: u64,
+        rank: u64,
+        lat: f64,
+        lng: f64,
+        suburb: Option<&'a str>,
+        state: Option<&'a str>,
+        country_code: [u8; 2],
     }
 
     // Helper: resolve a doc's country code from find_admin-derived bytes.
@@ -375,7 +350,10 @@ pub fn build_partitioned_with_heap(
         Some(cc)
     };
 
-    // Places
+    let phase1 = Instant::now();
+    let mut buckets: Map<[u8; 2], Vec<PendingDoc<'_>>> = Map::new();
+
+    // Places.
     if let Some(pp) = idx.place_points.as_ref() {
         let points: &[PlacePoint] = as_typed_slice(pp);
         for p in points {
@@ -389,25 +367,20 @@ pub fn build_partitioned_with_heap(
             let Some(cc) = country_bytes(admin.country_code) else {
                 continue;
             };
-            let cb = get_or_create(&mut per_country, dest_root, &schema_handle.schema, cc, heap_bytes)?;
-            cb.writer
-                .add_document(tantivy_doc(
-                    &schema_handle,
-                    name,
-                    KIND_PLACE,
-                    p.rank as u64,
-                    lat,
-                    lng,
-                    admin.city,
-                    admin.state,
-                    admin.country_code,
-                ))
-                .map_err(|e| format!("index place: {e}"))?;
-            cb.stats.places += 1;
+            buckets.entry(cc).or_default().push(PendingDoc {
+                name,
+                kind: KIND_PLACE,
+                rank: p.rank as u64,
+                lat,
+                lng,
+                suburb: admin.city,
+                state: admin.state,
+                country_code: cc,
+            });
         }
     }
 
-    // Streets
+    // Streets, with dedup by (name_id, suburb, cc).
     let ways: &[WayHeader] = as_typed_slice(&idx.street_ways);
     let nodes: &[NodeCoord] = as_typed_slice(&idx.street_nodes);
     let mut seen: std::collections::HashSet<(u32, String, [u8; 2])> =
@@ -433,31 +406,90 @@ pub fn build_partitioned_with_heap(
         if !seen.insert((way.name_id, suburb_key, cc)) {
             continue;
         }
-        let cb = get_or_create(&mut per_country, dest_root, &schema_handle.schema, cc, heap_bytes)?;
-        cb.writer
-            .add_document(tantivy_doc(
-                &schema_handle,
-                name,
-                KIND_STREET,
-                26,
-                lat,
-                lng,
-                admin.city,
-                admin.state,
-                admin.country_code,
-            ))
-            .map_err(|e| format!("index street: {e}"))?;
-        cb.stats.streets += 1;
+        buckets.entry(cc).or_default().push(PendingDoc {
+            name,
+            kind: KIND_STREET,
+            rank: 26,
+            lat,
+            lng,
+            suburb: admin.city,
+            state: admin.state,
+            country_code: cc,
+        });
     }
+    drop(seen);
+    eprintln!(
+        "[stage] forward_classify: {:.3}s ({} countries, {} docs)",
+        phase1.elapsed().as_secs_f64(),
+        buckets.len(),
+        buckets.values().map(|v| v.len()).sum::<usize>(),
+    );
 
-    // Commit all writers and collect stats.
-    let mut stats_out: Map<[u8; 2], BuildStats> = Map::new();
-    for (cc, mut cb) in per_country {
-        cb.writer
-            .commit()
-            .map_err(|e| format!("commit {}{}: {}", cc[0] as char, cc[1] as char, e))?;
-        stats_out.insert(cc, cb.stats);
-    }
+    // Phase 2: parallel per-country tantivy builds. Each writer is
+    // single-threaded internally — rayon supplies the cross-country
+    // parallelism, so we don't oversubscribe with N×min(8, ncpus)
+    // tantivy worker threads on top of N rayon workers.
+    //
+    // Writers hold `heap_bytes` each. Concurrent peak is bounded by
+    // rayon's thread pool size (defaults to ncpus); operators on
+    // memory-tight hosts can either lower `--tantivy-heap-mb` or set
+    // `RAYON_NUM_THREADS=N` to reduce concurrent writer count.
+    let phase2 = Instant::now();
+    let dest_root_buf = dest_root.to_path_buf();
+    let stats_out: Result<Map<[u8; 2], BuildStats>, String> = buckets
+        .into_par_iter()
+        .map(|(cc, docs)| -> Result<([u8; 2], BuildStats), String> {
+            let cc_lower = [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()];
+            let dir = dest_root_buf.join(format!(
+                "tantivy_{}{}",
+                cc_lower[0] as char, cc_lower[1] as char
+            ));
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)
+                    .map_err(|e| format!("clear {}: {}", dir.display(), e))?;
+            }
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
+            let t_index = TIndex::create_in_dir(&dir, schema_handle.schema.clone())
+                .map_err(|e| format!("create tantivy {}: {}", dir.display(), e))?;
+            register_tokenizer(&t_index);
+            let mut writer = t_index
+                .writer_with_num_threads(1, heap_bytes)
+                .map_err(|e| format!("tantivy writer: {e}"))?;
+
+            let mut stats = BuildStats::default();
+            for d in &docs {
+                writer
+                    .add_document(tantivy_doc(
+                        &schema_handle,
+                        d.name,
+                        d.kind,
+                        d.rank,
+                        d.lat,
+                        d.lng,
+                        d.suburb,
+                        d.state,
+                        Some(d.country_code),
+                    ))
+                    .map_err(|e| format!("index doc: {e}"))?;
+                if d.kind == KIND_PLACE {
+                    stats.places += 1;
+                } else {
+                    stats.streets += 1;
+                }
+            }
+            writer.commit().map_err(|e| {
+                format!("commit {}{}: {}", cc[0] as char, cc[1] as char, e)
+            })?;
+            Ok((cc, stats))
+        })
+        .collect();
+    let stats_out = stats_out?;
+    eprintln!(
+        "[stage] forward_build_parallel: {:.3}s ({} countries built)",
+        phase2.elapsed().as_secs_f64(),
+        stats_out.len(),
+    );
     Ok(stats_out)
 }
 
