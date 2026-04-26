@@ -18,13 +18,15 @@ resolver = "2"
 
 [profile.release]
 opt-level = 3
-# LTO matters for the hot reverse-geocoding path. The query-server
-# `Index::query` chain inlines aggressively across `geo.rs`,
-# `address_points.rs`, and `i18n.rs`; without LTO we leave 5–10 %
-# on the table on synthetic benches.
-lto = true
+# Thin LTO measured against the existing Criterion benches gives the
+# same runtime wins on hot paths as fat LTO (-1.8 % median across
+# 67 benches) at half the build-time cost (+21 % cold build vs +74 %
+# for fat). The one workload where fat is meaningfully better is
+# `fst_starts_with_any`, a cold path. See
+# `docs/performance/lto-config-2026-04-26.md` for the measurements.
+lto = "thin"
 
 [profile.bench]
 opt-level = 3
-lto = true
+lto = "thin"
 debug = false

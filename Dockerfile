@@ -24,10 +24,11 @@ WORKDIR /src
 COPY server/ server/
 # This builder copies only `server/`, so cargo runs without the
 # workspace Cargo.toml and the workspace-level `[profile.release]`
-# (lto = true) wouldn't otherwise apply. Set it on the command line
-# to keep parity with local + Packer builds.
+# (lto = "thin") wouldn't otherwise apply. Set it on the command
+# line to keep parity with local + Packer builds. See
+# docs/performance/lto-config-2026-04-26.md for why thin over fat.
 RUN cargo build --release --manifest-path server/Cargo.toml \
-    --config 'profile.release.lto=true' \
+    --config 'profile.release.lto="thin"' \
     --bins
 
 # Stage 3: Runtime
