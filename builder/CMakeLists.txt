@@ -60,6 +60,18 @@ target_include_directories(build-index PRIVATE third_party)
 target_compile_options(build-index PRIVATE
     -Wall -Wextra -Wshadow -Wpedantic
 )
+
+# Suppress GCC's psabi notes ("parameter passing for argument of
+# type X when C++17 is enabled changed to match C++14 in GCC 10.1").
+# These fire on every small-struct-by-value site in the S2 headers
+# on aarch64 + GCC 10.1+, producing ~80 lines of pure noise on a
+# clean build. They're informational notes about an ABI change
+# between compiler versions, not warnings — no codegen impact, no
+# risk of a real bug being hidden. The flag is GCC-only so we gate
+# on compiler id.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(build-index PRIVATE -Wno-psabi)
+endif()
 target_compile_options(build-index PRIVATE
     $<$<CONFIG:Release>:-O3 -DNDEBUG>
 )

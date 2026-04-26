@@ -38,7 +38,7 @@ NPROC := $(shell command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu 
 builder:
 	@mkdir -p build
 	@cd build && cmake ../builder
-	@cd build && $(MAKE) -j$(NPROC)
+	@cd build && $(MAKE) -j$(NPROC) --no-print-directory
 	@echo "==> build-index ready at ./build/build-index"
 
 # `builder/build/` shouldn't exist (the canonical pattern is
