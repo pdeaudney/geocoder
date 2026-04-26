@@ -30,6 +30,7 @@ use query_server::{
     as_typed_slice, Index, NodeCoord, PlacePoint, WayHeader, DEFAULT_ADMIN_CELL_LEVEL,
     DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL,
 };
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -113,6 +114,22 @@ struct PerCountry {
     keys: BTreeMap<String, u64>,
 }
 
+/// One classified row, post `find_admin` and per-country filter,
+/// pre intern + entry/key build. Borrows `&str` from the loaded
+/// Index to keep the intermediate cheap on planet-scale data.
+struct Candidate<'a> {
+    cc: [u8; 2],
+    name: &'a str,
+    kind: u8,
+    rank: u8,
+    lat: f32,
+    lng: f32,
+    suburb: Option<&'a str>,
+    /// Used by the sequential dedup pass after par_iter for streets
+    /// (places don't dedup); kept on places too for symmetry.
+    name_id: u32,
+}
+
 fn run(
     dir: &PathBuf,
     country_filter: Option<&HashSet<[u8; 2]>>,
@@ -127,8 +144,6 @@ fn run(
         DEFAULT_ADMIN_CELL_LEVEL,
         DEFAULT_SEARCH_DISTANCE,
     )?;
-
-    let mut by_country: HashMap<[u8; 2], PerCountry> = HashMap::new();
 
     fn intern(pc: &mut PerCountry, s: &str) -> u32 {
         if let Some(&off) = pc.intern_index.get(s) {
@@ -150,127 +165,169 @@ fn run(
         pc
     }
 
-    fn add(
-        by_country: &mut HashMap<[u8; 2], PerCountry>,
-        country_filter: Option<&HashSet<[u8; 2]>>,
-        cc: [u8; 2],
-        name: &str,
-        kind: u8,
-        rank: u8,
-        lat: f32,
-        lng: f32,
-        suburb: Option<&str>,
-    ) {
-        if let Some(filter) = country_filter {
-            if !filter.contains(&[cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()]) {
-                return;
-            }
-        }
-        let key = normalise_fst_key(name);
+    fn ingest(pc: &mut PerCountry, cand: &Candidate<'_>) {
+        let key = normalise_fst_key(cand.name);
         if key.is_empty() {
             return;
         }
-        let cc_lower = [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()];
-        let pc = by_country.entry(cc_lower).or_insert_with(fresh_per_country);
-
-        let name_offset = intern(pc, name);
-        let suburb_offset = match suburb.filter(|s| !s.is_empty()) {
+        let name_offset = intern(pc, cand.name);
+        let suburb_offset = match cand.suburb.filter(|s| !s.is_empty()) {
             Some(s) => intern(pc, s),
             None => 0,
         };
         let entry = AutocompleteEntry {
-            lat,
-            lng,
+            lat: cand.lat,
+            lng: cand.lng,
             name_offset,
             suburb_offset,
-            kind,
-            rank,
+            kind: cand.kind,
+            rank: cand.rank,
             pad: [0; 2],
         };
-        let idx = pc.entries.len() as u64;
+        let entry_idx = pc.entries.len() as u64;
         pc.entries.push(entry);
 
-        // If multiple rows share a normalised key (e.g., "main street" in
-        // many suburbs), the FST keeps only the last — but we still have
-        // every row in the entries array. Consumers starts_with-walk the
-        // FST and merge by rank anyway. Keeping one FST row per key is
-        // fine for the prefix-seed step; we over-fetch by 3× for ranking.
-        // To keep per-key entries accessible, tag the FST value with the
-        // most prominent (lowest rank) representative.
+        // Multiple rows can share a normalised key (e.g. "main street"
+        // in many suburbs); FST keeps one representative entry, the
+        // lowest-rank one. Per-key dedup happens here against the
+        // already-pushed entries.
         pc.keys
             .entry(key)
             .and_modify(|existing_idx| {
                 let existing_rank = pc.entries[*existing_idx as usize].rank;
-                if rank < existing_rank {
-                    *existing_idx = idx;
+                if cand.rank < existing_rank {
+                    *existing_idx = entry_idx;
                 }
             })
-            .or_insert(idx);
+            .or_insert(entry_idx);
     }
 
-    // Places
+    // Phase 1a: parallel candidate extraction. find_admin per doc is
+    // the hot loop; par_iter scales near-linearly with rayon thread
+    // count (verified against the analogous tantivy build path; see
+    // docs/performance/forward-index-parallelization-2026-04-27.md).
+    let phase1a = Instant::now();
+    eprintln!(
+        "[stage] autocomplete_classify: starting (rayon threads = {}, RAYON_NUM_THREADS = {:?})",
+        rayon::current_num_threads(),
+        std::env::var("RAYON_NUM_THREADS").ok(),
+    );
+
+    let in_filter = |cc: [u8; 2]| -> bool {
+        country_filter
+            .map(|f| f.contains(&[cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()]))
+            .unwrap_or(true)
+    };
+
+    let mut place_candidates: Vec<Candidate<'_>> = Vec::new();
     if let Some(pp) = idx.place_points.as_ref() {
         let points: &[PlacePoint] = as_typed_slice(pp);
-        for p in points {
-            let name = idx.get_string(p.name_id);
-            if name.is_empty() {
-                continue;
-            }
-            let admin = idx.find_admin(p.lat as f64, p.lng as f64);
-            let Some(cc) = admin.country_code.filter(|c| c[0] != 0 && c[1] != 0) else {
-                continue;
-            };
-            add(
-                &mut by_country,
-                country_filter,
-                cc,
-                name,
-                KIND_PLACE,
-                p.rank as u8,
-                p.lat,
-                p.lng,
-                admin.city,
-            );
-        }
+        place_candidates = points
+            .par_iter()
+            .filter_map(|p| {
+                let name = idx.get_string(p.name_id);
+                if name.is_empty() {
+                    return None;
+                }
+                let admin = idx.find_admin(p.lat as f64, p.lng as f64);
+                let cc = admin.country_code.filter(|c| c[0] != 0 && c[1] != 0)?;
+                if !in_filter(cc) {
+                    return None;
+                }
+                Some(Candidate {
+                    cc: [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()],
+                    name,
+                    kind: KIND_PLACE,
+                    rank: p.rank as u8,
+                    lat: p.lat,
+                    lng: p.lng,
+                    suburb: admin.city,
+                    name_id: p.name_id,
+                })
+            })
+            .collect();
     }
 
-    // Streets
     let ways: &[WayHeader] = as_typed_slice(&idx.street_ways);
     let nodes: &[NodeCoord] = as_typed_slice(&idx.street_nodes);
-    let mut seen: HashSet<(u32, String, [u8; 2])> = HashSet::new();
-    for way in ways {
-        let name = idx.get_string(way.name_id);
-        if name.is_empty() {
-            continue;
-        }
-        let off = way.node_offset as usize;
-        let count = way.node_count as usize;
-        if count == 0 || off + count > nodes.len() {
-            continue;
-        }
-        let mid = nodes[off + count / 2];
-        let lat = mid.lat;
-        let lng = mid.lng;
-        let admin = idx.find_admin(lat as f64, lng as f64);
-        let Some(cc) = admin.country_code.filter(|c| c[0] != 0 && c[1] != 0) else {
-            continue;
-        };
-        let suburb_key = admin.city.unwrap_or("").to_string();
-        if !seen.insert((way.name_id, suburb_key.clone(), cc)) {
-            continue;
-        }
-        add(
-            &mut by_country,
-            country_filter,
-            cc,
-            name,
-            KIND_STREET,
-            26,
-            lat,
-            lng,
-            admin.city,
-        );
+    let street_candidates: Vec<Candidate<'_>> = ways
+        .par_iter()
+        .filter_map(|way| {
+            let name = idx.get_string(way.name_id);
+            if name.is_empty() {
+                return None;
+            }
+            let off = way.node_offset as usize;
+            let count = way.node_count as usize;
+            if count == 0 || off + count > nodes.len() {
+                return None;
+            }
+            let mid = nodes[off + count / 2];
+            let admin = idx.find_admin(mid.lat as f64, mid.lng as f64);
+            let cc = admin.country_code.filter(|c| c[0] != 0 && c[1] != 0)?;
+            if !in_filter(cc) {
+                return None;
+            }
+            Some(Candidate {
+                cc: [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()],
+                name,
+                kind: KIND_STREET,
+                rank: 26,
+                lat: mid.lat,
+                lng: mid.lng,
+                suburb: admin.city,
+                name_id: way.name_id,
+            })
+        })
+        .collect();
+    eprintln!(
+        "[stage] autocomplete_classify: {:.3}s ({} place + {} street candidates)",
+        phase1a.elapsed().as_secs_f64(),
+        place_candidates.len(),
+        street_candidates.len(),
+    );
+
+    // Phase 1b: sequential bucket-by-country with street dedup. Cheap
+    // relative to find_admin — HashSet inserts on tens of millions
+    // of items.
+    let phase1b = Instant::now();
+    let mut by_country_cands: HashMap<[u8; 2], Vec<Candidate<'_>>> = HashMap::new();
+    for cand in place_candidates {
+        by_country_cands.entry(cand.cc).or_default().push(cand);
     }
+    let mut seen: HashSet<(u32, String, [u8; 2])> = HashSet::new();
+    for cand in street_candidates {
+        let suburb_key = cand.suburb.unwrap_or("").to_string();
+        if !seen.insert((cand.name_id, suburb_key, cand.cc)) {
+            continue;
+        }
+        by_country_cands.entry(cand.cc).or_default().push(cand);
+    }
+    drop(seen);
+    eprintln!(
+        "[stage] autocomplete_dedup: {:.3}s ({} countries)",
+        phase1b.elapsed().as_secs_f64(),
+        by_country_cands.len(),
+    );
+
+    // Phase 1c: per-country intern + entry/key build, parallel via
+    // rayon. Each country is independent — its own intern index,
+    // entries vec, and keys BTreeMap.
+    let phase1c = Instant::now();
+    let by_country: HashMap<[u8; 2], PerCountry> = by_country_cands
+        .into_par_iter()
+        .map(|(cc, cands)| {
+            let mut pc = fresh_per_country();
+            for cand in &cands {
+                ingest(&mut pc, cand);
+            }
+            (cc, pc)
+        })
+        .collect();
+    eprintln!(
+        "[stage] autocomplete_intern: {:.3}s",
+        phase1c.elapsed().as_secs_f64(),
+    );
 
     // Deterministic ordering: sort country codes before emitting so
     // rebuilds from identical input produce byte-identical .bin outputs
@@ -278,18 +335,35 @@ fn run(
     let mut ccs: Vec<[u8; 2]> = by_country.keys().copied().collect();
     ccs.sort();
 
+    // Phase 2: parallel emission of per-country .fst/.bin/_strings.bin
+    // triples. File writes are independent across countries; rayon
+    // dispatches across the pool.
     if matches!(layout, Layout::PerCountry | Layout::Both) {
-        for cc in &ccs {
-            let pc = by_country.get(cc).expect("cc came from by_country");
-            if pc.entries.is_empty() {
-                continue;
-            }
-            emit_per_country(dir, cc, pc)?;
-        }
+        let phase2 = Instant::now();
+        ccs.par_iter()
+            .filter_map(|cc| by_country.get(cc).map(|pc| (cc, pc)))
+            .filter(|(_, pc)| !pc.entries.is_empty())
+            .try_for_each(|(cc, pc)| emit_per_country(dir, cc, pc))?;
+        eprintln!(
+            "[stage] autocomplete_per_country_emit: {:.3}s",
+            phase2.elapsed().as_secs_f64(),
+        );
     }
 
+    // Phase 3: unified FST emit. Sequential because it builds one
+    // merged structure (re-interns strings into a shared pool, builds
+    // one BTreeMap of `<cc><normalised_name>` → entry id). Bottleneck
+    // here is the sequential intern + BTreeMap insert; parallelising
+    // would need a concurrent re-intern which is more complexity than
+    // the wall-time saving justifies (the unified emit is a small
+    // fraction of total when phase 1 is parallel).
     if matches!(layout, Layout::Unified | Layout::Both) {
+        let phase3 = Instant::now();
         emit_unified(dir, &ccs, &by_country)?;
+        eprintln!(
+            "[stage] autocomplete_unified_emit: {:.3}s",
+            phase3.elapsed().as_secs_f64(),
+        );
     }
 
     Ok(())
