@@ -31,7 +31,7 @@ git_ref      = "main"
 
 // Scope. `planet` pulls the 75 GB OSM PBF + 8.6 GB WoF admin.
 // For a smaller scope set these to specific continents / countries:
-//   osm_region = "europe"       (passed to scripts/download-region.sh)
+//   osm_region = "europe"       (passed to fetch-data --region)
 //   wof_scope  = "gb fr de nl"  (space-separated ISO 3166-1 alpha-2)
 osm_region = "planet"
 wof_scope  = "planet"

@@ -84,8 +84,9 @@ Run on a beefy machine (16+ GB RAM for AU, 64+ GB for worldwide).
 Reuses the existing pipeline scripts:
 
 ```bash
-# a) download OSM PBF
-./scripts/download-region.sh australia ./data/pbf
+# a) download OSM PBF (conditional GET + resumable; re-runs are bandwidth-cheap)
+cargo build --release --manifest-path server/Cargo.toml --bin fetch-data
+./server/target/release/fetch-data --region australia --data-dir ./data
 
 # b) build reverse + admin index (C++)
 mkdir -p data/index

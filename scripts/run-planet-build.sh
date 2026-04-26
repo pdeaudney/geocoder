@@ -42,7 +42,7 @@
 #                           pull 9 continent extracts in parallel via
 #                           --region all-continents.
 #     FETCH_PARALLEL        default 4 — concurrent download streams when
-#                           fetching continents. Honoured by fetch-build-data.sh.
+#                           fetching continents. Honoured by `fetch-data --parallel`.
 #
 # Exit codes:
 #     0    everything completed (or already done from a previous run)
@@ -62,7 +62,7 @@ LOG_DIR="$DATA_DIR/logs"
 PBF_DIR="$DATA_DIR/pbf"
 INDEX_DIR="$DATA_DIR/index"
 
-# Region argument handed to fetch-build-data.sh + the post-fetch sanity
+# Region argument handed to `fetch-data --region` + the post-fetch sanity
 # check. all-continents (default) downloads 9 Geofabrik continent
 # extracts in parallel; planet pulls the single 80 GB stream from
 # planet.osm.org for operators who explicitly opt in via PLANET_PBF=1.
@@ -200,8 +200,8 @@ run_preflight() {
         log "G-NAF: archive URL configured"
     fi
 
-    # bzip2 decoder priority — informational. fetch-build-data.sh
-    # auto-picks lbzip2 (best) → pbzip2 (better than baseline) → bzip2
+    # bzip2 decoder priority — informational. `fetch-data` (the WoF
+    # decompress subprocess) auto-picks lbzip2 (best) → pbzip2 (better than baseline) → bzip2
     # (single-thread baseline). Surface which one is in play here so
     # operators know whether they're going to pay 5+ minutes for the
     # WoF SQLite decompression or 60 seconds.

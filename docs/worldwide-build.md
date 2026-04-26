@@ -103,9 +103,9 @@ For the 5-region set, plan for ~40–60 GB free on the build host
 
 ## Download
 
-Use the existing `scripts/download-region.sh` per region, or the
-`fetch-test-data.sh --region <name>` wrapper. Example for the
-5-region set:
+Use the `fetch-data` binary (`server/src/bin/fetch_data.rs`). It
+handles conditional GET, resumable downloads, and MD5 verification
+in one tool. Example for the 5-region set:
 
 ```bash
 cd data/pbf

@@ -77,7 +77,7 @@ variable "git_ref" {
 variable "osm_region" {
   type        = string
   default     = "planet"
-  description = "Which OSM extract(s) to download. `planet` uses the canonical planet-latest.osm.pbf; any other value is passed verbatim to scripts/download-region.sh (which accepts europe, north-america, asia, africa, australia, etc.). Defaults to planet for worldwide coverage."
+  description = "Which OSM extract(s) to download. `planet` uses the canonical planet-latest.osm.pbf; `all-continents` parallelises across the 9 Geofabrik continent extracts (recommended for worldwide); any other value is passed to `fetch-data --region` (which accepts europe, north-america, asia, africa, australia, oceania, niue, etc.). Defaults to planet for worldwide coverage."
 }
 
 variable "wof_scope" {
@@ -310,24 +310,25 @@ build {
       "set -e",
       "cd /mnt/nvme/geocoder",
       "mkdir -p data/pbf test-data",
-      "./scripts/download-region.sh $OSM_REGION ./data/pbf",
-      // WoF: planet uses the single combined admin file; otherwise
-      // the space-separated list is forwarded to fetch-test-data.sh.
-      "if [ \"$WOF_SCOPE\" = \"planet\" ]; then",
-      "    echo '==> fetching whosonfirst-data-admin-latest (~8.6 GB bz2)'",
-      "    curl -fSL -o test-data/wof-planet.db.bz2 https://data.geocode.earth/wof/dist/sqlite/whosonfirst-data-admin-latest.db.bz2",
-      "    bzip2 -d test-data/wof-planet.db.bz2",
-      "    mv test-data/wof-planet.db test-data/whosonfirst-data-admin-planet-latest.db",
-      "else",
-      "    WOF_COUNTRIES=\"$WOF_SCOPE\" ./scripts/fetch-test-data.sh --all-corpora",
-      "fi",
+      // Build the Rust fetch-data binary first (cargo handles
+      // incremental compile; this is a one-shot AMI bake so we
+      // pay the full release-build cost once here).
+      "cargo build --release --manifest-path server/Cargo.toml --bin fetch-data",
+      // OSM + WoF in one invocation. fetch-data conditional-GETs
+      // and resumes interrupted downloads, so a Packer retry after
+      // a network blip doesn't restart from byte 0.
+      "FETCH_ARGS=\"--region $OSM_REGION --data-dir ./data --wof --wof-countries $WOF_SCOPE\"",
       // OpenAddresses — uses the build instance's IAM role to read
       // from s3://v2.openaddresses.io/ (Requester-Pays). No extra
       // tokens or signup steps needed; we're already on EC2.
       "if [ \"$OPENADDRESSES_ENABLED\" = \"true\" ]; then",
-      "    OA_SOURCES=\"$OPENADDRESSES_SOURCES\" OA_OUTPUT_DIR=./data/openaddresses \\",
-      "        ./scripts/fetch-openaddresses.sh",
+      "    FETCH_ARGS=\"$FETCH_ARGS --openaddresses --oa-sources $OPENADDRESSES_SOURCES\"",
       "fi",
+      // MaxMind / G-NAF — fetched only when their license envs are set;
+      // graceful skip otherwise.
+      "if [ -n \"$MAXMIND_LICENSE_KEY\" ]; then FETCH_ARGS=\"$FETCH_ARGS --maxmind\"; fi",
+      "if [ -n \"$GNAF_ARCHIVE_URL\" ]; then FETCH_ARGS=\"$FETCH_ARGS --gnaf\"; fi",
+      "./server/target/release/fetch-data $FETCH_ARGS",
       "touch /tmp/fetch-complete",
     ]
   }

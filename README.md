@@ -56,11 +56,12 @@ volumes:
 
 `PBF_URLS="https://... https://..."` as an alternative to `REGION`; pass any PBF URL(s) and the builder will use them instead.
 
-Custom region? Use the download helper directly:
+Custom region? Build the `fetch-data` binary and call it directly:
 
 ```bash
-./scripts/download-region.sh europe        # all of Europe
-./scripts/download-region.sh north-america ./my-pbf-dir
+cargo build --release --manifest-path server/Cargo.toml --bin fetch-data
+./server/target/release/fetch-data --region europe --data-dir ./data
+./server/target/release/fetch-data --region north-america --data-dir ./my-data
 ```
 
 ### Build from source
@@ -83,10 +84,11 @@ apt-get install cmake libosmium2-dev libprotozero-dev libs2-dev \
                 lbzip2
 ```
 
-`lbzip2` is the parallel bzip2 decoder used by `scripts/fetch-build-data.sh`
-to unpack the WhosOnFirst SQLite archive 3–5× faster than stock `bzip2`.
-Optional but cuts ~5 minutes off a planet build's fetch step. The script
-falls back to `pbzip2` then `bzip2` if `lbzip2` isn't installed.
+`lbzip2` is the parallel bzip2 decoder `fetch-data` shells out to when
+unpacking the WhosOnFirst SQLite archive — 3–5× faster than stock
+`bzip2`. Optional but cuts ~5 minutes off a planet build's fetch step.
+The binary falls back to `pbzip2` then `bzip2` if `lbzip2` isn't
+installed.
 
 Fetch the source data with the `fetch-data` binary
 (`server/src/bin/fetch_data.rs`):

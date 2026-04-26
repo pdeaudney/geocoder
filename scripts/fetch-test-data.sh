@@ -73,12 +73,18 @@ if [ "$ALL_CORPORA" = "1" ]; then
 fi
 
 # -----------------------------------------------------------------------------
-# OSM PBF per region (delegates to existing download-region.sh)
+# OSM PBF per region (delegates to the `fetch-data` Rust binary —
+# conditional GET + resumable + MD5 verify built in)
 # -----------------------------------------------------------------------------
 
 if [ -n "$REGION" ]; then
     echo "==> ensuring OSM PBF for region=$REGION"
-    ./scripts/download-region.sh "$REGION" "$TEST_DATA_DIR/pbf"
+    if [ ! -x ./server/target/release/fetch-data ]; then
+        echo "==> building fetch-data binary (one-time release compile)"
+        cargo build --release --manifest-path server/Cargo.toml --bin fetch-data
+    fi
+    DATA_DIR="$TEST_DATA_DIR" ./server/target/release/fetch-data \
+        --region "$REGION" --data-dir "$TEST_DATA_DIR"
 fi
 
 # -----------------------------------------------------------------------------
