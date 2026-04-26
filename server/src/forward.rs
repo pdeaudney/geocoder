@@ -353,69 +353,92 @@ pub fn build_partitioned_with_heap(
     let phase1 = Instant::now();
     let mut buckets: Map<[u8; 2], Vec<PendingDoc<'_>>> = Map::new();
 
-    // Places.
+    // Places. par_iter parallelises the per-doc find_admin (the
+    // expensive point-in-polygon step) across rayon's thread pool;
+    // the post-collect bucketing is cheap.
     if let Some(pp) = idx.place_points.as_ref() {
         let points: &[PlacePoint] = as_typed_slice(pp);
-        for p in points {
-            let name = idx.get_string(p.name_id);
-            if name.is_empty() {
-                continue;
-            }
-            let lat = p.lat as f64;
-            let lng = p.lng as f64;
-            let admin = idx.find_admin(lat, lng);
-            let Some(cc) = country_bytes(admin.country_code) else {
-                continue;
-            };
-            buckets.entry(cc).or_default().push(PendingDoc {
-                name,
-                kind: KIND_PLACE,
-                rank: p.rank as u64,
-                lat,
-                lng,
-                suburb: admin.city,
-                state: admin.state,
-                country_code: cc,
-            });
+        let place_candidates: Vec<([u8; 2], PendingDoc<'_>)> = points
+            .par_iter()
+            .filter_map(|p| {
+                let name = idx.get_string(p.name_id);
+                if name.is_empty() {
+                    return None;
+                }
+                let lat = p.lat as f64;
+                let lng = p.lng as f64;
+                let admin = idx.find_admin(lat, lng);
+                let cc = country_bytes(admin.country_code)?;
+                Some((
+                    cc,
+                    PendingDoc {
+                        name,
+                        kind: KIND_PLACE,
+                        rank: p.rank as u64,
+                        lat,
+                        lng,
+                        suburb: admin.city,
+                        state: admin.state,
+                        country_code: cc,
+                    },
+                ))
+            })
+            .collect();
+        for (cc, doc) in place_candidates {
+            buckets.entry(cc).or_default().push(doc);
         }
     }
 
-    // Streets, with dedup by (name_id, suburb, cc).
+    // Streets — same pattern, then a sequential dedup-and-bucket pass
+    // on the results. Materialising the intermediate Vec is the price
+    // of doing the dedup correctly across all threads (per-thread
+    // local dedup would let cross-thread duplicates survive merge).
+    // For planet that's ~48M candidates × ~80 bytes ≈ ~3.8 GB peak;
+    // the find_admin parallelism more than pays for it.
     let ways: &[WayHeader] = as_typed_slice(&idx.street_ways);
     let nodes: &[NodeCoord] = as_typed_slice(&idx.street_nodes);
+    let way_candidates: Vec<(u32, String, [u8; 2], PendingDoc<'_>)> = ways
+        .par_iter()
+        .filter_map(|way| {
+            let name = idx.get_string(way.name_id);
+            if name.is_empty() {
+                return None;
+            }
+            let offset = way.node_offset as usize;
+            let count = way.node_count as usize;
+            if count == 0 || offset + count > nodes.len() {
+                return None;
+            }
+            let mid = nodes[offset + count / 2];
+            let lat = mid.lat as f64;
+            let lng = mid.lng as f64;
+            let admin = idx.find_admin(lat, lng);
+            let cc = country_bytes(admin.country_code)?;
+            let suburb_key = admin.city.unwrap_or("").to_string();
+            Some((
+                way.name_id,
+                suburb_key,
+                cc,
+                PendingDoc {
+                    name,
+                    kind: KIND_STREET,
+                    rank: 26,
+                    lat,
+                    lng,
+                    suburb: admin.city,
+                    state: admin.state,
+                    country_code: cc,
+                },
+            ))
+        })
+        .collect();
+
     let mut seen: std::collections::HashSet<(u32, String, [u8; 2])> =
-        std::collections::HashSet::new();
-    for way in ways {
-        let name = idx.get_string(way.name_id);
-        if name.is_empty() {
-            continue;
+        std::collections::HashSet::with_capacity(way_candidates.len());
+    for (name_id, suburb, cc, doc) in way_candidates {
+        if seen.insert((name_id, suburb, cc)) {
+            buckets.entry(cc).or_default().push(doc);
         }
-        let offset = way.node_offset as usize;
-        let count = way.node_count as usize;
-        if count == 0 || offset + count > nodes.len() {
-            continue;
-        }
-        let mid = nodes[offset + count / 2];
-        let lat = mid.lat as f64;
-        let lng = mid.lng as f64;
-        let admin = idx.find_admin(lat, lng);
-        let Some(cc) = country_bytes(admin.country_code) else {
-            continue;
-        };
-        let suburb_key = admin.city.unwrap_or("").to_string();
-        if !seen.insert((way.name_id, suburb_key, cc)) {
-            continue;
-        }
-        buckets.entry(cc).or_default().push(PendingDoc {
-            name,
-            kind: KIND_STREET,
-            rank: 26,
-            lat,
-            lng,
-            suburb: admin.city,
-            state: admin.state,
-            country_code: cc,
-        });
     }
     drop(seen);
     eprintln!(
