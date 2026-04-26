@@ -35,7 +35,7 @@ docker run -e REGION=oceania \
 
 The `auto` mode (default) downloads the PBF for a named region, builds the reverse + forward indexes, and starts serving.
 
-Supported region presets: `oceania` (default), `australia`, `new-zealand`, `africa`, `antarctica`, `asia`, `europe`, `north-america`, `south-america`, `central-america`, `russia`, `usa`, `planet`.
+Supported region presets: `oceania` (default; full Australia/Oceania continent — AU, NZ, Fiji, PNG, Vanuatu, Solomon Is, New Caledonia, Cook Is, Samoa, Tonga, Kiribati, etc.), `australia` and `new-zealand` (sub-region extracts), `africa`, `antarctica`, `asia`, `europe`, `north-america`, `south-america`, `central-america`, `russia`, `usa`, `planet`.
 
 ```yaml
 # docker-compose.yml
@@ -70,7 +70,7 @@ Prerequisites: a C++17 compiler + CMake for the builder, Rust stable for the ser
 On macOS:
 
 ```bash
-brew install cmake libosmium protozero s2geometry protobuf libdeflate
+brew install cmake libosmium protozero s2geometry protobuf libdeflate lbzip2
 ```
 
 On Debian/Ubuntu:
@@ -79,8 +79,14 @@ On Debian/Ubuntu:
 apt-get install cmake libosmium2-dev libprotozero-dev libs2-dev \
                 zlib1g-dev libbz2-dev libexpat1-dev liblz4-dev \
                 libdeflate-dev \
-                protobuf-compiler
+                protobuf-compiler \
+                lbzip2
 ```
+
+`lbzip2` is the parallel bzip2 decoder used by `scripts/fetch-build-data.sh`
+to unpack the WhosOnFirst SQLite archive 3–5× faster than stock `bzip2`.
+Optional but cuts ~5 minutes off a planet build's fetch step. The script
+falls back to `pbzip2` then `bzip2` if `lbzip2` isn't installed.
 
 Fetch the source data:
 
@@ -88,7 +94,7 @@ Fetch the source data:
 # All-in-one fetch — OSM PBF, OpenAddresses, WhosOnFirst, optional MaxMind + G-NAF.
 # Defaults output to ./data/. Re-runnable; existing files are skipped.
 ./scripts/fetch-build-data.sh --region au         # AU-only build
-./scripts/fetch-build-data.sh --region oceania    # AU + NZ
+./scripts/fetch-build-data.sh --region oceania    # full Australia/Oceania continent (AU, NZ, Fiji, PNG, etc.)
 ./scripts/fetch-build-data.sh --region europe     # EU
 ./scripts/fetch-build-data.sh --region planet     # full planet (~85 GB)
 ```
