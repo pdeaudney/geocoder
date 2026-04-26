@@ -6,3 +6,25 @@ members = [
     "tools/wof-importer",
 ]
 resolver = "2"
+
+# Profiles live here at the workspace root. Member-level
+# `[profile.*]` sections are silently ignored by Cargo with a
+# warning ("profiles for the non root package will be ignored");
+# until this was hoisted, the LTO setting we wanted on the
+# query-server release binary had been a no-op locally for the
+# duration of the crate's history. Dockerfile builds `server/`
+# standalone (no workspace Cargo.toml in /src) and overrides on
+# the cargo invocation directly.
+
+[profile.release]
+opt-level = 3
+# LTO matters for the hot reverse-geocoding path. The query-server
+# `Index::query` chain inlines aggressively across `geo.rs`,
+# `address_points.rs`, and `i18n.rs`; without LTO we leave 5–10 %
+# on the table on synthetic benches.
+lto = true
+
+[profile.bench]
+opt-level = 3
+lto = true
+debug = false

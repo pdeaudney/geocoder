@@ -246,7 +246,7 @@ run_fetch_data() {
         args="$args --gnaf"
     fi
     DATA_DIR="$DATA_DIR" GNAF_ARCHIVE_URL="${GNAF_ARCHIVE_URL:-}" \
-        ./server/target/release/fetch-data $args \
+        ./target/release/fetch-data $args \
         2>&1 | tee "$LOG_DIR/fetch-data.log"
 
     # Sanity: at least one PBF must exist under $PBF_DIR. Globbing here

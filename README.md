@@ -60,8 +60,8 @@ Custom region? Build the `fetch-data` binary and call it directly:
 
 ```bash
 cargo build --release --manifest-path server/Cargo.toml --bin fetch-data
-./server/target/release/fetch-data --region europe --data-dir ./data
-./server/target/release/fetch-data --region north-america --data-dir ./my-data
+./target/release/fetch-data --region europe --data-dir ./data
+./target/release/fetch-data --region north-america --data-dir ./my-data
 ```
 
 ### Build from source
@@ -94,18 +94,52 @@ Fetch the source data with the `fetch-data` binary
 (`server/src/bin/fetch_data.rs`):
 
 ```bash
-# Build the binary once.
+# Build the binary once. The cargo workspace lives at the repo
+# root, so the binary lands at ./target/release/fetch-data
+# (NOT ./server/target/...).
 cargo build --release --manifest-path server/Cargo.toml --bin fetch-data
 
 # All-in-one fetch — OSM PBF + WhosOnFirst (+ optional OpenAddresses, MaxMind, G-NAF).
 # Defaults output to ./data/. Conditional GET + resumable downloads:
 # re-runs are bandwidth-cheap (304 short-circuit) and a killed run resumes
 # from the .partial sidecar on the next invocation.
-./server/target/release/fetch-data --region au --wof          # AU-only
-./server/target/release/fetch-data --region oceania --wof     # full Australia/Oceania
-./server/target/release/fetch-data --region europe --wof      # EU
-./server/target/release/fetch-data --region planet --wof      # planet ~85 GB
-./server/target/release/fetch-data --region all-continents --wof  # planet via 9 parallel continent extracts (recommended)
+./target/release/fetch-data --region au --wof          # AU-only
+./target/release/fetch-data --region oceania --wof     # full Australia/Oceania
+./target/release/fetch-data --region europe --wof      # EU
+./target/release/fetch-data --region planet --wof      # planet ~85 GB
+./target/release/fetch-data --region all-continents --wof  # planet via 9 parallel continent extracts (recommended)
+```
+
+Full CLI surface (`./target/release/fetch-data --help`):
+
+```text
+Acquire OSM PBF + WoF + OpenAddresses + MaxMind + G-NAF for the geocoder build pipeline.
+
+Usage: fetch-data [OPTIONS]
+
+Options:
+      --data-dir <DATA_DIR>            Output root. Layout: <dir>/pbf/, <dir>/openaddresses/, etc
+                                       [env: DATA_DIR=] [default: ./data]
+      --region <REGION>                OSM region preset (see the region table below)
+      --wof                            Fetch WhosOnFirst admin SQLite
+      --wof-countries <WOF_COUNTRIES>  WoF scope: "planet" (default), "none", or
+                                       space-separated alpha-2 codes
+                                       [env: WOF_COUNTRIES=] [default: planet]
+      --openaddresses                  Fetch OpenAddresses (requires AWS creds for
+                                       s3://v2.openaddresses.io)
+      --oa-sources <OA_SOURCES>        OA source filter — "all" (default) or
+                                       space-/comma-separated alpha-2 codes
+                                       [env: OA_SOURCES=] [default: all]
+      --maxmind                        Fetch MaxMind GeoLite2-City (requires MAXMIND_LICENSE_KEY)
+      --gnaf                           Fetch G-NAF (requires GNAF_ARCHIVE_URL)
+      --parallel <PARALLEL>            Concurrent download streams (e.g. all-continents)
+                                       [env: FETCH_PARALLEL=] [default: 4]
+      --force                          Re-download even if local data appears fresh
+      --no-verify-md5                  Skip MD5 verification against upstream sidecar
+      --no-resume                      Disable resuming from <dest>.partial files
+      --quiet                          No terminal progress bars (logs are unaffected)
+  -h, --help                           Print help (see more with '--help')
+  -V, --version                        Print version
 ```
 
 Each PBF lands at `data/pbf/<region>-latest.osm.pbf` with three
@@ -126,10 +160,10 @@ Mix and match sources by combining flags:
 # Add OpenAddresses (Requester-Pays, needs AWS creds) and MaxMind (license-key) and G-NAF.
 export MAXMIND_LICENSE_KEY=...
 export GNAF_ARCHIVE_URL=https://...
-./server/target/release/fetch-data --region au --wof --openaddresses au --maxmind --gnaf
+./target/release/fetch-data --region au --wof --openaddresses au --maxmind --gnaf
 
 # WoF only, scoped to specific countries.
-./server/target/release/fetch-data --wof --wof-countries "au gb us" --data-dir ./data
+./target/release/fetch-data --wof --wof-countries "au gb us" --data-dir ./data
 ```
 
 License-gated sources are skipped with a structured warning when their

@@ -79,11 +79,11 @@ fi
 
 if [ -n "$REGION" ]; then
     echo "==> ensuring OSM PBF for region=$REGION"
-    if [ ! -x ./server/target/release/fetch-data ]; then
+    if [ ! -x ./target/release/fetch-data ]; then
         echo "==> building fetch-data binary (one-time release compile)"
         cargo build --release --manifest-path server/Cargo.toml --bin fetch-data
     fi
-    DATA_DIR="$TEST_DATA_DIR" ./server/target/release/fetch-data \
+    DATA_DIR="$TEST_DATA_DIR" ./target/release/fetch-data \
         --region "$REGION" --data-dir "$TEST_DATA_DIR"
 fi
 

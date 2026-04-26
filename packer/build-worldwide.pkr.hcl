@@ -331,7 +331,7 @@ build {
       // graceful skip otherwise.
       "if [ -n \"$MAXMIND_LICENSE_KEY\" ]; then FETCH_ARGS=\"$FETCH_ARGS --maxmind\"; fi",
       "if [ -n \"$GNAF_ARCHIVE_URL\" ]; then FETCH_ARGS=\"$FETCH_ARGS --gnaf\"; fi",
-      "./server/target/release/fetch-data $FETCH_ARGS",
+      "./target/release/fetch-data $FETCH_ARGS",
       "touch /tmp/fetch-complete",
     ]
   }

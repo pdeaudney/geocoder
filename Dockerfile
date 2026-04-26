@@ -22,7 +22,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 COPY server/ server/
-RUN cargo build --release --manifest-path server/Cargo.toml --bins
+# This builder copies only `server/`, so cargo runs without the
+# workspace Cargo.toml and the workspace-level `[profile.release]`
+# (lto = true) wouldn't otherwise apply. Set it on the command line
+# to keep parity with local + Packer builds.
+RUN cargo build --release --manifest-path server/Cargo.toml \
+    --config 'profile.release.lto=true' \
+    --bins
 
 # Stage 3: Runtime
 FROM debian:bookworm-slim

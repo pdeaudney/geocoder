@@ -179,11 +179,12 @@ path = "src/bin/build_autocomplete_fst.rs"
 name = "fetch-data"
 path = "src/bin/fetch_data.rs"
 
-[profile.release]
-opt-level = 3
-lto = true
-
-[profile.bench]
-opt-level = 3
-lto = true
-debug = false
+# NOTE: build profiles live at the workspace root (`/Cargo.toml`)
+# rather than here. Member-level profile sections are silently
+# ignored by Cargo when there's a workspace, and the resulting
+# missing-LTO had been a no-op in production for the duration of
+# this crate's history. The Dockerfile builds `server/` standalone
+# (no workspace Cargo.toml in /src), so for that one context we
+# wouldn't get the workspace profile applied — `Dockerfile` adds
+# `--config 'profile.release.lto=true'` on the cargo invocation
+# to keep parity.

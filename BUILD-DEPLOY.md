@@ -86,7 +86,7 @@ Reuses the existing pipeline scripts:
 ```bash
 # a) download OSM PBF (conditional GET + resumable; re-runs are bandwidth-cheap)
 cargo build --release --manifest-path server/Cargo.toml --bin fetch-data
-./server/target/release/fetch-data --region australia --data-dir ./data
+./target/release/fetch-data --region australia --data-dir ./data
 
 # b) build reverse + admin index (C++)
 mkdir -p data/index
