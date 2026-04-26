@@ -42,7 +42,7 @@
 #                           pull 9 continent extracts in parallel via
 #                           --region all-continents.
 #     FETCH_PARALLEL        default 4 — concurrent download streams when
-#                           fetching continents. Honoured by fetch-build-data.sh.
+#                           fetching continents. Honoured by `fetch-data --parallel`.
 #
 # Exit codes:
 #     0    everything completed (or already done from a previous run)
@@ -62,7 +62,7 @@ LOG_DIR="$DATA_DIR/logs"
 PBF_DIR="$DATA_DIR/pbf"
 INDEX_DIR="$DATA_DIR/index"
 
-# Region argument handed to fetch-build-data.sh + the post-fetch sanity
+# Region argument handed to `fetch-data --region` + the post-fetch sanity
 # check. all-continents (default) downloads 9 Geofabrik continent
 # extracts in parallel; planet pulls the single 80 GB stream from
 # planet.osm.org for operators who explicitly opt in via PLANET_PBF=1.
@@ -200,8 +200,8 @@ run_preflight() {
         log "G-NAF: archive URL configured"
     fi
 
-    # bzip2 decoder priority — informational. fetch-build-data.sh
-    # auto-picks lbzip2 (best) → pbzip2 (better than baseline) → bzip2
+    # bzip2 decoder priority — informational. `fetch-data` (the WoF
+    # decompress subprocess) auto-picks lbzip2 (best) → pbzip2 (better than baseline) → bzip2
     # (single-thread baseline). Surface which one is in play here so
     # operators know whether they're going to pay 5+ minutes for the
     # WoF SQLite decompression or 60 seconds.
@@ -220,21 +220,40 @@ run_preflight() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 2: fetch-data — delegates to fetch-build-data.sh, --skip-oa.
+# Step 2: fetch-data — delegates to the Rust `fetch-data` binary
+# (server/src/bin/fetch_data.rs). Conditional GET + resumable downloads
+# are built in, so re-runs are bandwidth-cheap and a killed run resumes
+# from the .partial file on the next invocation.
 # ---------------------------------------------------------------------------
 
 run_fetch_data() {
     step_start "fetch-data"
     log "region=$FETCH_REGION (set PLANET_PBF=1 for the legacy single-stream path)"
-    DATA_DIR="$DATA_DIR" GNAF_ARCHIVE_URL="$GNAF_ARCHIVE_URL" \
-        ./scripts/fetch-build-data.sh --region "$FETCH_REGION" --skip-oa \
+
+    # Build the Rust `fetch-data` binary first. cargo handles
+    # incremental compilation, so re-runs are fast (tens of seconds
+    # for unchanged source). The full build-binaries step further
+    # down compiles the rest of the build pipeline.
+    log "compiling fetch-data binary..."
+    cargo build --release --manifest-path server/Cargo.toml --bin fetch-data \
+        2>&1 | tee "$LOG_DIR/fetch-data-build.log"
+
+    args="--region $FETCH_REGION --data-dir $DATA_DIR --wof"
+    if [ -n "${MAXMIND_LICENSE_KEY:-}" ]; then
+        args="$args --maxmind"
+    fi
+    if [ -n "${GNAF_ARCHIVE_URL:-}" ]; then
+        args="$args --gnaf"
+    fi
+    DATA_DIR="$DATA_DIR" GNAF_ARCHIVE_URL="${GNAF_ARCHIVE_URL:-}" \
+        ./server/target/release/fetch-data $args \
         2>&1 | tee "$LOG_DIR/fetch-data.log"
 
     # Sanity: at least one PBF must exist under $PBF_DIR. Globbing here
     # rather than a fixed filename so both --region planet and
     # --region all-continents validate the same way.
     if ! ls -1 "$PBF_DIR"/*.osm.pbf >/dev/null 2>&1; then
-        err "no PBFs found under $PBF_DIR — fetch-build-data.sh did not produce any"
+        err "no PBFs found under $PBF_DIR — fetch-data did not produce any"
         exit 1
     fi
     log "PBFs ready: $(ls -1 "$PBF_DIR"/*.osm.pbf | wc -l | tr -d ' ') file(s), $(du -sh "$PBF_DIR" | cut -f1) total"
