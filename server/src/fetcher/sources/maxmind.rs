@@ -68,8 +68,15 @@ pub async fn fetch_maxmind(
 /// Tar.gz format: `GeoLite2-City_<DATE>/GeoLite2-City.mmdb` (and a
 /// few license / readme files we don't care about). We scan the
 /// archive for the first entry whose filename ends with
-/// `GeoLite2-City.mmdb` and write it to the canonical location.
+/// `GeoLite2-City.mmdb` and stream it to the canonical location.
+///
+/// Hard cap on the extracted size: 1 GiB. The real .mmdb is ~70 MB;
+/// the cap is generous headroom for a few years of growth but keeps
+/// us safe against a decompression-bomb tarball (the tar.gz itself
+/// could be tiny while the decompressed entry isn't).
 async fn extract_geolite2_city_from_tarball(tarball: &Path, dest: &Path) -> Result<()> {
+    const MAX_MMDB_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+
     let tarball = tarball.to_path_buf();
     let dest = dest.to_path_buf();
 
@@ -79,6 +86,7 @@ async fn extract_geolite2_city_from_tarball(tarball: &Path, dest: &Path) -> Resu
             .with_context(|| format!("opening {}", tarball.display()))?;
         let gz = GzDecoder::new(f);
         let mut archive = tar::Archive::new(gz);
+        let mut found = false;
         for entry in archive.entries()? {
             let mut entry = entry?;
             let path = entry.path()?.into_owned();
@@ -88,19 +96,44 @@ async fn extract_geolite2_city_from_tarball(tarball: &Path, dest: &Path) -> Resu
                 .map(|s| s == "GeoLite2-City.mmdb")
                 .unwrap_or(false)
             {
-                let mut bytes = Vec::with_capacity(64 * 1024 * 1024);
-                entry.read_to_end(&mut bytes)?;
+                if found {
+                    // Defensive: if MaxMind ever ships multiple
+                    // `GeoLite2-City.mmdb` entries, surface that
+                    // rather than silently clobbering with whichever
+                    // arrived second.
+                    tracing::warn!(
+                        "tarball contains multiple GeoLite2-City.mmdb entries; using the first"
+                    );
+                    break;
+                }
+                found = true;
                 let tmp = with_extension(&dest, "tmp");
-                std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+                let mut writer = std::fs::File::create(&tmp)
+                    .with_context(|| format!("creating {}", tmp.display()))?;
+                let mut limited = (&mut entry).take(MAX_MMDB_BYTES + 1);
+                let written = std::io::copy(&mut limited, &mut writer)
+                    .with_context(|| format!("streaming entry to {}", tmp.display()))?;
+                if written > MAX_MMDB_BYTES {
+                    drop(writer);
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(anyhow!(
+                        "GeoLite2-City.mmdb exceeds {} byte cap (decompression bomb?)",
+                        MAX_MMDB_BYTES
+                    ));
+                }
+                writer.sync_all()?;
+                drop(writer);
                 std::fs::rename(&tmp, &dest)
                     .with_context(|| format!("rename {} -> {}", tmp.display(), dest.display()))?;
-                return Ok(());
             }
         }
-        Err(anyhow!(
-            "GeoLite2-City.mmdb not found inside {}",
-            tarball.display()
-        ))
+        if !found {
+            return Err(anyhow!(
+                "GeoLite2-City.mmdb not found inside {}",
+                tarball.display()
+            ));
+        }
+        Ok(())
     })
     .await
     .context("tarball-extract task panicked")?

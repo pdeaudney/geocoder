@@ -77,10 +77,12 @@ impl ReplicationState {
                     );
                 }
                 // Other Osmosis keys (txnReady, txnMaxQueried, etc.)
-                // exist in some replication state files. We don't
-                // consume them but we do round-trip them through
-                // comments so the file stays useful for anything
-                // downstream that does.
+                // exist in some replication state files; we don't
+                // consume them. They aren't preserved on serialize
+                // — the file we write is the canonical (timestamp,
+                // sequenceNumber, comments) tuple, byte-identical
+                // against Geofabrik's wire format, which is what
+                // downstream consumers need.
                 _ => {}
             }
         }

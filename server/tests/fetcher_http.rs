@@ -304,21 +304,11 @@ async fn md5_mismatch_deletes_partial_and_errors() {
     let server = spawn_mock(b"correct payload".to_vec()).await;
     let tmp = TempDir::new().unwrap();
     let client = reqwest::Client::new();
-    // Point the md5_url at a hand-rolled endpoint that returns a
-    // wrong digest.
-    let bogus_md5 = Url::parse(&format!("http://{}/wrong.md5", server.addr)).unwrap();
-    // We need a separate server route for the bogus md5; reuse
-    // payload.bin.md5 but tweak the payload after the .etag check.
-    // Simpler: serve the wrong md5 by editing the state behind it.
-    server.state.rotate_payload(b"correct payload".to_vec());
-    // Use the .md5 url directly but expect mismatch by tampering the
-    // underlying response: spin a separate server returning a wrong
-    // hash.
-    let bogus_md5 = bogus_md5; // unused — see below
-    let _ = bogus_md5;
 
     let mut t = target(&server, tmp.path());
-    // Forge: point md5_url at a path that returns a literal wrong md5.
+    // Point md5_url at a separate server that returns a literal wrong
+    // md5, so the verify step bails after the streaming hash matches
+    // the (correct) payload but the (forged) sidecar disagrees.
     let wrong_md5_app = Router::new().route(
         "/wrong.md5",
         get(|| async { "00000000000000000000000000000000  payload\n" }),
@@ -354,6 +344,35 @@ async fn md5_mismatch_deletes_partial_and_errors() {
 
     let _ = tx.send(());
     let _ = join.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_refuses_without_saved_etag() {
+    // C1 (QA review): If a .partial survives without a matching .etag
+    // sidecar — e.g. an operator hand-crafted a partial, or a prior
+    // run was killed before the etag could be persisted — we have no
+    // way to detect server-side content drift via If-Range. Splicing
+    // the resumed tail onto stale prefix bytes would silently
+    // produce a corrupt artifact. The fetcher should restart from
+    // scratch instead.
+    let payload: Vec<u8> = (0..4096u32).map(|i| ((i + 7) % 251) as u8).collect();
+    let server = spawn_mock(payload.clone()).await;
+    let tmp = TempDir::new().unwrap();
+    let client = reqwest::Client::new();
+    let target = target(&server, tmp.path());
+
+    // Pre-seed only the .partial; no .etag.
+    let partial_path: PathBuf = format!("{}.partial", target.dest.display()).into();
+    std::fs::write(&partial_path, b"junk-prefix-bytes-not-from-server").unwrap();
+
+    let outcome = fetch(&client, &target, &opts()).await.expect("must restart cleanly");
+    match outcome {
+        FetchOutcome::Downloaded { bytes } => assert_eq!(bytes, payload.len() as u64),
+        other => panic!("expected Downloaded after restart, got {other:?}"),
+    }
+    // Final file must be byte-identical to the server payload —
+    // the junk prefix must not have leaked through.
+    assert_eq!(std::fs::read(&target.dest).unwrap(), payload);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -107,8 +107,23 @@ pub async fn fetch(
     }
 
     // Resume path: a leftover partial means a prior run was killed.
+    // Only attempt resume when we have a saved etag — without one the
+    // server has no way to tell us "content changed, your partial is
+    // stale" (If-Range needs the etag), and a 206 Partial Content
+    // would silently splice the new tail onto stale prefix bytes. For
+    // sources without MD5 sidecars (WoF, MaxMind, OA, planet.osm.org)
+    // there's no end-of-stream check to catch the corruption either,
+    // so we restart from scratch and the operator pays one extra full
+    // download instead of producing a corrupt artifact.
     if opts.resume && tokio::fs::metadata(&partial_path).await.is_ok() {
-        return resume_partial(client, target, &partial_path, &etag_path, opts).await;
+        if read_etag(&etag_path).await.is_some() {
+            return resume_partial(client, target, &partial_path, &etag_path, opts).await;
+        }
+        tracing::warn!(
+            partial = %partial_path.display(),
+            "partial download present but no saved etag — restarting from scratch (resume needs If-Range protection)"
+        );
+        let _ = tokio::fs::remove_file(&partial_path).await;
     }
 
     // Conditional GET: send If-None-Match / If-Modified-Since when
@@ -142,7 +157,7 @@ pub async fn fetch(
     match resp.status() {
         StatusCode::NOT_MODIFIED => Ok(FetchOutcome::Cached),
         StatusCode::OK => {
-            stream_full_to_partial(resp, target, &partial_path, &etag_path, opts).await
+            stream_full_to_partial(client, resp, target, &partial_path, &etag_path, opts).await
         }
         // S3 surfaces a precondition mismatch as 412; treat as
         // "content changed, redo from scratch" — we'll lose any
@@ -251,7 +266,7 @@ async fn resume_partial(
         // sent us into a fresh .partial.
         StatusCode::OK => {
             let _ = tokio::fs::remove_file(partial_path).await;
-            stream_full_to_partial(resp, target, partial_path, etag_path, opts).await
+            stream_full_to_partial(client, resp, target, partial_path, etag_path, opts).await
         }
         // Range out of bounds — partial probably corrupt or zero-size.
         // Wipe and retry from scratch; recursing once is safe because
@@ -268,6 +283,7 @@ async fn resume_partial(
 /// simultaneously hashing for MD5 verification. Atomic-rename to
 /// final on success.
 async fn stream_full_to_partial(
+    client: &Client,
     resp: reqwest::Response,
     target: &FetchTarget,
     partial_path: &Path,
@@ -308,7 +324,7 @@ async fn stream_full_to_partial(
     progress.finish_and_clear();
 
     let local_md5 = format!("{:x}", hasher.finalize());
-    verify_md5_if_requested(crate_client(), target, &local_md5, partial_path, opts).await?;
+    verify_md5_if_requested(client, target, &local_md5, partial_path, opts).await?;
 
     tokio::fs::rename(partial_path, &target.dest)
         .await
@@ -335,12 +351,17 @@ async fn verify_md5_if_requested(
     partial_path: &Path,
     opts: &FetchOpts,
 ) -> Result<()> {
-    if !opts.verify_md5 {
-        return Ok(());
-    }
     let Some(md5_url) = target.md5_url.as_ref() else {
         return Ok(());
     };
+    if !opts.verify_md5 {
+        tracing::warn!(
+            md5_url = %md5_url,
+            dest = %target.dest.display(),
+            "MD5 verification skipped (--no-verify-md5); upstream sidecar was available"
+        );
+        return Ok(());
+    }
     let body = client
         .get(md5_url.clone())
         .send()
@@ -461,22 +482,6 @@ async fn bail_with_body(
     Err(anyhow!(
         "{label}: GET {url} returned {status}\nbody (first 1 KiB): {trimmed}"
     ))
-}
-
-/// Owned reqwest client used by `stream_full_to_partial` for the
-/// MD5 sidecar fetch on its non-resume code path. Keeps the call site
-/// signature simple at the cost of one extra Client instance per
-/// download (cheap; reqwest's Client pools internally per-thread).
-fn crate_client() -> &'static Client {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        Client::builder()
-            .user_agent(concat!(env!("CARGO_PKG_NAME"), "/fetch-data"))
-            .https_only(false)
-            .build()
-            .expect("static reqwest client builds")
-    })
 }
 
 /// Heuristic: does this URL's response advertise byte-range support?

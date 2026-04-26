@@ -119,6 +119,22 @@ async fn extract_psv_files(zip_dest: &Path, psv_dir: &Path) -> Result<()> {
                 .unwrap_or(false)
             {
                 let dest = psv_dir_clone.join(entry.path().file_name().expect("filename"));
+                if dest.exists() {
+                    // Two zip entries flattening to the same basename
+                    // would silently clobber via std::fs::copy. The
+                    // G-NAF archive ships state-prefixed filenames
+                    // (`NSW_LOCALITY_psv.psv`, `VIC_LOCALITY_psv.psv`)
+                    // so a real-world collision is a sign the archive
+                    // is malformed or our flatten convention has
+                    // diverged from upstream's directory layout.
+                    return Err(anyhow!(
+                        "G-NAF flatten collision: {} (from {}) would overwrite an existing flattened PSV. \
+                         Two source entries share the same basename — the archive layout has changed; \
+                         re-check the upstream G-NAF release notes.",
+                        dest.display(),
+                        entry.path().display()
+                    ));
+                }
                 std::fs::copy(entry.path(), &dest)
                     .with_context(|| format!("copy to {}", dest.display()))?;
                 count += 1;

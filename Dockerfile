@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdeflate0 \
     curl ca-certificates \
     lbzip2 \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder-cpp /src/build/build-index /usr/local/bin/

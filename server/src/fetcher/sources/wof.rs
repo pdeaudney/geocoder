@@ -91,7 +91,9 @@ async fn fetch_one(
     let dest_bz2 = data_dir.join(&filename_compressed);
 
     // Short-circuit: decompressed DB already exists from a previous
-    // run. Don't re-fetch the .bz2 just to throw it away.
+    // run. Don't re-fetch the .bz2 just to throw it away. (lbzip2 /
+    // pbzip2 / bzip2 -d consume the .bz2 on success — default
+    // behaviour, no -k — so the .bz2 won't be on disk to reuse.)
     if dest_db.exists() && !opts.force {
         return WofResult {
             dest: dest_db,

@@ -92,6 +92,23 @@ struct Cli {
 async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
+    // Validate that at least one source flag is set. The CLI is
+    // declarative — no implicit defaults — so an invocation like
+    // `fetch-data --data-dir /data` (no `--region`, no `--wof`, etc.)
+    // would silently exit 0 without doing anything. That looks like
+    // success in CI logs and is the worst kind of bug. Surface it as
+    // a usage error.
+    if cli.region.is_none()
+        && !cli.wof
+        && !cli.openaddresses
+        && !cli.maxmind
+        && !cli.gnaf
+    {
+        anyhow::bail!(
+            "no source selected: pass at least one of --region <preset>, --wof, --openaddresses, --maxmind, --gnaf (see --help)"
+        );
+    }
+
     let opts = FetchOpts {
         force: cli.force,
         verify_md5: !cli.no_verify_md5,
@@ -212,9 +229,13 @@ async fn main() -> Result<()> {
 }
 
 fn build_client() -> Result<Client> {
+    // https_only: every preset URL we hit is HTTPS. Locking the client
+    // to HTTPS prevents an exfil-style attack where a compromised
+    // state.txt redirect (best-effort, no MD5) sneaks an http:// URL
+    // through.
     Ok(Client::builder()
         .user_agent(concat!(env!("CARGO_PKG_NAME"), "/fetch-data"))
-        .https_only(false)
+        .https_only(true)
         .build()?)
 }
 

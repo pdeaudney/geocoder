@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use aws_sdk_s3::config::Region as AwsRegion;
-use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::RequestPayer;
 use aws_sdk_s3::Client as S3Client;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -253,12 +252,8 @@ async fn s3_get_to_file(s3: &S3Client, key: &str, dest: &Path) -> Result<u64> {
     tokio::fs::rename(&partial, dest)
         .await
         .with_context(|| format!("rename {} -> {}", partial.display(), dest.display()))?;
-    let _ = body; // silence unused-warning when rewritten
     Ok(total)
 }
-
-#[allow(dead_code)]
-fn _suppress_bytestream_import_warning(_b: ByteStream) {}
 
 fn with_extension(p: &Path, suffix: &str) -> PathBuf {
     let mut s = p.as_os_str().to_owned();
