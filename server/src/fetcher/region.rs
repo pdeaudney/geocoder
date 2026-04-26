@@ -38,6 +38,7 @@ pub enum Region {
     SouthAmerica,
     Australia,
     NewZealand,
+    Niue,
     Usa,
     Planet,
     AllContinents,
@@ -88,6 +89,7 @@ impl Region {
             Region::SouthAmerica => "south-america-latest.osm.pbf",
             Region::Australia => "australia-oceania/australia-latest.osm.pbf",
             Region::NewZealand => "australia-oceania/new-zealand-latest.osm.pbf",
+            Region::Niue => "australia-oceania/niue-latest.osm.pbf",
             Region::Usa => "north-america/us-latest.osm.pbf",
             Region::Planet | Region::AllContinents => {
                 panic!("geofabrik_url() called on Planet/AllContinents")
@@ -157,6 +159,7 @@ impl FromStr for Region {
             "south-america" => Ok(Region::SouthAmerica),
             "au" | "australia" => Ok(Region::Australia),
             "nz" | "new-zealand" => Ok(Region::NewZealand),
+            "niue" => Ok(Region::Niue),
             "usa" | "us" => Ok(Region::Usa),
             "planet" => Ok(Region::Planet),
             "all-continents" => Ok(Region::AllContinents),
@@ -219,6 +222,10 @@ mod tests {
             (
                 Region::NewZealand,
                 &["https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.pbf"],
+            ),
+            (
+                Region::Niue,
+                &["https://download.geofabrik.de/australia-oceania/niue-latest.osm.pbf"],
             ),
             (
                 Region::Usa,

@@ -132,6 +132,7 @@ pub fn check_pbf_directory_consistency(dir: &Path, target: Region) -> Result<(),
                 | Region::SouthAmerica
                 | Region::Australia
                 | Region::NewZealand
+                | Region::Niue
                 | Region::Usa
         );
     let want_planet_pattern = target.is_planet();

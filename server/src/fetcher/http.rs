@@ -98,6 +98,10 @@ pub async fn fetch(
     let partial_path = partial_sidecar(&target.dest);
 
     if opts.force {
+        // Wipe both sidecars and the final dest's mtime signal so we
+        // unconditionally re-fetch — otherwise an existing file's
+        // mtime would trip If-Modified-Since on the server's
+        // last-modified comparison and we'd 304 the way 'cached'.
         let _ = tokio::fs::remove_file(&etag_path).await;
         let _ = tokio::fs::remove_file(&partial_path).await;
     }
@@ -109,12 +113,18 @@ pub async fn fetch(
 
     // Conditional GET: send If-None-Match / If-Modified-Since when
     // we have prior signals; the server short-circuits with 304 when
-    // the local copy is fresh.
-    let saved_etag = read_etag(&etag_path).await;
-    let local_mtime = tokio::fs::metadata(&target.dest)
-        .await
-        .ok()
-        .and_then(|m| m.modified().ok());
+    // the local copy is fresh. Skip both when forced — the operator
+    // explicitly wants fresh bytes.
+    let (saved_etag, local_mtime) = if opts.force {
+        (None, None)
+    } else {
+        let etag = read_etag(&etag_path).await;
+        let mtime = tokio::fs::metadata(&target.dest)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok());
+        (etag, mtime)
+    };
 
     let mut req = client.get(target.url.clone());
     if let Some(etag) = &saved_etag {
