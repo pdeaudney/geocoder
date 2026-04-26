@@ -106,7 +106,7 @@ impl std::error::Error for MismatchSentinel {}
 
 fn target_for(pbf_dir: &Path, url: &Url) -> FetchTarget {
     // Save under the URL basename — `australia-oceania-latest.osm.pbf`,
-    // `planet-latest.osm.pbf`, etc. The bash version did the same.
+    // `planet-latest.osm.pbf`, etc.
     let filename = url
         .path_segments()
         .and_then(|segs| segs.last())

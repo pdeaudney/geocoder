@@ -1,31 +1,31 @@
 //! Build-data acquisition for the geocoder pipeline.
 //!
-//! Replaces the bash `download-region.sh` / `fetch-build-data.sh` /
-//! `fetch-openaddresses.sh` trio. Drives every external source the
-//! build pipeline consumes (OSM PBF, WhosOnFirst admin SQLite,
-//! OpenAddresses, MaxMind GeoLite2, G-NAF) through a single
-//! conditional-GET + resumable-download core.
+//! Drives every external source the build pipeline consumes (OSM PBF,
+//! WhosOnFirst admin SQLite, OpenAddresses, MaxMind GeoLite2, G-NAF)
+//! through a single conditional-GET + resumable-download core.
 //!
 //! The binary entry point lives in `src/bin/fetch_data.rs`; this
 //! module exposes the library API used by both that binary and the
 //! integration test suite.
 //!
-//! Design highlights:
+//! Module map:
 //!
-//!   - `http`: single state machine for conditional GET (If-None-Match,
-//!     If-Modified-Since), resumable downloads (Range, If-Range), and
-//!     atomic rename. All sources route through it for one set of
+//!   - `http`: single state machine for conditional GET
+//!     (`If-None-Match`, `If-Modified-Since`), resumable downloads
+//!     (`Range`, `If-Range`), and atomic `<dest>.partial → <dest>`
+//!     rename. All sources route through it for one set of
 //!     correctness invariants.
-//!   - `region`: ports the bash region-preset case statement to a
-//!     typed enum + URL set so the test of "are all 13 presets
-//!     resolving correctly?" becomes a table-driven cargo test.
+//!   - `region`: typed `Region` enum + URL preset table. Table-driven
+//!     unit tests pin every preset's URL so a typo can't silently
+//!     reroute downloads.
 //!   - `state`: parse + serialize Osmosis-format `state.txt`. Sidecars
 //!     persist replication metadata so `update-index.sh` and the
 //!     operator both have explicit visibility into what date snapshot
 //!     is on disk.
-//!   - `mismatch`: typed planet/continent mismatch detection with
-//!     `Display`-formatted remediation text — replaces the bash heredoc
-//!     check shipped earlier in PR #9.
+//!   - `mismatch`: typed planet/continent directory consistency check
+//!     with `Display`-formatted remediation text. Prevents
+//!     `build-index` from silently double-processing an OSM
+//!     directory that mixes the two patterns.
 
 pub mod http;
 pub mod mismatch;

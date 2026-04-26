@@ -3,9 +3,9 @@
 //! G-NAF is a license-gated dataset (Geoscape Australia, CC-BY 4.0
 //! release on data.gov.au). The license is per-operator, so we don't
 //! hard-code a download URL — the operator pastes a license-accepted
-//! URL into `GNAF_ARCHIVE_URL` (same convention as the bash version).
-//! Without that env var we skip with a structured remediation message;
-//! the build pipeline degrades gracefully (no AU address-points).
+//! URL into `GNAF_ARCHIVE_URL`. Without that env var we skip with a
+//! structured remediation message; the build pipeline degrades
+//! gracefully (no AU address-points).
 //!
 //! Output layout: `data/gnaf/psv/*.psv` (flattened from the nested
 //! state-level zip layout the upstream archive ships with).
@@ -76,8 +76,8 @@ async fn has_psv_files(psv_dir: &Path) -> bool {
 ///
 /// Pure-Rust extract via the `zip` crate would add a dep (and
 /// G-NAF zips are large multi-stream archives that aren't always
-/// well-handled). Shelling out to `unzip` matches the bash version
-/// and keeps us off the critical path of zip-format edge cases.
+/// well-handled). Shelling out to `unzip` keeps us off the critical
+/// path of zip-format edge cases.
 async fn extract_psv_files(zip_dest: &Path, psv_dir: &Path) -> Result<()> {
     use std::process::Stdio;
     use tokio::process::Command;

@@ -4,12 +4,12 @@
 //! data.geocode.earth, then decompresses to
 //! `data/whosonfirst-data-admin-<scope>-latest.db`. Decompression
 //! shells out to the fastest available bzip2 decoder
-//! (`lbzip2 → pbzip2 → bzip2`) — same priority chain as the bash
-//! port. Pure-Rust bzip2 decoders are single-threaded, and the WoF
-//! planet snapshot is 8.6 GB (compressed) → ~30 GB (decompressed),
-//! so the parallel decoder matters.
+//! (`lbzip2 → pbzip2 → bzip2`). Pure-Rust bzip2 decoders are
+//! single-threaded, and the WoF planet snapshot is 8.6 GB
+//! (compressed) → ~30 GB (decompressed), so the parallel decoder
+//! matters.
 //!
-//! Scope semantics (preserved from `WOF_COUNTRIES` env in the bash):
+//! Scope semantics (`--wof-countries` / `WOF_COUNTRIES`):
 //!   - "planet" — admin-latest (8.6 GB)
 //!   - "none"   — skipped at orchestration layer
 //!   - "<cc> <cc>..." — per-country files at the same URL prefix
@@ -60,7 +60,7 @@ fn parse_scope(scope: &str) -> Vec<String> {
         "" | "none" => vec![],
         "planet" => vec!["admin".to_string()],
         // Country list: "au nz" → ["admin-au", "admin-nz"]. Split on
-        // whitespace and commas to match the bash form.
+        // whitespace and commas so either form works.
         list => list
             .split([' ', ','])
             .filter(|s| !s.is_empty())
@@ -167,11 +167,10 @@ fn strip_bz2_suffix(p: &Path) -> Option<PathBuf> {
 }
 
 async fn pick_bzip2_decoder() -> Result<&'static str> {
-    // Same priority order as the bash version. lbzip2 wins because
-    // it parallelises across cores on any single-stream .bz2 input
-    // (which the WoF distribution is); pbzip2 only parallelises on
-    // pbzip2-encoded multi-stream files but still wins ~10–20 %
-    // over plain bzip2 via I/O overlap.
+    // lbzip2 wins because it parallelises across cores on any
+    // single-stream .bz2 input (which the WoF distribution is);
+    // pbzip2 only parallelises on pbzip2-encoded multi-stream files
+    // but still wins ~10–20 % over plain bzip2 via I/O overlap.
     for candidate in ["lbzip2", "pbzip2", "bzip2"] {
         if which(candidate).await.is_some() {
             return Ok(candidate);

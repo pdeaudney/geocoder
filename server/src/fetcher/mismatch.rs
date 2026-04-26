@@ -1,13 +1,9 @@
 //! Planet/continent PBF directory consistency check.
 //!
-//! Ports the bash heredoc check from
-//! `scripts/fetch-build-data.sh:151-217` (commit f267391) to a typed
-//! enum return + `Display`-formatted remediation message. The check
-//! exists because `build-index` globs `*.osm.pbf` — mixing
-//! `planet-latest.osm.pbf` with `<continent>-latest.osm.pbf` files in
-//! the same directory would silently double-process every node and
-//! way, producing a corrupt index and burning many extra hours of
-//! build time.
+//! `build-index` globs `*.osm.pbf`, so mixing `planet-latest.osm.pbf`
+//! with `<continent>-latest.osm.pbf` files in the same directory
+//! would silently double-process every node and way, producing a
+//! corrupt index and burning many extra hours of build time.
 //!
 //! Two flavours of mismatch worth catching:
 //!

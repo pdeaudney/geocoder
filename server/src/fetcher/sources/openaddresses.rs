@@ -1,6 +1,6 @@
 //! OpenAddresses fetch via AWS S3 Requester-Pays.
 //!
-//! Two-step flow that matches what the bash port did:
+//! Two-step flow:
 //!
 //!   1. List sources via the OA batch API:
 //!      `https://batch.openaddresses.io/api/data?layer=addresses[&source=PREFIX]`
@@ -15,8 +15,7 @@
 //! `*.source.geojson.gz` keeps working.
 //!
 //! AWS auth uses the standard credential chain (env, profile, EC2
-//! IMDS). Skip with a graceful warning when no creds are available
-//! — same operator UX as the bash version.
+//! IMDS). Skip with a graceful warning when no creds are available.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

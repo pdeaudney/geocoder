@@ -3,8 +3,7 @@
 //! Fetches `https://download.maxmind.com/app/geoip_download?...` and
 //! extracts `*/GeoLite2-City.mmdb` to `data/GeoLite2-City.mmdb`.
 //! Skipped (with a structured warning) when `MAXMIND_LICENSE_KEY`
-//! isn't set — same graceful-degradation behaviour as the bash
-//! version, since MaxMind is an optional source for the /geocode/ip
+//! isn't set — MaxMind is an optional source for the /geocode/ip
 //! endpoint.
 //!
 //! Tarball extract is pure-Rust (`flate2` + `tar`). Tarball is

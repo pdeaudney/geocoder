@@ -1,19 +1,18 @@
 //! OSM region preset → (URL, dest filename) set.
 //!
-//! Ports the bash `case "$region" in` block from
-//! `scripts/download-region.sh` to a typed enum + table-driven URL
-//! derivation. The 13 presets are kept verbatim:
+//! 14 presets:
 //!
 //!   - 9 Geofabrik continent extracts (the `--region all-continents`
 //!     fan-out): africa, antarctica, asia, australia-oceania,
 //!     central-america, europe, north-america, russia, south-america
-//!   - 3 Geofabrik sub-region shortcuts: australia, new-zealand, usa
+//!   - 4 Geofabrik sub-region shortcuts: australia, new-zealand, niue, usa
 //!   - 1 planet stream from planet.openstreetmap.org
 //!
-//! `oceania` is preserved as an alias for `australia-oceania` — the
-//! bash port treated `oceania` as AU+NZ-only, which silently dropped
-//! Fiji, PNG, Vanuatu, Solomon Is, etc. (fixed in commit 332b7f7;
-//! Rust port carries the corrected behaviour forward).
+//! `oceania` is an alias for `australia-oceania` — the full continent
+//! extract, not AU+NZ-only (the latter would silently drop Fiji, PNG,
+//! Vanuatu, Solomon Is, etc.). The `australia` and `new-zealand`
+//! sub-region presets exist for callers that explicitly want only
+//! those countries.
 
 use std::str::FromStr;
 
@@ -45,9 +44,8 @@ pub enum Region {
 }
 
 impl Region {
-    /// Continents iterated by `--region all-continents`. Order must
-    /// match the bash `CONTINENTS` env (assumes alphabetical with
-    /// `australia-oceania` between `asia` and `central-america`).
+    /// Continents iterated by `--region all-continents`. Alphabetical
+    /// with `australia-oceania` between `asia` and `central-america`.
     pub const ALL_CONTINENTS: [Region; 9] = [
         Region::Africa,
         Region::Antarctica,
@@ -142,15 +140,11 @@ impl FromStr for Region {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        // Accept the same inputs the bash version did, plus the
-        // `australia-oceania` long form.
         match s {
             "africa" => Ok(Region::Africa),
             "antarctica" => Ok(Region::Antarctica),
             "asia" => Ok(Region::Asia),
-            // `oceania` was historically AU+NZ-only in bash; the
-            // corrected behaviour (full continent) is what
-            // `australia-oceania` always meant. Both map here.
+            // `oceania` is an alias for the full continent extract.
             "oceania" | "australia-oceania" => Ok(Region::AustraliaOceania),
             "central-america" => Ok(Region::CentralAmerica),
             "europe" => Ok(Region::Europe),

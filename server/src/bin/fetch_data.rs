@@ -1,6 +1,6 @@
-//! `fetch-data` — single-binary replacement for the trio of bash data
-//! fetchers (`download-region.sh`, `fetch-build-data.sh`,
-//! `fetch-openaddresses.sh`).
+//! `fetch-data` — acquire every external data source the geocoder
+//! build pipeline consumes (OSM PBF, WhosOnFirst admin SQLite,
+//! OpenAddresses, MaxMind GeoLite2, G-NAF).
 //!
 //! Architecture overview lives in `query_server::fetcher`. This file
 //! is the CLI surface and dispatch.
@@ -26,8 +26,6 @@ use query_server::fetcher::FetchOutcome;
     version,
     about = "Acquire OSM PBF + WoF + OpenAddresses + MaxMind + G-NAF for the geocoder build pipeline.",
     long_about = "
-Replaces download-region.sh, fetch-build-data.sh, and fetch-openaddresses.sh.
-
 Re-runs are cheap: conditional GET (If-None-Match / If-Modified-Since)
 short-circuits to 304 Not Modified when local data is fresh, and partial
 downloads from a killed run resume cleanly via HTTP Range + If-Range.
