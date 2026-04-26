@@ -154,78 +154,57 @@ sidecars next to it:
     ecosystem (`pyosmium-get-changes`, `osmupdate`, our own
     `update-index.sh`) consumes.
 
-Mix and match sources by combining flags:
+Mix and match sources by combining flags. License-gated sources
+(MaxMind, G-NAF) need an env var set; the binary skips them with a
+structured warning otherwise.
 
 ```bash
-# Add OpenAddresses (Requester-Pays, needs AWS creds) and MaxMind (license-key) and G-NAF.
-export MAXMIND_LICENSE_KEY=...
-export GNAF_ARCHIVE_URL=https://...
+# AU + OpenAddresses + MaxMind + G-NAF
+export MAXMIND_LICENSE_KEY=...   # free signup: maxmind.com/en/geolite2/signup
+export GNAF_ARCHIVE_URL=https://...  # license-accepted URL from data.gov.au
 ./target/release/fetch-data --region au --wof --openaddresses au --maxmind --gnaf
 
-# WoF only, scoped to specific countries.
-./target/release/fetch-data --wof --wof-countries "au gb us" --data-dir ./data
+# WoF only, scoped to specific countries
+./target/release/fetch-data --wof --wof-countries "au gb us"
 ```
 
-License-gated sources are skipped with a structured warning when their
-env var isn't set, so the binary degrades gracefully:
-
-```bash
-# MaxMind GeoLite2-City — free signup at maxmind.com/en/geolite2/signup.
-# Required only for the /geocode/ip endpoint.
-export MAXMIND_LICENSE_KEY=...
-
-# G-NAF — Australian Geocoded National Address File. Manual license
-# acceptance at https://geoscape.com.au/data/g-naf/. Paste the accepted
-# URL into GNAF_ARCHIVE_URL.
-export GNAF_ARCHIVE_URL=https://...
-```
-
-#### A note on OpenAddresses + AWS
-
-OpenAddresses retired its free HTTPS bulk mirror; the only
-programmatic path to the processed data is the Requester-Pays S3
-bucket `s3://v2.openaddresses.io`. A free-tier AWS account is enough
-— the requester-pays charge is single-digit dollars for the planet,
-cents for a single country. If you can't use AWS at all:
-
-- **AU-only:** omit `--openaddresses`. G-NAF is the better
-  address-points dataset for AU anyway.
-- **Other regions:** omit `--openaddresses`. OSM alone covers most
-  `/reverse` queries; the address-point refinement on `/search` and
-  `/validate` won't be available, but the service still works.
-- **Specific countries:** the per-source `data` URLs in the
-  [`openaddresses/openaddresses` GitHub repo's `sources/`](https://github.com/openaddresses/openaddresses/tree/master/sources)
-  point at upstream open-data portals. No AWS needed, but each is in
-  the upstream's native format (Shapefile / GeoJSON / WMS / KML) and
-  requires a per-source format adapter.
+OpenAddresses lives in the Requester-Pays S3 bucket
+`s3://v2.openaddresses.io` (the free HTTPS mirror was retired). A
+free-tier AWS account suffices — the egress charge is single-digit
+dollars for the global scope, cents per country. The binary uses the
+standard credential chain (env, `AWS_PROFILE`, EC2 IMDS, SSO,
+`credential_process`) so any auth flow your existing tooling expects
+will work. If AWS isn't an option, omit `--openaddresses`: OSM alone
+covers most `/reverse` queries, and G-NAF is the better address-points
+source for AU anyway.
 
 Build the indexes:
 
 ```bash
-# Indexer
-mkdir build && cd build && cmake ../builder && make && cd ..
+# C++ indexer (out-of-tree under ./build/)
+make builder
 
-# Server + all build tools
+# Rust binaries (workspace target → ./target/release/)
 cargo build --release --manifest-path server/Cargo.toml
 
 # Index an OSM PBF (mandatory — the rest are additive)
 ./build/build-index data/index data/pbf/*.osm.pbf
 
 # (Optional) forward search — tantivy per-country
-./server/target/release/build-forward-index data/index --partition-by-country
+./target/release/build-forward-index data/index --partition-by-country
 
 # (Optional) autocomplete FST
-./server/target/release/build-autocomplete-fst data/index
+./target/release/build-autocomplete-fst data/index
 
 # (Optional, AU only) postcode lookup + G-NAF address points
-./server/target/release/build-postcode-lookup data/gnaf/psv data/index
-./server/target/release/build-gnaf-index data/gnaf/psv data/index
+./target/release/build-postcode-lookup data/gnaf/psv data/index
+./target/release/build-gnaf-index data/gnaf/psv data/index
 
 # (Optional, worldwide) OpenAddresses address points
-./server/target/release/build-openaddresses-index data/openaddresses data/index
+./target/release/build-openaddresses-index data/openaddresses data/index
 
 # Serve
-./server/target/release/query-server data/index
+./target/release/query-server data/index
 ```
 
 The server starts on `0.0.0.0:3000` (REST) and `0.0.0.0:3001` (gRPC) by default.
