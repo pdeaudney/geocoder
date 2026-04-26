@@ -94,7 +94,16 @@ async fn fetch_one(
     // run. Don't re-fetch the .bz2 just to throw it away. (lbzip2 /
     // pbzip2 / bzip2 -d consume the .bz2 on success — default
     // behaviour, no -k — so the .bz2 won't be on disk to reuse.)
+    //
+    // I10: clean up any orphan `<bz2>.partial` left by a prior run
+    // that completed the decompress but was killed before its own
+    // re-run could rotate them. The partial files are useless once
+    // the .db is in place; leaving them on disk leaks GBs.
     if dest_db.exists() && !opts.force {
+        let bz2_partial = path_with_suffix(&dest_bz2, "partial");
+        let _ = tokio::fs::remove_file(&bz2_partial).await;
+        let etag_orphan = path_with_suffix(&dest_bz2, "etag");
+        let _ = tokio::fs::remove_file(&etag_orphan).await;
         return WofResult {
             dest: dest_db,
             outcome: Ok(FetchOutcome::Cached),
@@ -168,38 +177,30 @@ fn strip_bz2_suffix(p: &Path) -> Option<PathBuf> {
     s.strip_suffix(".bz2").map(PathBuf::from)
 }
 
+fn path_with_suffix(p: &Path, suffix: &str) -> PathBuf {
+    let mut s = p.as_os_str().to_owned();
+    s.push(".");
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
 async fn pick_bzip2_decoder() -> Result<&'static str> {
     // lbzip2 wins because it parallelises across cores on any
     // single-stream .bz2 input (which the WoF distribution is);
     // pbzip2 only parallelises on pbzip2-encoded multi-stream files
     // but still wins ~10–20 % over plain bzip2 via I/O overlap.
     for candidate in ["lbzip2", "pbzip2", "bzip2"] {
-        if which(candidate).await.is_some() {
+        let cmd = candidate.to_string();
+        let found = tokio::task::spawn_blocking(move || which::which(&cmd).is_ok())
+            .await
+            .unwrap_or(false);
+        if found {
             return Ok(candidate);
         }
     }
     Err(anyhow!(
         "no bzip2 decoder found on PATH (tried lbzip2, pbzip2, bzip2)"
     ))
-}
-
-async fn which(cmd: &str) -> Option<()> {
-    let cmd = cmd.to_string();
-    tokio::task::spawn_blocking(move || {
-        std::env::var_os("PATH").and_then(|paths| {
-            std::env::split_paths(&paths).find_map(|dir| {
-                let candidate = dir.join(&cmd);
-                if candidate.is_file() {
-                    Some(())
-                } else {
-                    None
-                }
-            })
-        })
-    })
-    .await
-    .ok()
-    .flatten()
 }
 
 #[cfg(test)]

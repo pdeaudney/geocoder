@@ -90,10 +90,19 @@ flate2 = "1.0"
 tar = "0.4"
 anyhow = "1.0"
 futures = "0.3"
+# AWS deps for OpenAddresses (Requester-Pays S3 bucket). The
+# default-features=false discipline keeps the transitive tree as
+# small as the SDK allows; cold cargo build still adds ~3-5 min
+# (smithy + hyper + rustls), but features beyond rustls/rt-tokio
+# pull substantially more weight.
 aws-config = { version = "1.5", default-features = false, features = ["rustls", "rt-tokio", "behavior-version-latest"] }
 aws-sdk-s3 = { version = "1.122", default-features = false, features = ["rustls", "rt-tokio", "behavior-version-latest"] }
 aws-credential-types = "1.2"
 url = "2"
+# Lookup external commands on PATH (currently the lbzip2/pbzip2/bzip2
+# decoder priority chain in the WoF fetch path). 1.5 KB lib, well
+# tested across platforms; cheaper than reimplementing PATH split.
+which = "7"
 
 [features]
 default = ["forward", "grpc"]

@@ -46,13 +46,36 @@ use super::{FetchOutcome, FetchTarget};
 
 #[derive(Debug, Clone)]
 pub struct FetchOpts {
-    /// Bypass conditional GET; always re-download.
+    /// Bypass conditional GET; always re-download. Implies a wipe of
+    /// `<dest>.etag` and `<dest>.partial` before the request, so an
+    /// existing file's mtime can't trip the server's
+    /// `If-Modified-Since` check and 304 us back to "Cached" (the
+    /// regression caught live during Niue smoke). When `force` is
+    /// `true`, `resume` is effectively ignored — the partial is
+    /// removed before the resume branch runs.
     pub force: bool,
-    /// Verify MD5 against the upstream sidecar (when one exists).
+
+    /// Verify the streaming MD5 hash against the upstream `<file>.md5`
+    /// sidecar (only Geofabrik publishes one; OA / WoF / MaxMind /
+    /// planet.osm.org return `None` for `target.md5_url` and skip the
+    /// check regardless of this flag). Setting this to `false` while
+    /// the sidecar IS available emits a one-shot `tracing::warn!` so
+    /// the audit trail isn't lost.
     pub verify_md5: bool,
-    /// Resume from `<dest>.partial` if present.
+
+    /// Resume from `<dest>.partial` when present. **Requires** a
+    /// matching `<dest>.etag` sidecar — without one the server can't
+    /// validate the partial via `If-Range` and we'd risk splicing
+    /// fresh tail bytes onto stale prefix bytes. When `resume` is
+    /// `true` but no etag is present, we log a warning, delete the
+    /// partial, and fall through to a clean restart (the C1
+    /// invariant from the QA review).
     pub resume: bool,
-    /// Show terminal progress bar (suppressed in non-tty / `--quiet`).
+
+    /// Show a terminal progress bar via `indicatif`. `ProgressBar` is
+    /// silent in non-tty contexts regardless, so this flag mostly
+    /// matters when the operator wants the bar suppressed in an
+    /// interactive shell (e.g. `--quiet` for clean log capture).
     pub show_progress: bool,
 }
 
@@ -323,6 +346,22 @@ async fn stream_full_to_partial(
     drop(writer);
     progress.finish_and_clear();
 
+    // N3: 200 OK with zero body bytes is occasionally seen from
+    // misconfigured CDNs (e.g. an Apache mod_proxy_cache miss that
+    // proxies a body-less request). We'd silently rename the empty
+    // partial as the canonical artifact and the downstream build
+    // pipeline would fail on parse with a less-actionable error.
+    // Catch it here. Geofabrik PBFs are KB-to-GB; a 0-byte response
+    // is always a bug.
+    if total == 0 {
+        let _ = tokio::fs::remove_file(partial_path).await;
+        return Err(anyhow!(
+            "GET {} returned 200 OK with 0 bytes — refusing to install an empty file at {}",
+            target.url,
+            target.dest.display()
+        ));
+    }
+
     let local_md5 = format!("{:x}", hasher.finalize());
     verify_md5_if_requested(client, target, &local_md5, partial_path, opts).await?;
 
@@ -474,13 +513,32 @@ async fn bail_with_body(
     resp: reqwest::Response,
     status: StatusCode,
 ) -> Result<FetchOutcome> {
-    let body = resp
-        .text()
-        .await
-        .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
-    let trimmed: String = body.chars().take(1024).collect();
+    // Cap at 4 KiB so a megabyte HTML error page from a misbehaving
+    // CDN doesn't sit in RAM while we build the error string. We
+    // read chunks until the budget is hit, then drop the rest.
+    const MAX_BODY: usize = 4 * 1024;
+    let mut buf = Vec::with_capacity(MAX_BODY);
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(c) => {
+                let remaining = MAX_BODY.saturating_sub(buf.len());
+                if remaining == 0 {
+                    break;
+                }
+                let take = remaining.min(c.len());
+                buf.extend_from_slice(&c[..take]);
+                if buf.len() >= MAX_BODY {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let trimmed = String::from_utf8_lossy(&buf);
     Err(anyhow!(
-        "{label}: GET {url} returned {status}\nbody (first 1 KiB): {trimmed}"
+        "{label}: GET {url} returned {status}\nbody (first {} KiB): {trimmed}",
+        MAX_BODY / 1024,
     ))
 }
 

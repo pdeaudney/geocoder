@@ -197,4 +197,60 @@ mod tests {
         let target = target_for(Path::new("/data/pbf"), &url);
         assert_eq!(target.dest, PathBuf::from("/data/pbf/download.osm.pbf"));
     }
+
+    /// I11 (QA review): not all OSM endpoints publish a `state.txt`
+    /// sidecar (some sub-region URLs lack one). When upstream 404s
+    /// the orchestrator must surface a warning and continue — the
+    /// PBF download itself is the load-bearing artifact; the state
+    /// sidecar is bonus metadata.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fetch_state_404_returns_err_for_orchestrator_to_warn() {
+        use axum::routing::get;
+        use axum::Router;
+        use std::net::SocketAddr;
+        use std::time::Duration;
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let app = Router::new().route(
+            "/state.txt",
+            get(|| async { (axum::http::StatusCode::NOT_FOUND, "") }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel();
+        let join = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pbf_dest = tmp.path().join("placeholder-latest.osm.pbf");
+        let url = Url::parse(&format!("http://{addr}/state.txt")).unwrap();
+
+        let result = fetch_state(&reqwest::Client::new(), &url, &pbf_dest).await;
+        assert!(
+            result.is_err(),
+            "404 must surface as Err for orchestrator to log"
+        );
+        let err_msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            err_msg.contains("404"),
+            "error message must include the upstream status, got: {err_msg}"
+        );
+        // The .state.txt sidecar must NOT have been written.
+        let state_path = format!("{}.state.txt", pbf_dest.display());
+        assert!(
+            std::fs::metadata(&state_path).is_err(),
+            "404 path should never persist a sidecar"
+        );
+
+        let _ = tx.send(());
+        let _ = join.await;
+    }
 }

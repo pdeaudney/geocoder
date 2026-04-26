@@ -3,6 +3,12 @@ set -e
 
 DATA_DIR="${DATA_DIR:-/data}"
 
+# Docker `auto` mode is intentionally OSM-only — the small-Docker
+# operator gets a working /reverse + /search out of the box on
+# whatever Geofabrik region they pick. WhosOnFirst, OpenAddresses,
+# MaxMind, and G-NAF are NOT fetched here. Worldwide / multi-source
+# builds use the Packer AMI path (packer/build-worldwide.pkr.hcl)
+# or invoke `fetch-data` directly with the full set of source flags.
 download_pbf() {
     mkdir -p "$DATA_DIR/pbf"
     if [ -z "$PBF_URLS" ] && [ -n "$REGION" ]; then
