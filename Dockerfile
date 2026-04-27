@@ -22,9 +22,17 @@ FROM rust:bookworm AS builder-rust
 # transliteration. The runtime query-server doesn't link libicu —
 # but the build binaries do, and they're shipped into the runtime
 # image so the `auto` entrypoint can rebuild the index.
+#
+# clang + libclang-dev: rust_icu_sys uses bindgen to generate
+# Rust bindings against whatever libicu is installed. bindgen
+# needs libclang at compile time (NOT runtime) to parse the ICU
+# C headers. Without these, bindgen fails with
+# "'stddef.h' file not found" because clang can't locate its own
+# builtin headers' resource directory.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake protobuf-compiler \
     libicu-dev pkg-config \
+    clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

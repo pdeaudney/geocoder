@@ -80,17 +80,22 @@ On Debian/Ubuntu:
 apt-get install cmake libosmium2-dev libprotozero-dev libs2-dev \
                 zlib1g-dev libbz2-dev libexpat1-dev liblz4-dev \
                 libdeflate-dev libicu-dev \
+                clang libclang-dev \
                 protobuf-compiler \
                 lbzip2
 ```
 
 `libicu` is required by the build binaries (`build-forward-index`, `build-autocomplete-fst`) for ICU-based transliteration. The runtime `query-server` does **not** link libicu — transliterations are baked into the on-disk index files at build time, so production hosts only need the static `query-server` binary. Build hosts (the AMI / Packer image) install `libicu-dev`; runtime images do not.
 
+`clang` + `libclang-dev` are needed because `rust_icu_sys` uses bindgen to generate Rust bindings against the locally-installed libicu. Without them, the build fails with `'stddef.h' file not found` (bindgen can't locate clang's builtin headers). Linux distributions don't pull these in transitively — they have to be explicit. Compile-time only; runtime image doesn't need them.
+
 On macOS the `icu4c` formula is keg-only, so cargo needs `PKG_CONFIG_PATH` pointed at its pkgconfig directory — every build invocation prepends:
 
 ```bash
 PKG_CONFIG_PATH=$(brew --prefix icu4c)/lib/pkgconfig cargo build --release ...
 ```
+
+(macOS doesn't need a separate `libclang` install — Xcode Command Line Tools provide it.)
 
 Operators serving an exclusively-Latin corpus (no Russian/CJK/Arabic/Greek/etc. data) can skip libicu and build with `--no-default-features --features forward,grpc` — the `translit` feature is opt-out via `--no-default-features`.
 
