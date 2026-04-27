@@ -71,6 +71,48 @@ async fn search_rejects_oversize_street() {
 }
 
 #[tokio::test]
+async fn search_rejects_oversize_city() {
+    let Some(svc) = try_service() else { return };
+    let resp = svc
+        .search(Request::new(SearchRequest {
+            city: "a".repeat(limits::STRUCTURED_FIELD + 1),
+            ..Default::default()
+        }))
+        .await;
+    let err = resp.expect_err("oversize city must be rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("city"));
+}
+
+#[tokio::test]
+async fn search_rejects_oversize_state() {
+    let Some(svc) = try_service() else { return };
+    let resp = svc
+        .search(Request::new(SearchRequest {
+            state: "a".repeat(limits::STRUCTURED_FIELD + 1),
+            ..Default::default()
+        }))
+        .await;
+    let err = resp.expect_err("oversize state must be rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("state"));
+}
+
+#[tokio::test]
+async fn search_rejects_oversize_housenumber() {
+    let Some(svc) = try_service() else { return };
+    let resp = svc
+        .search(Request::new(SearchRequest {
+            housenumber: "9".repeat(limits::HOUSENUMBER + 1),
+            ..Default::default()
+        }))
+        .await;
+    let err = resp.expect_err("oversize housenumber must be rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("housenumber"));
+}
+
+#[tokio::test]
 async fn search_rejects_oversize_country_code_list() {
     let Some(svc) = try_service() else { return };
     let resp = svc
@@ -96,6 +138,23 @@ async fn autocomplete_rejects_oversize_q() {
     let err = resp.expect_err("oversize autocomplete q must be rejected");
     assert_eq!(err.code(), Code::InvalidArgument);
     assert!(err.message().contains("q"));
+}
+
+/// Autocomplete uses the SINGLE country-code cap (2 bytes), not
+/// the multi-list one. A 3-byte input must be rejected.
+#[tokio::test]
+async fn autocomplete_rejects_oversize_country_code() {
+    let Some(svc) = try_service() else { return };
+    let resp = svc
+        .autocomplete(Request::new(AutocompleteRequest {
+            q: "syd".into(),
+            country_code: "AUS".into(), // 3 bytes, over the 2-byte cap
+            ..Default::default()
+        }))
+        .await;
+    let err = resp.expect_err("oversize country_code must be rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("country_code"));
 }
 
 #[tokio::test]
@@ -133,6 +192,71 @@ async fn validate_rejects_oversize_housenumber() {
 }
 
 #[tokio::test]
+async fn validate_rejects_oversize_street() {
+    let Some(svc) = try_service() else { return };
+    let resp = svc
+        .validate(Request::new(ValidateRequest {
+            street: "a".repeat(limits::STRUCTURED_FIELD + 1),
+            city: "Sydney".into(),
+            country_code: "AU".into(),
+            ..Default::default()
+        }))
+        .await;
+    let err = resp.expect_err("oversize validate street must be rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("street"));
+}
+
+#[tokio::test]
+async fn validate_rejects_oversize_city() {
+    let Some(svc) = try_service() else { return };
+    let resp = svc
+        .validate(Request::new(ValidateRequest {
+            street: "Main St".into(),
+            city: "a".repeat(limits::STRUCTURED_FIELD + 1),
+            country_code: "AU".into(),
+            ..Default::default()
+        }))
+        .await;
+    let err = resp.expect_err("oversize validate city must be rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("city"));
+}
+
+#[tokio::test]
+async fn validate_rejects_oversize_state() {
+    let Some(svc) = try_service() else { return };
+    let resp = svc
+        .validate(Request::new(ValidateRequest {
+            street: "Main St".into(),
+            city: "Sydney".into(),
+            country_code: "AU".into(),
+            state: "a".repeat(limits::STRUCTURED_FIELD + 1),
+            ..Default::default()
+        }))
+        .await;
+    let err = resp.expect_err("oversize validate state must be rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("state"));
+}
+
+#[tokio::test]
+async fn validate_rejects_oversize_country_code() {
+    let Some(svc) = try_service() else { return };
+    let resp = svc
+        .validate(Request::new(ValidateRequest {
+            street: "Main St".into(),
+            city: "Sydney".into(),
+            country_code: "AU,".repeat(limits::COUNTRY_CODE_LIST),
+            ..Default::default()
+        }))
+        .await;
+    let err = resp.expect_err("oversize validate country_code must be rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(err.message().contains("country_code"));
+}
+
+#[tokio::test]
 async fn reverse_rejects_oversize_lang() {
     let Some(svc) = try_service() else { return };
     let resp = svc
@@ -160,6 +284,50 @@ async fn ip_geocode_rejects_oversize_ip_string() {
     let err = resp.expect_err("oversize ip must be rejected");
     assert_eq!(err.code(), Code::InvalidArgument);
     assert!(err.message().contains("ip"));
+}
+
+/// Inputs at exactly the cap boundary must NOT be rejected as
+/// "too long". They may still fail downstream for other reasons
+/// (e.g. forward index disabled returns Unimplemented) — but the
+/// failure must not be `InvalidArgument` produced by the length
+/// check. Off-by-one on the comparison would silently exclude
+/// legitimate boundary inputs.
+#[tokio::test]
+async fn search_at_cap_boundary_passes_length_check() {
+    let Some(svc) = try_service() else { return };
+    let resp = svc
+        .search(Request::new(SearchRequest {
+            q: "a".repeat(limits::SEARCH_Q),
+            ..Default::default()
+        }))
+        .await;
+    if let Err(err) = resp {
+        assert_ne!(
+            err.code(),
+            Code::InvalidArgument,
+            "boundary-length input incorrectly rejected by the length check: {}",
+            err.message(),
+        );
+    }
+}
+
+#[tokio::test]
+async fn autocomplete_at_cap_boundary_passes_length_check() {
+    let Some(svc) = try_service() else { return };
+    let resp = svc
+        .autocomplete(Request::new(AutocompleteRequest {
+            q: "a".repeat(limits::AUTOCOMPLETE_Q),
+            ..Default::default()
+        }))
+        .await;
+    if let Err(err) = resp {
+        assert_ne!(
+            err.code(),
+            Code::InvalidArgument,
+            "boundary-length autocomplete q incorrectly rejected: {}",
+            err.message(),
+        );
+    }
 }
 
 /// Cap CONSTANTS themselves must stay above the realistic upper

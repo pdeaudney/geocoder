@@ -65,8 +65,12 @@ impl Geocoder for GeocoderService {
         }
         let h3_res = validate_h3_res(&r.h3_res)?;
         let snap = self.index.load();
-        let address = snap.query(r.lat, r.lon);
-        let _ = r.lang; // accepted, not yet honoured — mirrors REST
+        // Honour `lang` the same way the REST `/reverse` handler does
+        // (main.rs `reverse_geocode`). Empty string falls through to
+        // the default — `query_with_lang` treats `None` as "no
+        // override" and `pack_lang_code` rejects sub-2-char tags.
+        let lang = if r.lang.is_empty() { None } else { Some(r.lang.as_str()) };
+        let address = snap.query_with_lang(r.lat, r.lon, lang);
         let mut pb = into_pb_address(address);
         pb.h3 = build_h3_proto(r.lat, r.lon, &h3_res);
         Ok(Response::new(AddressResponse {
