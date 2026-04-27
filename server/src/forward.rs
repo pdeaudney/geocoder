@@ -602,11 +602,14 @@ fn tantivy_doc(
     // LowerCaser pipeline.
     let mut name_indexed = canonicalise_phrase(name);
     for alt in alternates {
-        if alt.is_empty() {
+        let canonical_alt = canonicalise_phrase(alt);
+        if canonical_alt.trim().is_empty() {
             continue;
         }
-        name_indexed.push(' ');
-        name_indexed.push_str(&canonicalise_phrase(alt));
+        if !name_indexed.is_empty() {
+            name_indexed.push(' ');
+        }
+        name_indexed.push_str(canonical_alt.trim());
     }
     let suburb_indexed = suburb.map(canonicalise_phrase).unwrap_or_default();
     let state_indexed = state.map(canonicalise_phrase).unwrap_or_default();

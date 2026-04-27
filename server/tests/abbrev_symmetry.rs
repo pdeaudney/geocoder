@@ -131,3 +131,40 @@ fn tokenize_user_input_matches_normalise_prefix() {
         );
     }
 }
+
+/// Place names whose canonical OSM form starts with an uppercase
+/// diacritic (`Île-de-France`, `Östersund`, `Élysée`, `Ürümqi`,
+/// `Ångström`) MUST normalise to pure ASCII. Pre-PR the build-side
+/// fold table missed uppercase variants — `'Î'` fell through, then
+/// `to_lowercase()` produced `'î'` (still non-ASCII), and the FST
+/// key got UTF-8 bytes the runtime query path could never produce.
+/// Result: title-cased diacritic places weren't reachable via FST
+/// lookup. Pin the invariant here.
+#[test]
+fn fst_key_is_pure_ascii_for_uppercase_diacritic_names() {
+    for input in [
+        "Île-de-France",
+        "Östersund",
+        "Élysée",
+        "Köln",
+        "Ürümqi",
+        "Ångström",
+        "Ñuble",
+        "Çatalhöyük",
+    ] {
+        let key = normalise_prefix(input);
+        assert!(
+            key.is_ascii(),
+            "normalise_prefix({input:?}) returned non-ASCII bytes \
+             {:?}; FST keys must be ASCII to match runtime lookups",
+            key.as_bytes(),
+        );
+        // Spot-check the expected ASCII form for two well-known cases.
+        if input == "Île-de-France" {
+            assert_eq!(key, "ile de france");
+        }
+        if input == "Östersund" {
+            assert_eq!(key, "ostersund");
+        }
+    }
+}

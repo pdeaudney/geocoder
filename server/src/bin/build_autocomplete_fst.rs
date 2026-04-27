@@ -193,20 +193,21 @@ fn run(
         let entry_idx = pc.entries.len() as u64;
         pc.entries.push(entry);
 
-        insert_key(pc, key, entry_idx, cand.rank);
-
         // Multilingual aliases (i18n alternates) reuse the SAME entry
         // — only an extra FST key is added per alias, no extra entry.
         // Dedup against canonical happens naturally because the keys
         // BTreeMap is keyed on the normalised string; an alias whose
         // normalisation collides with the canonical is a no-op.
+        // Compare against the cached `key` (already computed above)
+        // so a place with N alternates does N normalisations, not 2N.
         for alias in &cand.aliases {
             let alias_key = normalise_fst_key(alias);
-            if alias_key.is_empty() || alias_key == normalise_fst_key(cand.name) {
+            if alias_key.is_empty() || alias_key == key {
                 continue;
             }
             insert_key(pc, alias_key, entry_idx, cand.rank);
         }
+        insert_key(pc, key, entry_idx, cand.rank);
     }
 
     /// Insert a normalised key → entry_id mapping into `pc.keys`. When
@@ -623,38 +624,12 @@ fn read_cstr(pool: &[u8], offset: u32) -> &str {
     std::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
+/// Build-time FST key normaliser. Identical to the runtime
+/// `query_server::autocomplete::normalise_prefix` — pinned in
+/// `tests/abbrev_symmetry.rs` so the two can't drift. Wraps it
+/// directly so the build pipeline always picks up runtime fixes
+/// (e.g., the uppercase-diacritic fold) without a second
+/// implementation to keep in sync.
 fn normalise_fst_key(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_space = true;
-    for ch in s.chars() {
-        let folded = fold(ch);
-        for c in folded.chars() {
-            if c.is_alphanumeric() {
-                out.extend(c.to_lowercase());
-                last_space = false;
-            } else if !last_space {
-                out.push(' ');
-                last_space = true;
-            }
-        }
-    }
-    // Place-name abbreviation collapse must run on the same byte form
-    // produced by the runtime `normalise_prefix` so build-time keys
-    // match query-time lookups exactly. The shared helper lives in
-    // `query_server::autocomplete` for that reason.
-    query_server::autocomplete::fold_place_abbreviations(out.trim())
-}
-
-fn fold(ch: char) -> String {
-    match ch {
-        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => "a".into(),
-        'é' | 'è' | 'ê' | 'ë' => "e".into(),
-        'í' | 'ì' | 'î' | 'ï' => "i".into(),
-        'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ø' => "o".into(),
-        'ú' | 'ù' | 'û' | 'ü' => "u".into(),
-        'ñ' => "n".into(),
-        'ç' => "c".into(),
-        'ß' => "ss".into(),
-        c => c.to_string(),
-    }
+    query_server::autocomplete::normalise_prefix(s)
 }

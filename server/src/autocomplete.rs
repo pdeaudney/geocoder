@@ -459,7 +459,13 @@ pub fn fold_place_abbreviations(s: &str) -> String {
     out
 }
 
-fn ascii_fold_char(ch: char) -> String {
+/// Map one Latin-1 / Latin-Extended char to its ASCII equivalent.
+/// Both upper and lower case variants are folded — uppercase first
+/// (so `Ä` → `A`) is critical because callers lowercase AFTER fold;
+/// without the uppercase entries `Ä` would lowercase to `ä` (still
+/// non-ASCII) and pass through alphanumeric unchanged. Public so the
+/// FST builder can share it — see `bin/build_autocomplete_fst.rs`.
+pub fn ascii_fold_char(ch: char) -> String {
     match ch {
         'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => "a".into(),
         'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => "e".into(),
