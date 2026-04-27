@@ -571,6 +571,26 @@ pub fn build_partitioned_with_heap(
     Ok(stats_out)
 }
 
+/// Append ICU-derived Latin transliterations of `source` to
+/// `name_indexed`, separated by single spaces. No-op when the
+/// `translit` feature is disabled OR when `source` is already
+/// Latin/ASCII. Whitespace-only ICU output is skipped.
+#[cfg(feature = "translit")]
+fn append_translit(name_indexed: &mut String, source: &str) {
+    for latin in crate::translit::transliterate_for_index(source) {
+        if latin.trim().is_empty() {
+            continue;
+        }
+        if !name_indexed.is_empty() {
+            name_indexed.push(' ');
+        }
+        name_indexed.push_str(latin.trim());
+    }
+}
+
+#[cfg(not(feature = "translit"))]
+fn append_translit(_name_indexed: &mut String, _source: &str) {}
+
 fn tantivy_doc(
     s: &ForwardSchema,
     name: &str,
@@ -601,6 +621,7 @@ fn tantivy_doc(
     // courtesy of tantivy's SimpleTokenizer + AsciiFoldingFilter +
     // LowerCaser pipeline.
     let mut name_indexed = canonicalise_phrase(name);
+    append_translit(&mut name_indexed, name);
     for alt in alternates {
         let canonical_alt = canonicalise_phrase(alt);
         if canonical_alt.trim().is_empty() {
@@ -610,6 +631,7 @@ fn tantivy_doc(
             name_indexed.push(' ');
         }
         name_indexed.push_str(canonical_alt.trim());
+        append_translit(&mut name_indexed, alt);
     }
     let suburb_indexed = suburb.map(canonicalise_phrase).unwrap_or_default();
     let state_indexed = state.map(canonicalise_phrase).unwrap_or_default();
@@ -1388,6 +1410,16 @@ fn hit_from_doc(doc: &TantivyDocument, s: &ForwardSchema, score: f32) -> Result<
 /// highway, …) plus place-name abbreviations (Saint→st, Mount→mt,
 /// Fort→ft) when leading. Mirrors the tokenisation applied at index
 /// time so query tokens match index tokens exactly.
+///
+/// **Translit note (build-time only).** ICU transliteration is applied
+/// at index build time (see `query_server::translit`), so a Russian
+/// user typing Cyrillic and an English user typing Latin both find
+/// the same place via stored alternate forms. The query path
+/// deliberately does NOT call ICU — keeping the runtime libicu-free.
+/// If a future product requirement needs query-time transliteration
+/// (e.g. user types a Latin scheme that ICU's build-time output
+/// didn't produce), wire it here as a Vec<String> expansion before
+/// `apply_place_abbreviation_fold`.
 pub fn tokenize_user_input(s: &str) -> Vec<String> {
     let folded = ascii_fold(s);
     let raw_tokens: Vec<String> = folded

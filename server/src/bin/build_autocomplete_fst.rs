@@ -207,7 +207,50 @@ fn run(
             }
             insert_key(pc, alias_key, entry_idx, cand.rank);
         }
+
+        // Latin transliterations of every non-Latin source name
+        // (canonical + alternates). ICU produces forms like
+        // `Moskva` / `Chelyabinsk` / `Beijing` / `Tokyo` that real
+        // users type when an OSM `name:en` is missing. The
+        // resulting normalised keys are de-duplicated by the same
+        // BTreeMap that handles aliases. No-op when the `translit`
+        // feature is disabled (the helper compiles to a no-op).
+        ingest_translit_keys(pc, cand.name, entry_idx, cand.rank, &key);
+        for alias in &cand.aliases {
+            ingest_translit_keys(pc, alias, entry_idx, cand.rank, &key);
+        }
+
         insert_key(pc, key, entry_idx, cand.rank);
+    }
+
+    /// Emit FST keys for every Latin transliteration of `source`.
+    /// Skips empties and forms whose normalised key collides with
+    /// the canonical `canonical_key`.
+    #[cfg(feature = "translit")]
+    fn ingest_translit_keys(
+        pc: &mut PerCountry,
+        source: &str,
+        entry_idx: u64,
+        rank: u8,
+        canonical_key: &str,
+    ) {
+        for latin in query_server::translit::transliterate_for_index(source) {
+            let k = normalise_fst_key(&latin);
+            if k.is_empty() || k == canonical_key {
+                continue;
+            }
+            insert_key(pc, k, entry_idx, rank);
+        }
+    }
+
+    #[cfg(not(feature = "translit"))]
+    fn ingest_translit_keys(
+        _pc: &mut PerCountry,
+        _source: &str,
+        _entry_idx: u64,
+        _rank: u8,
+        _canonical_key: &str,
+    ) {
     }
 
     /// Insert a normalised key → entry_id mapping into `pc.keys`. When

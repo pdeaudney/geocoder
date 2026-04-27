@@ -66,12 +66,12 @@ cargo build --release --manifest-path server/Cargo.toml --bin fetch-data
 
 ### Build from source
 
-Prerequisites: a C++17 compiler + CMake for the builder, Rust stable for the server, `protoc` for gRPC. The C++ builder also benefits from `libdeflate` for fast PBF inflate (libosmium picks it up automatically when present; falls back to zlib otherwise — see `docs/performance/build-pipeline-perf-plan.md`).
+Prerequisites: a C++17 compiler + CMake for the builder, Rust stable for the server, `protoc` for gRPC, and `libicu` for build-time multilingual transliteration (Cyrillic / Han / Arabic / Greek / Hebrew / Thai / Devanagari → Latin). The C++ builder also benefits from `libdeflate` for fast PBF inflate (libosmium picks it up automatically when present; falls back to zlib otherwise — see `docs/performance/build-pipeline-perf-plan.md`).
 
 On macOS:
 
 ```bash
-brew install cmake libosmium protozero s2geometry protobuf libdeflate lbzip2
+brew install cmake libosmium protozero s2geometry protobuf libdeflate lbzip2 icu4c
 ```
 
 On Debian/Ubuntu:
@@ -79,10 +79,20 @@ On Debian/Ubuntu:
 ```bash
 apt-get install cmake libosmium2-dev libprotozero-dev libs2-dev \
                 zlib1g-dev libbz2-dev libexpat1-dev liblz4-dev \
-                libdeflate-dev \
+                libdeflate-dev libicu-dev \
                 protobuf-compiler \
                 lbzip2
 ```
+
+`libicu` is required by the build binaries (`build-forward-index`, `build-autocomplete-fst`) for ICU-based transliteration. The runtime `query-server` does **not** link libicu — transliterations are baked into the on-disk index files at build time, so production hosts only need the static `query-server` binary. Build hosts (the AMI / Packer image) install `libicu-dev`; runtime images do not.
+
+On macOS the `icu4c` formula is keg-only, so cargo needs `PKG_CONFIG_PATH` pointed at its pkgconfig directory — every build invocation prepends:
+
+```bash
+PKG_CONFIG_PATH=$(brew --prefix icu4c)/lib/pkgconfig cargo build --release ...
+```
+
+Operators serving an exclusively-Latin corpus (no Russian/CJK/Arabic/Greek/etc. data) can skip libicu and build with `--no-default-features --features forward,grpc` — the `translit` feature is opt-out via `--no-default-features`.
 
 `lbzip2` is the parallel bzip2 decoder `fetch-data` shells out to when
 unpacking the WhosOnFirst SQLite archive — 3–5× faster than stock
