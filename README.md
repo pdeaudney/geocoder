@@ -661,6 +661,37 @@ Fixture build script + the JSONs themselves live under
 `scripts/bench/fixtures/`; refresh with `./scripts/bench/build-fixtures.sh`
 when Geonames publishes a new monthly snapshot.
 
+The load test only checks status codes (`2xx`) — it doesn't validate
+that responses are correct. For correctness against the same dataset,
+run the **bench-accuracy** companion:
+
+```bash
+# Reuses the bench fixtures; samples 500 rows per scenario by default
+# and exits non-zero if the overall pass rate < 95 %.
+./scripts/run-bench-accuracy.sh --index /data/index
+
+# Or via Makefile (defaults to ./data/index, override with INDEX=…)
+make bench-accuracy INDEX=/data/index SAMPLE=2000
+```
+
+Three accuracy assertions, one per scenario:
+
+  - **`reverse`** — `response.address.country_code` must match the
+    fixture row's source country_code.
+  - **`search`** — top result's country_code must match AND its
+    coords must be within `--search-radius-km` (default 100 km) of
+    the fixture's `lat_hint`/`lng_hint`.
+  - **`autocomplete`** — at least one result; for prefixes ≥ 3 chars,
+    at least one result's normalised name must start with the prefix.
+
+Output: human-readable per-country pass rates + a sample of failures
+(country, request URL, reason) for grep-friendly triage, plus a JSON
+report at `tests/regression/reports/bench-accuracy-<label>.json` for
+diff-vs-prior comparisons. This is complementary to the
+hand-curated [Pelias regression suite](#operations) — that one tests
+specific addresses with specific expected fields; this one sweeps
+breadth across 8 countries to catch country-wide regressions.
+
 ## License
 
 Apache License, Version 2.0. Original copyright © Traccar (upstream project); additions copyright © this project's contributors.

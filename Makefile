@@ -1,4 +1,4 @@
-.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-worldwide pelias-refresh pelias-full-refresh bench inspect-dump wof-import test builder builder-clean clean
+.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-worldwide bench-accuracy bench-fixtures pelias-refresh pelias-full-refresh bench inspect-dump wof-import test builder builder-clean clean
 
 help:
 	@echo "Build:"
@@ -11,6 +11,8 @@ help:
 	@echo "  regression-au         Run the AU regression suite (release build)"
 	@echo "  regression-au-debug   Same, but use the debug profile for faster iteration"
 	@echo "  bench                 Run criterion benches and refresh docs/performance/benchmarks.md"
+	@echo "  bench-fixtures        Build / refresh the planet load-test fixtures (Geonames + Pelias)"
+	@echo "  bench-accuracy        Run the bench-fixture accuracy sweep against ./data/index"
 	@echo "  inspect-dump          Dump the index to CSV under data/index/dump-csv/ for DuckDB"
 	@echo "  wof-import            Import WoF country polygons into WOF_INDEX_DIR (default data/index-worldwide)"
 	@echo "  regression-pelias-au  Run the Pelias AU corpus (partial failures expected today)"
@@ -122,6 +124,19 @@ pelias-refresh:
 
 bench:
 	./scripts/run-benchmarks.sh
+
+# Build / refresh the planet load-test fixtures (Geonames + Pelias).
+# Run once per fixture refresh; the resulting JSONs are committed.
+bench-fixtures:
+	./scripts/bench/build-fixtures.sh
+
+# Bench-fixture accuracy sweep. Defaults to ./data/index; override
+# via INDEX=… for a planet build. Exit code reflects pass rate vs
+# --pass-threshold (default 95 %).
+INDEX ?= ./data/index
+SAMPLE ?= 500
+bench-accuracy:
+	./scripts/run-bench-accuracy.sh --index $(INDEX) --sample $(SAMPLE)
 
 # Import Who's on First country-level polygons as a fallback for
 # Geofabrik extracts that miss their own admin_level=2 relation

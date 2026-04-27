@@ -25,5 +25,9 @@ path = "src/main.rs"
 name = "pelias-to-ours"
 path = "src/pelias_adapter.rs"
 
+[[bin]]
+name = "bench-accuracy"
+path = "src/bench_accuracy.rs"
+
 # Profiles live at the workspace root (`/Cargo.toml`). Member-level
 # profile sections are silently ignored.
