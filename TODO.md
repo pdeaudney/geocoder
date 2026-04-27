@@ -54,29 +54,27 @@ tag exists.
 - **Re-evaluate when:** a deployment specifically targets a
   region (CIS, EA) where the OSM `name:en` gap is large.
 
-### Arrondissement / numbered-suffix neighborhoods
+### ~~Arrondissement / numbered-suffix neighborhoods~~ — done
 
-`Marseille 06`, `Paris 12 Reuilly` (FR arrondissements with
-suffixed numbers); `la Nova Esquerra de l'Eixample` (Geonames
-neighborhood entries that aren't OSM places). These show up as
-fixture-quality issues in the bench-accuracy sweep, not as real
-geocoder bugs.
+Closed by the bench-fixture filter tightening below: FR-anchored
+name pattern (`^(Paris|Marseille|Lyon)\s\d`) drops the 36
+arrondissement variants Geonames tags as PPL/PPLA5. Sister case
+`la Nova Esquerra de l'Eixample` was tagged PPLX and dropped via
+the feature_code filter. Validation: `places.json` post-filter
+contains 0 such entries. CA First Nations reserves
+(`Cross Lake 19A`, `Skowkale 10`) verified preserved.
 
-- **Why it's deferred:** OSM modeling concern, not normalisation.
-- **Re-evaluate when:** the fixture filter for the bench-accuracy
-  corpus is overhauled (next bullet).
+### ~~Bench-fixture filter for non-OSM Geonames entries~~ — done
 
-### Bench-fixture filter for non-OSM Geonames entries
-
-The current Geonames fixture (`scripts/bench/fixtures/`) includes
-neighborhoods that don't exist as OSM places, dragging the
-bench-accuracy pass rate down for non-bug reasons. Tighten the
-`build-fixtures.sh` filter to drop fclass=PPL placeholders and
-sub-suburb neighborhoods.
-
-- **Owner cost:** ~half a day. Mostly fixture inspection.
-- **Re-evaluate when:** the next planet rebuild — easier to
-  validate the new pass-rate baseline if the fixture is clean.
+Closed in `scripts/bench/build-fixtures.sh`: feature_code filter
+drops PPLX (sub-localities like Lyon's 9 arrondissements + ~7,500
+neighborhood entries across all 8 fixture countries) plus PPLH /
+PPLW / PPLQ (defunct places). FR-only name pattern catches the
+Paris/Marseille arrondissements that slip past the code filter.
+Net: ~7,500 false-negative-generating fixture rows removed; legit
+First Nations reserves and other digit-bearing real places
+preserved. Real pass-rate uplift lands on the next planet
+bench-accuracy run.
 
 ## Future evaluation
 

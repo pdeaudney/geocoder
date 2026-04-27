@@ -24,9 +24,32 @@
 #   1=geonameid 2=name 3=asciiname 4=alternatenames 5=latitude 6=longitude
 #   7=feature_class 8=feature_code 9=country_code ... 15=population
 #
-# Filter: feature_class=P (populated places) AND population > 0.
-# Keeps cities/towns/villages/suburbs out of the millions of
-# uninhabited dots Geonames also tracks (mountains, lakes, hotels).
+# Filter:
+#   feature_class=P (populated places) — drops mountains/lakes/hotels.
+#   population > 0                     — drops uninhabited dots.
+#   feature_code NOT IN {PPLX, PPLH, PPLW, PPLQ}:
+#     PPLX = "section of populated place" — neighbourhoods/sub-
+#       localities like `la Nova Esquerra de l'Eixample` and Lyon's
+#       9 arrondissements. OSM models these as place=neighbourhood
+#       NODES whose names don't carry the numeric suffix Geonames
+#       adds, so they generate false-negative bench-accuracy
+#       failures that aren't real geocoder bugs.
+#     PPLH = "historical populated place" — destroyed/abandoned
+#       places no longer geocodable.
+#     PPLW = "destroyed populated place" — same.
+#     PPLQ = "abandoned populated place" — same.
+#   PPLF (farm village), PPLR (religious populated place), PPLG
+#   (former seat of government), PPLL (populated locality), PPLS
+#   (plural — multiple villages combined), PPLA*/PPLC (admin
+#   centres / capitals), and plain PPL all stay.
+#
+#   Plus an FR-only name-pattern filter: drop names matching
+#   ^(Paris|Marseille|Lyon)\s\d — Paris arrondissements are tagged
+#   as plain PPL (not PPLX) and Marseille's are PPLA5; both slip
+#   past the feature_code filter. Restricted to FR + the three
+#   actual arrondissement cities so we don't false-positive on
+#   patterns like CA's `Cross Lake 19A` (legitimate First Nations
+#   reserve) which is syntactically identical.
 #
 # Usage:
 #   ./scripts/bench/build-fixtures.sh
@@ -83,6 +106,9 @@ echo "==> extracting populated places"
 COMBINED_TSV="$CACHE_DIR/.combined.tsv"
 : > "$COMBINED_TSV"
 
+DROPPED_CSV="$CACHE_DIR/.dropped-by-code.csv"
+: > "$DROPPED_CSV"
+
 for cc in $COUNTRIES; do
     zip="$CACHE_DIR/${cc}.zip"
     if [ ! -f "$zip" ]; then
@@ -90,11 +116,32 @@ for cc in $COUNTRIES; do
         exit 1
     fi
     # Geonames zips contain `<CC>.txt` at the top level.
-    # cut: name(2), lat(5), lng(6), feature_class(7), country(9), population(15)
-    # awk: keep only feature_class=P (populated) AND population > 0
+    # Emit kept rows: name(2), lat(5), lng(6), country, population(15).
+    # Side-channel: count how many rows each excluded feature_code
+    # contributed so we can show the impact of the filter tightening.
     unzip -p "$zip" "${cc}.txt" \
         | awk -F'\t' -v cc="$(echo "$cc" | tr 'A-Z' 'a-z')" \
-            '$7 == "P" && $15+0 > 0 {print $2"\t"$5"\t"$6"\t"cc"\t"$15}' \
+              -v dropped="$DROPPED_CSV" '
+            $7 == "P" && $15+0 > 0 {
+                if ($8 == "PPLX" || $8 == "PPLH" \
+                    || $8 == "PPLW" || $8 == "PPLQ") {
+                    print cc","$8 >> dropped
+                    next
+                }
+                # FR arrondissements: Paris is PPL, Marseille is PPLA5
+                # — both pass the feature_code filter even though
+                # they are sub-locality artefacts of Geonames. Drop
+                # by name pattern, restricted to FR + the three
+                # known arrondissement cities to avoid false-
+                # positives on CA First Nations reserves
+                # (`Cross Lake 19A`, `Skowkale 10`) which share the
+                # `<Place> <NN>` shape.
+                if (cc == "fr" && $2 ~ /^(Paris|Marseille|Lyon) [0-9]/) {
+                    print cc",ARROND" >> dropped
+                    next
+                }
+                print $2"\t"$5"\t"$6"\t"cc"\t"$15
+            }' \
         >> "$COMBINED_TSV"
     n=$(awk -F'\t' -v c="$(echo "$cc" | tr 'A-Z' 'a-z')" '$4==c{n++} END{print n+0}' "$COMBINED_TSV")
     echo "    $cc: cumulative $n populated places after filter"
@@ -102,6 +149,14 @@ done
 
 TOTAL_PLACES=$(wc -l < "$COMBINED_TSV" | tr -d ' ')
 echo "    total: $TOTAL_PLACES populated places across $COUNTRIES"
+
+# Surface the impact of the feature_code filter so a future
+# maintainer can see why this many rows were dropped before
+# considering it a regression. Keyed by (country, code).
+if [ -s "$DROPPED_CSV" ]; then
+    echo "    dropped by feature_code (sub-localities + defunct):"
+    sort "$DROPPED_CSV" | uniq -c | sort -rn | awk '{printf "        %s × %s\n", $1, $2}'
+fi
 
 # -----------------------------------------------------------------------------
 # 3. Emit fixture JSONs via Python (for clean string handling)
