@@ -1,0 +1,14 @@
+This data set was extracted from the Geonames Gazetteer Data
+(https://download.geonames.org/export/dump/) on the date recorded
+in the build-fixtures.sh run log.
+
+License: Creative Commons Attribution 4.0 (CC BY 4.0)
+  https://creativecommons.org/licenses/by/4.0/
+
+Attribution required when redistributing the contents of:
+  scripts/bench/fixtures/places.json
+  scripts/bench/fixtures/reverse_coords.json
+  scripts/bench/fixtures/search_queries.json
+  scripts/bench/fixtures/autocomplete_prefixes.json
+
+Attribution string: "© Geonames.org, used under CC BY 4.0."

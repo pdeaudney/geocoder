@@ -39,9 +39,20 @@
 # Usage:
 #   ./scripts/bench-http.sh [--index DIR] [--port N] [--skip-build]
 #                           [--label NAME] [--mode cold|warm|both]
+#                           [--workload au|planet]
 #
 # Defaults: --index ./data/index --port 13580 --mode both
-#           --label  <git short SHA>
+#           --label  <git short SHA>  --workload au
+#
+# Workload selection:
+#   au      AU-only fixtures hard-coded in k6-readpath.js. Five
+#           scenarios (reverse, reverseLang, search, autocompleteBroad,
+#           autocompleteMixed). Suitable for the local dev index.
+#   planet  Multi-country fixtures from scripts/bench/fixtures/.
+#           Three scenarios (reverse_planet, search_planet,
+#           autocomplete_typeahead) covering US/GB/FR/DE/NL/ES/AU/CA.
+#           Requires `scripts/bench/build-fixtures.sh` to have run
+#           first.
 set -eu
 
 INDEX_DIR="./data/index"
@@ -49,6 +60,7 @@ PORT="13580"
 SKIP_BUILD="0"
 LABEL=""
 MODE="both"
+WORKLOAD="au"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -57,6 +69,7 @@ while [ $# -gt 0 ]; do
         --skip-build) SKIP_BUILD="1"; shift ;;
         --label)      LABEL="$2"; shift 2 ;;
         --mode)       MODE="$2"; shift 2 ;;
+        --workload)   WORKLOAD="$2"; shift 2 ;;
         *)            echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -66,13 +79,38 @@ case "$MODE" in
     *) echo "error: --mode must be cold, warm, or both" >&2; exit 2 ;;
 esac
 
+case "$WORKLOAD" in
+    au) ;;
+    planet)
+        # Planet workload requires the fixture JSONs to be present.
+        # If they're not, point the operator at the build script
+        # rather than letting k6 fail mid-run with a confusing
+        # "open() failed" error.
+        for f in reverse_coords.json search_queries.json autocomplete_prefixes.json; do
+            if [ ! -f "scripts/bench/fixtures/$f" ]; then
+                echo "error: scripts/bench/fixtures/$f missing" >&2
+                echo "       run ./scripts/bench/build-fixtures.sh first" >&2
+                exit 2
+            fi
+        done
+        ;;
+    *) echo "error: --workload must be au or planet" >&2; exit 2 ;;
+esac
+
 if [ -z "$LABEL" ]; then
     LABEL="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 fi
 
 REPORT_DIR="tests/regression/reports"
 mkdir -p "$REPORT_DIR"
-REPORT_FILE="$REPORT_DIR/http-bench-${LABEL}.json"
+# Workload separates the two report streams so AU runs aren't
+# diff-compared against planet runs (different scenario sets,
+# different fixture sizes).
+if [ "$WORKLOAD" = "planet" ]; then
+    REPORT_FILE="$REPORT_DIR/http-bench-planet-${LABEL}.json"
+else
+    REPORT_FILE="$REPORT_DIR/http-bench-${LABEL}.json"
+fi
 
 # -----------------------------------------------------------------------------
 # Sanity checks
@@ -249,6 +287,7 @@ run_k6_mode() {
         -v "$SCRATCH:/out" \
         -e "BASE_URL=$BASE_URL" \
         -e "MODE_TAG=$mode" \
+        -e "K6_WORKLOAD=$WORKLOAD" \
         grafana/k6:latest \
         run /scripts/k6-readpath.js
 }

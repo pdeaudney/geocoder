@@ -1,0 +1,7 @@
+Some autocomplete fixture rows are derived from the Pelias
+acceptance-tests corpus
+(https://github.com/pelias/acceptance-tests).
+
+License: MIT (see https://github.com/pelias/acceptance-tests/blob/master/LICENSE)
+
+Attribution: "Test cases adapted from Pelias acceptance-tests, MIT licensed."

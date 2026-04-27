@@ -1,0 +1,4 @@
+# Cache holds raw upstream zips + Pelias clone (~270 MB). Reproduced
+# by re-running scripts/bench/build-fixtures.sh; not worth tracking
+# in git.
+.cache/

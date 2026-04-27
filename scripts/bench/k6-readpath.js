@@ -8,6 +8,18 @@
 // don't share CPU; if you want them in parallel, drop the
 // startTime offsets.
 //
+// Two workloads, selectable via the `K6_WORKLOAD` env var:
+//
+//   K6_WORKLOAD=au (default) — five AU-only scenarios with hardcoded
+//     coords/queries. Fast, single-country, suitable for the local
+//     dev index.
+//
+//   K6_WORKLOAD=planet — three multi-country scenarios driven by
+//     fixture JSON files under `scripts/bench/fixtures/` (built by
+//     `scripts/bench/build-fixtures.sh`). 5K balanced reverse coords,
+//     2K freeform search queries, 1500 autocomplete prefixes spanning
+//     1–6 char lengths across US/GB/FR/DE/NL/ES/AU/CA.
+//
 // Output: JSON summary on stdout (handleSummary). Side-by-side runs
 // can diff p50 / p95 / rps from the JSON; the wrapper script does
 // this for "before vs after" comparisons.
@@ -15,6 +27,8 @@
 import http from 'k6/http';
 import { check, fail } from 'k6';
 import { Trend, Counter } from 'k6/metrics';
+
+const WORKLOAD = (__ENV.K6_WORKLOAD || 'au').toLowerCase();
 
 // AU fixtures — the local dev index is AU-only. Mix of urban /
 // suburban / rural / no-hit so the bench surfaces hot and cold paths.
@@ -50,7 +64,32 @@ const reverseLangLatency = new Trend('reverse_lang_ms', true);
 const searchLatency = new Trend('search_ms', true);
 const autocompleteLatency = new Trend('autocomplete_ms', true);
 const autocompleteBroadLatency = new Trend('autocomplete_broad_ms', true);
+// Planet-workload trends — kept distinct from the AU ones so the
+// JSON summary cleanly separates per-country-mix latency from
+// AU-fixture latency. Avoids the "did the regression hit AU or
+// planet?" ambiguity.
+const reversePlanetLatency = new Trend('reverse_planet_ms', true);
+const searchPlanetLatency = new Trend('search_planet_ms', true);
+const autocompleteTypeaheadLatency = new Trend('autocomplete_typeahead_ms', true);
 const errors = new Counter('endpoint_errors');
+
+// Planet fixtures — loaded in init context so each VU iteration
+// just picks an index, no JSON parsing per request. open() is
+// k6-init-only (forbidden in VU code); attempting it inside a
+// scenario function panics. open() returns a string; JSON.parse
+// once, share across VUs.
+//
+// The mount path matches the wrapper script's docker -v binding
+// (./scripts/bench → /scripts inside the container) plus the new
+// /scripts/fixtures/ subdirectory.
+let REVERSE_COORDS = [];
+let SEARCH_PLANET_QUERIES = [];
+let AUTOCOMPLETE_TYPEAHEAD = [];
+if (WORKLOAD === 'planet') {
+    REVERSE_COORDS = JSON.parse(open('./fixtures/reverse_coords.json'));
+    SEARCH_PLANET_QUERIES = JSON.parse(open('./fixtures/search_queries.json'));
+    AUTOCOMPLETE_TYPEAHEAD = JSON.parse(open('./fixtures/autocomplete_prefixes.json'));
+}
 
 // Scenario settings — each holds 8 VUs for 20s after a 5s warm-up.
 // Keeps the run under 3 minutes total.
@@ -58,52 +97,94 @@ const VUS = 8;
 const DURATION = '20s';
 const WARMUP_DURATION = '5s';
 
+// Scenario blocks per workload. Built as plain objects so we can
+// merge AU/planet selectively rather than doing it inline in the
+// options literal.
+const AU_SCENARIOS = {
+    reverse: {
+        executor: 'constant-vus',
+        vus: VUS,
+        duration: DURATION,
+        startTime: '5s',
+        exec: 'reverse',
+    },
+    reverse_lang: {
+        executor: 'constant-vus',
+        vus: VUS,
+        duration: DURATION,
+        startTime: '30s',
+        exec: 'reverseLang',
+    },
+    search: {
+        executor: 'constant-vus',
+        vus: VUS,
+        duration: DURATION,
+        startTime: '55s',
+        exec: 'search',
+    },
+    autocomplete_broad: {
+        executor: 'constant-vus',
+        vus: VUS,
+        duration: DURATION,
+        startTime: '80s',
+        exec: 'autocompleteBroad',
+    },
+    autocomplete_mixed: {
+        executor: 'constant-vus',
+        vus: VUS,
+        duration: DURATION,
+        startTime: '105s',
+        exec: 'autocompleteMixed',
+    },
+};
+
+// Planet scenarios share the constant-vus executor + VU/duration
+// shape with the AU set so the cold/warm-mode timing budget in the
+// wrapper script doesn't have to branch.
+const PLANET_SCENARIOS = {
+    reverse_planet: {
+        executor: 'constant-vus',
+        vus: VUS,
+        duration: DURATION,
+        startTime: '5s',
+        exec: 'reversePlanet',
+    },
+    search_planet: {
+        executor: 'constant-vus',
+        vus: VUS,
+        duration: DURATION,
+        startTime: '30s',
+        exec: 'searchPlanet',
+    },
+    autocomplete_typeahead: {
+        executor: 'constant-vus',
+        vus: VUS,
+        duration: DURATION,
+        startTime: '55s',
+        exec: 'autocompleteTypeahead',
+    },
+};
+
+// Threshold sanity rails. AU thresholds reflect the local dev
+// index's measured baselines; planet thresholds match the
+// docs/sli-slo.md p99 targets (50 ms / 100 ms / 30 ms) so a
+// regression that breaches the documented SLO turns the run red.
+const AU_THRESHOLDS = {
+    http_req_failed: ['rate<0.01'],
+    reverse_ms: ['p(95)<5'],
+    autocomplete_ms: ['p(95)<10'],
+    autocomplete_broad_ms: ['p(95)<25'],
+};
+const PLANET_THRESHOLDS = {
+    http_req_failed: ['rate<0.01'],
+    reverse_planet_ms: ['p(99)<50'],
+    search_planet_ms: ['p(99)<100'],
+    autocomplete_typeahead_ms: ['p(99)<30'],
+};
+
 export const options = {
-    scenarios: {
-        reverse: {
-            executor: 'constant-vus',
-            vus: VUS,
-            duration: DURATION,
-            startTime: '5s',
-            exec: 'reverse',
-        },
-        reverse_lang: {
-            executor: 'constant-vus',
-            vus: VUS,
-            duration: DURATION,
-            startTime: '30s',
-            exec: 'reverseLang',
-        },
-        search: {
-            executor: 'constant-vus',
-            vus: VUS,
-            duration: DURATION,
-            startTime: '55s',
-            exec: 'search',
-        },
-        autocomplete_broad: {
-            executor: 'constant-vus',
-            vus: VUS,
-            duration: DURATION,
-            startTime: '80s',
-            exec: 'autocompleteBroad',
-        },
-        autocomplete_mixed: {
-            executor: 'constant-vus',
-            vus: VUS,
-            duration: DURATION,
-            startTime: '105s',
-            exec: 'autocompleteMixed',
-        },
-    },
-    // Targets — the bench reports actuals; these are sanity rails so
-    // a regression that 10×s a tail latency turns the run red.
-    thresholds: {
-        http_req_failed: ['rate<0.01'],
-        reverse_ms: ['p(95)<5'],
-        autocomplete_ms: ['p(95)<10'],
-        autocomplete_broad_ms: ['p(95)<25'],
-    },
+    scenarios: WORKLOAD === 'planet' ? PLANET_SCENARIOS : AU_SCENARIOS,
+    thresholds: WORKLOAD === 'planet' ? PLANET_THRESHOLDS : AU_THRESHOLDS,
     // Don't print per-iter details — final summary only.
     summaryTimeUnit: 'ms',
     // Default Trend stats are min/avg/med/p(90)/p(95)/max — add p(99)
@@ -175,6 +256,44 @@ export function autocompleteMixed() {
     checkOk(resp, 'autocomplete_mixed');
 }
 
+// -----------------------------------------------------------------------------
+// Planet-workload scenarios (K6_WORKLOAD=planet)
+// -----------------------------------------------------------------------------
+//
+// All three pull rows from the fixtures built by
+// scripts/bench/build-fixtures.sh. Each row carries enough context
+// (lat/lng + country_code) for the request URL; per-VU iteration
+// just picks a row at random.
+
+export function reversePlanet() {
+    const r = pick(REVERSE_COORDS);
+    const url = `${BASE}/reverse?lat=${r.lat}&lon=${r.lng}`;
+    const resp = http.get(url, { tags: { endpoint: 'reverse_planet' } });
+    reversePlanetLatency.add(resp.timings.duration);
+    checkOk(resp, 'reverse_planet');
+}
+
+export function searchPlanet() {
+    const r = pick(SEARCH_PLANET_QUERIES);
+    const url = `${BASE}/search?q=${encodeURIComponent(r.q)}&country_code=${r.country_code}&limit=10`;
+    const resp = http.get(url, { tags: { endpoint: 'search_planet' } });
+    searchPlanetLatency.add(resp.timings.duration);
+    checkOk(resp, 'search_planet');
+}
+
+export function autocompleteTypeahead() {
+    // Typeahead workload: 1500-prefix corpus across 1–6 char lengths
+    // and 8 countries. Hits the FST broad-walk path on short
+    // prefixes and the narrow-FST path on longer prefixes — the
+    // mix exercises both regimes within a single scenario rather
+    // than splitting them like the AU `broad` + `mixed` scenarios.
+    const r = pick(AUTOCOMPLETE_TYPEAHEAD);
+    const url = `${BASE}/autocomplete?q=${encodeURIComponent(r.q)}&country_code=${r.country_code}&limit=10`;
+    const resp = http.get(url, { tags: { endpoint: 'autocomplete_typeahead' } });
+    autocompleteTypeaheadLatency.add(resp.timings.duration);
+    checkOk(resp, 'autocomplete_typeahead');
+}
+
 // Custom summary handler: emits a compact JSON summary that the
 // wrapper script can diff between runs. Default k6 summary is human-
 // friendly but hard to parse.
@@ -202,11 +321,18 @@ export function handleSummary(data) {
         };
         const trends = {};
         for (const k of [
+            // AU-workload trends.
             'reverse_ms',
             'reverse_lang_ms',
             'search_ms',
             'autocomplete_ms',
             'autocomplete_broad_ms',
+            // Planet-workload trends. Both sets are listed
+            // unconditionally; only the trends that ran will have
+            // values, and pickTrend skips empty ones.
+            'reverse_planet_ms',
+            'search_planet_ms',
+            'autocomplete_typeahead_ms',
         ]) {
             const t = pickTrend(k);
             if (t) trends[k] = t;
