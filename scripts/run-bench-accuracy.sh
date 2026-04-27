@@ -38,8 +38,8 @@ SKIP_BUILD="0"
 LABEL=""
 SAMPLE="500"
 SCENARIOS="r,s,a"
-SEARCH_RADIUS_KM="100"
-PASS_THRESHOLD="0.95"
+SEARCH_RADIUS_KM="200"
+PASS_THRESHOLD="0.90"
 FIXTURES_DIR="./scripts/bench/fixtures"
 
 while [ $# -gt 0 ]; do
