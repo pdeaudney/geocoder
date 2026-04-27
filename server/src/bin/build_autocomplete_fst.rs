@@ -26,6 +26,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use fst::MapBuilder;
 use query_server::autocomplete::{AutocompleteEntry, KIND_PLACE, KIND_STREET};
+use query_server::i18n::ENTITY_PLACE;
 use query_server::{
     as_typed_slice, Index, NodeCoord, PlacePoint, WayHeader, DEFAULT_ADMIN_CELL_LEVEL,
     DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL,
@@ -120,6 +121,11 @@ struct PerCountry {
 struct Candidate<'a> {
     cc: [u8; 2],
     name: &'a str,
+    /// Alternate-language names from `i18n_names.bin`. Each becomes an
+    /// additional FST key pointing at the same `AutocompleteEntry`,
+    /// so a query like `"cologne"` lands on the entry whose canonical
+    /// `name` is `"Köln"`.
+    aliases: Vec<&'a str>,
     kind: u8,
     rank: u8,
     lat: f32,
@@ -187,15 +193,34 @@ fn run(
         let entry_idx = pc.entries.len() as u64;
         pc.entries.push(entry);
 
-        // Multiple rows can share a normalised key (e.g. "main street"
-        // in many suburbs); FST keeps one representative entry, the
-        // lowest-rank one. Per-key dedup happens here against the
-        // already-pushed entries.
+        // Multilingual aliases (i18n alternates) reuse the SAME entry
+        // — only an extra FST key is added per alias, no extra entry.
+        // Dedup against canonical happens naturally because the keys
+        // BTreeMap is keyed on the normalised string; an alias whose
+        // normalisation collides with the canonical is a no-op.
+        // Compare against the cached `key` (already computed above)
+        // so a place with N alternates does N normalisations, not 2N.
+        for alias in &cand.aliases {
+            let alias_key = normalise_fst_key(alias);
+            if alias_key.is_empty() || alias_key == key {
+                continue;
+            }
+            insert_key(pc, alias_key, entry_idx, cand.rank);
+        }
+        insert_key(pc, key, entry_idx, cand.rank);
+    }
+
+    /// Insert a normalised key → entry_id mapping into `pc.keys`. When
+    /// the key already exists, keep whichever entry has the lower
+    /// `rank` (smaller wins). Multiple rows can share a normalised key
+    /// (e.g. "main street" in many suburbs) — the FST keeps one
+    /// representative entry per key.
+    fn insert_key(pc: &mut PerCountry, key: String, entry_idx: u64, rank: u8) {
         pc.keys
             .entry(key)
             .and_modify(|existing_idx| {
                 let existing_rank = pc.entries[*existing_idx as usize].rank;
-                if cand.rank < existing_rank {
+                if rank < existing_rank {
                     *existing_idx = entry_idx;
                 }
             })
@@ -224,7 +249,8 @@ fn run(
         let points: &[PlacePoint] = as_typed_slice(pp);
         place_candidates = points
             .par_iter()
-            .filter_map(|p| {
+            .enumerate()
+            .filter_map(|(place_id, p)| {
                 let name = idx.get_string(p.name_id);
                 if name.is_empty() {
                     return None;
@@ -234,9 +260,29 @@ fn run(
                 if !in_filter(cc) {
                     return None;
                 }
+
+                // Pull `name:xx` alternates so a query in any of the
+                // tagged languages lands on this same entry. The C++
+                // builder writes i18n_names.bin sorted by
+                // (entity_type, entity_id, lang_code) and uses
+                // entity_type=1 for place points keyed by their index
+                // in place_points.bin, which matches the slice index
+                // we have here. See builder/src/build_index.cpp:633.
+                let aliases: Vec<&str> = idx
+                    .i18n_names
+                    .as_ref()
+                    .map(|i| {
+                        i.alternates_for(ENTITY_PLACE, place_id as u32)
+                            .map(|(_, name_id)| idx.get_string(name_id))
+                            .filter(|alt| !alt.is_empty() && *alt != name)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
                 Some(Candidate {
                     cc: [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()],
                     name,
+                    aliases,
                     kind: KIND_PLACE,
                     rank: p.rank as u8,
                     lat: p.lat,
@@ -271,6 +317,11 @@ fn run(
             Some(Candidate {
                 cc: [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()],
                 name,
+                // The C++ builder doesn't emit i18n_names entries for
+                // streets (only admin polygons + place points), so
+                // there's nothing to expand here — keep the field for
+                // shape parity with places.
+                aliases: Vec::new(),
                 kind: KIND_STREET,
                 rank: 26,
                 lat: mid.lat,
@@ -573,34 +624,12 @@ fn read_cstr(pool: &[u8], offset: u32) -> &str {
     std::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
+/// Build-time FST key normaliser. Identical to the runtime
+/// `query_server::autocomplete::normalise_prefix` — pinned in
+/// `tests/abbrev_symmetry.rs` so the two can't drift. Wraps it
+/// directly so the build pipeline always picks up runtime fixes
+/// (e.g., the uppercase-diacritic fold) without a second
+/// implementation to keep in sync.
 fn normalise_fst_key(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_space = true;
-    for ch in s.chars() {
-        let folded = fold(ch);
-        for c in folded.chars() {
-            if c.is_alphanumeric() {
-                out.extend(c.to_lowercase());
-                last_space = false;
-            } else if !last_space {
-                out.push(' ');
-                last_space = true;
-            }
-        }
-    }
-    out.trim().to_owned()
-}
-
-fn fold(ch: char) -> String {
-    match ch {
-        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => "a".into(),
-        'é' | 'è' | 'ê' | 'ë' => "e".into(),
-        'í' | 'ì' | 'î' | 'ï' => "i".into(),
-        'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ø' => "o".into(),
-        'ú' | 'ù' | 'û' | 'ü' => "u".into(),
-        'ñ' => "n".into(),
-        'ç' => "c".into(),
-        'ß' => "ss".into(),
-        c => c.to_string(),
-    }
+    query_server::autocomplete::normalise_prefix(s)
 }

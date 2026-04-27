@@ -59,13 +59,18 @@ impl Geocoder for GeocoderService {
         let span = tracing::Span::current();
         span.record("geocoder.lat", r.lat);
         span.record("geocoder.lon", r.lon);
+        check_text("lang", &r.lang, crate::limits::LANG)?;
         if !r.lang.is_empty() {
             span.record("geocoder.lang", r.lang.as_str());
         }
         let h3_res = validate_h3_res(&r.h3_res)?;
         let snap = self.index.load();
-        let address = snap.query(r.lat, r.lon);
-        let _ = r.lang; // accepted, not yet honoured — mirrors REST
+        // Honour `lang` the same way the REST `/reverse` handler does
+        // (main.rs `reverse_geocode`). Empty string falls through to
+        // the default — `query_with_lang` treats `None` as "no
+        // override" and `pack_lang_code` rejects sub-2-char tags.
+        let lang = if r.lang.is_empty() { None } else { Some(r.lang.as_str()) };
+        let address = snap.query_with_lang(r.lat, r.lon, lang);
         let mut pb = into_pb_address(address);
         pb.h3 = build_h3_proto(r.lat, r.lon, &h3_res);
         Ok(Response::new(AddressResponse {
@@ -86,6 +91,12 @@ impl Geocoder for GeocoderService {
         req: Request<SearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         let r = req.into_inner();
+        check_text("q", &r.q, crate::limits::SEARCH_Q)?;
+        check_text("street", &r.street, crate::limits::STRUCTURED_FIELD)?;
+        check_text("housenumber", &r.housenumber, crate::limits::HOUSENUMBER)?;
+        check_text("city", &r.city, crate::limits::STRUCTURED_FIELD)?;
+        check_text("state", &r.state, crate::limits::STRUCTURED_FIELD)?;
+        check_text("country_code", &r.country_code, crate::limits::COUNTRY_CODE_LIST)?;
         let h3_res = validate_h3_res(&r.h3_res)?;
         let Some(fwd) = self.forward.as_ref() else {
             return Err(Status::unimplemented("forward index not built"));
@@ -187,6 +198,12 @@ impl Geocoder for GeocoderService {
         req: Request<ValidateRequest>,
     ) -> Result<Response<ValidateResponse>, Status> {
         let r = req.into_inner();
+        check_text("housenumber", &r.housenumber, crate::limits::HOUSENUMBER)?;
+        check_text("street", &r.street, crate::limits::STRUCTURED_FIELD)?;
+        check_text("city", &r.city, crate::limits::STRUCTURED_FIELD)?;
+        check_text("state", &r.state, crate::limits::STRUCTURED_FIELD)?;
+        check_text("postcode", &r.postcode, crate::limits::POSTCODE)?;
+        check_text("country_code", &r.country_code, crate::limits::COUNTRY_CODE_LIST)?;
         let span = tracing::Span::current();
         if !r.country_code.is_empty() {
             span.record("geocoder.country_code", r.country_code.as_str());
@@ -283,6 +300,8 @@ impl Geocoder for GeocoderService {
         req: Request<AutocompleteRequest>,
     ) -> Result<Response<AutocompleteResponse>, Status> {
         let r = req.into_inner();
+        check_text("q", &r.q, crate::limits::AUTOCOMPLETE_Q)?;
+        check_text("country_code", &r.country_code, crate::limits::COUNTRY_CODE)?;
         let h3_res = validate_h3_res(&r.h3_res)?;
         let Some(a) = self.autocomplete.as_ref() else {
             return Err(Status::unimplemented("autocomplete FST not built"));
@@ -386,6 +405,7 @@ impl Geocoder for GeocoderService {
         // inner message — tonic's Request::into_inner takes self.
         let peer = req.remote_addr();
         let r = req.into_inner();
+        check_text("ip", &r.ip, crate::limits::IP)?;
         let h3_res = validate_h3_res(&r.h3_res)?;
         let Some(db) = self.ip_db.as_ref() else {
             return Err(Status::unavailable("ip geocoding not enabled"));
@@ -454,6 +474,14 @@ fn empty_to_none(s: &str) -> Option<&str> {
     } else {
         Some(s)
     }
+}
+
+/// Apply a length cap to a single text field, mapping overflow to
+/// `Status::invalid_argument`. Caps live in
+/// `query_server::limits` — same set the REST handlers use, so the
+/// two surfaces can't drift on what they accept.
+fn check_text(name: &str, val: &str, max: usize) -> Result<(), Status> {
+    crate::limits::check(name, val, max).map_err(Status::invalid_argument)
 }
 
 /// Validate H3 resolutions coming off the wire (proto carries them as

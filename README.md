@@ -260,6 +260,8 @@ RAM guidance: AU-only fits a `t4g.medium` class instance; planet wants ≥16 GB 
 
 The server is unauthenticated — every endpoint is open to any caller that can reach the port. Deploy behind a network boundary (VPC, service mesh, localhost bind, reverse proxy) to control access.
 
+Per-field input length caps and the global request-body limit (applied to both REST and gRPC) are documented in [docs/API_limits.md](docs/API_limits.md).
+
 ### GET /reverse
 
 Coordinate → address.
@@ -418,7 +420,7 @@ A typed mirror of every REST endpoint. Service definition: [`server/proto/geocod
 
 Default bind: `0.0.0.0:3001`. Override with `--grpc-addr` or `GEOCODER_GRPC_ADDR`. Like the REST side, the gRPC surface is unauthenticated — gate it at the network layer.
 
-Shared limits: `SearchRequest.limit` and `AutocompleteRequest.limit` are silently clamped into 1–50 (same behaviour as REST). `h3_res` accepts up to 4 resolutions; >4 returns `InvalidArgument`.
+Shared limits: `SearchRequest.limit` and `AutocompleteRequest.limit` are silently clamped into 1–50 (same behaviour as REST). `h3_res` accepts up to 4 resolutions; >4 returns `InvalidArgument`. Per-field text length caps mirror the REST surface — see [docs/API_limits.md](docs/API_limits.md).
 
 ```
 rpc Reverse(ReverseRequest) returns (AddressResponse);

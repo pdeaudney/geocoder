@@ -205,7 +205,7 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
     // Places
     if let Some(pp) = idx.place_points.as_ref() {
         let points: &[PlacePoint] = as_typed_slice(pp);
-        for p in points {
+        for (place_id, p) in points.iter().enumerate() {
             let name = idx.get_string(p.name_id);
             if name.is_empty() {
                 continue;
@@ -214,10 +214,28 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
             let lng = p.lng as f64;
             let admin = idx.find_admin(lat, lng);
 
+            // Gather `name:xx` alternates so an English query for
+            // `Cologne` finds the Köln entry (canonical name unchanged
+            // — the alternates are appended to the indexed `name`
+            // field only). entity_type=1, entity_id=index in
+            // place_points (matches the C++ builder; see
+            // builder/src/build_index.cpp:633).
+            let alternates: Vec<&str> = idx
+                .i18n_names
+                .as_ref()
+                .map(|i| {
+                    i.alternates_for(crate::i18n::ENTITY_PLACE, place_id as u32)
+                        .map(|(_, name_id)| idx.get_string(name_id))
+                        .filter(|alt| !alt.is_empty() && *alt != name)
+                        .collect()
+                })
+                .unwrap_or_default();
+
             writer
                 .add_document(tantivy_doc(
                     &schema_handle,
                     name,
+                    &alternates,
                     KIND_PLACE,
                     p.rank as u64,
                     lat,
@@ -256,10 +274,13 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
             continue;
         }
 
+        // The C++ builder doesn't emit i18n_names entries for streets,
+        // so there are no alternates to feed in here.
         writer
             .add_document(tantivy_doc(
                 &schema_handle,
                 name,
+                &[],
                 KIND_STREET,
                 26,
                 lat,
@@ -330,6 +351,12 @@ pub fn build_partitioned_with_heap(
     // is preserved.
     struct PendingDoc<'a> {
         name: &'a str,
+        /// `name:xx` alternates from i18n_names.bin. Empty for streets
+        /// (the C++ builder doesn't emit street entries) and for
+        /// places without name:xx tags. Concatenated into the indexed
+        /// `name` field at writer time so a query in any tagged
+        /// language matches.
+        alternates: Vec<&'a str>,
         kind: u64,
         rank: u64,
         lat: f64,
@@ -365,7 +392,8 @@ pub fn build_partitioned_with_heap(
         let points: &[PlacePoint] = as_typed_slice(pp);
         let place_candidates: Vec<([u8; 2], PendingDoc<'_>)> = points
             .par_iter()
-            .filter_map(|p| {
+            .enumerate()
+            .filter_map(|(place_id, p)| {
                 let name = idx.get_string(p.name_id);
                 if name.is_empty() {
                     return None;
@@ -374,10 +402,27 @@ pub fn build_partitioned_with_heap(
                 let lng = p.lng as f64;
                 let admin = idx.find_admin(lat, lng);
                 let cc = country_bytes(admin.country_code)?;
+
+                // entity_type=1 for place points; entity_id matches
+                // the slice index into place_points.bin (the C++
+                // builder uses `place_points.size()` as the id pre-
+                // push; see builder/src/build_index.cpp:633).
+                let alternates: Vec<&str> = idx
+                    .i18n_names
+                    .as_ref()
+                    .map(|i| {
+                        i.alternates_for(crate::i18n::ENTITY_PLACE, place_id as u32)
+                            .map(|(_, name_id)| idx.get_string(name_id))
+                            .filter(|alt| !alt.is_empty() && *alt != name)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
                 Some((
                     cc,
                     PendingDoc {
                         name,
+                        alternates,
                         kind: KIND_PLACE,
                         rank: p.rank as u64,
                         lat,
@@ -426,6 +471,10 @@ pub fn build_partitioned_with_heap(
                 cc,
                 PendingDoc {
                     name,
+                    // No street entries in i18n_names.bin (the C++
+                    // builder only emits admin polygons and place
+                    // points), so nothing to add here.
+                    alternates: Vec::new(),
                     kind: KIND_STREET,
                     rank: 26,
                     lat,
@@ -491,6 +540,7 @@ pub fn build_partitioned_with_heap(
                     .add_document(tantivy_doc(
                         &schema_handle,
                         d.name,
+                        &d.alternates,
                         d.kind,
                         d.rank,
                         d.lat,
@@ -524,6 +574,7 @@ pub fn build_partitioned_with_heap(
 fn tantivy_doc(
     s: &ForwardSchema,
     name: &str,
+    alternates: &[&str],
     kind: u64,
     rank: u64,
     lat: f64,
@@ -545,7 +596,21 @@ fn tantivy_doc(
     // `name_raw` preserves the original OSM name for display. `name` is
     // canonicalised so abbreviations in either the index or the query
     // converge on a single token form ("Smith Tce" ≡ "Smith Terrace").
-    let name_indexed = canonicalise_phrase(name);
+    // i18n alternates are concatenated into the same field so a query
+    // for `the hague` matches the Den Haag entry via the `hague` token,
+    // courtesy of tantivy's SimpleTokenizer + AsciiFoldingFilter +
+    // LowerCaser pipeline.
+    let mut name_indexed = canonicalise_phrase(name);
+    for alt in alternates {
+        let canonical_alt = canonicalise_phrase(alt);
+        if canonical_alt.trim().is_empty() {
+            continue;
+        }
+        if !name_indexed.is_empty() {
+            name_indexed.push(' ');
+        }
+        name_indexed.push_str(canonical_alt.trim());
+    }
     let suburb_indexed = suburb.map(canonicalise_phrase).unwrap_or_default();
     let state_indexed = state.map(canonicalise_phrase).unwrap_or_default();
 
@@ -1260,27 +1325,64 @@ fn hit_from_doc(doc: &TantivyDocument, s: &ForwardSchema, score: f32) -> Result<
 
 /// Split user input into lowercase tokens, stripping punctuation and
 /// canonicalising known street-type abbreviations (Tce → terrace, Hwy →
-/// highway, …). Mirrors the tokenisation applied at index time so query
-/// tokens match index tokens exactly.
+/// highway, …) plus place-name abbreviations (Saint→st, Mount→mt,
+/// Fort→ft) when leading. Mirrors the tokenisation applied at index
+/// time so query tokens match index tokens exactly.
 pub fn tokenize_user_input(s: &str) -> Vec<String> {
     let folded = ascii_fold(s);
-    folded
+    let raw_tokens: Vec<String> = folded
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .map(|t| canonicalise_token(&t.to_ascii_lowercase()).to_owned())
-        .collect()
+        .collect();
+    apply_place_abbreviation_fold(raw_tokens)
+}
+
+/// Apply the same Saint/Mount/Fort fold as
+/// `crate::autocomplete::fold_place_abbreviations`, but on a token Vec
+/// (already lowercase, ASCII-folded). Position rule: only the
+/// leading tokens of a multi-token phrase are mapped — trailing
+/// tokens like the `St` in `Main St` (= Street, not Saint) stay
+/// literal. See the symmetry test in `tests/abbrev_symmetry.rs`.
+fn apply_place_abbreviation_fold(mut tokens: Vec<String>) -> Vec<String> {
+    if tokens.len() < 2 {
+        return tokens;
+    }
+    let last = tokens.len() - 1;
+    for (i, t) in tokens.iter_mut().enumerate() {
+        if i == last {
+            continue;
+        }
+        let mapped = match t.as_str() {
+            "saint" | "sainte" | "st" | "ste" => Some("st"),
+            "mount" | "mt" => Some("mt"),
+            "fort" | "ft" => Some("ft"),
+            _ => None,
+        };
+        if let Some(m) = mapped {
+            *t = m.to_owned();
+        }
+    }
+    tokens
 }
 
 /// Apply the canonicalisation step at index time to a source name string.
 /// Returns a new string where any whole-word abbreviation (case-insensitive,
-/// trailing `.` tolerated) is replaced with its full form. Non-matching
-/// words are preserved verbatim — the tantivy tokenizer still lowercases +
-/// folds, so casing in the output doesn't matter for matching but is kept
-/// for clarity if anyone inspects the stored data.
+/// trailing `.` tolerated) is replaced with its full form. Also collapses
+/// the leading Saint/Mount/Fort place abbreviations (see
+/// [`apply_place_abbreviation_fold`]) so the build-time tokenisation
+/// matches the runtime tokenisation byte-for-byte after tantivy's
+/// lowercase + fold filters. Non-matching words are preserved verbatim.
 pub fn canonicalise_phrase(s: &str) -> String {
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if words.is_empty() {
+        return String::new();
+    }
+    let last = words.len() - 1;
+
     let mut out = String::with_capacity(s.len());
     let mut first = true;
-    for word in s.split_whitespace() {
+    for (i, word) in words.iter().enumerate() {
         if !first {
             out.push(' ');
         }
@@ -1290,13 +1392,33 @@ pub fn canonicalise_phrase(s: &str) -> String {
         // ASCII-folded view. Keep the original word if no match.
         let trimmed = word.trim_end_matches('.');
         let key_owned = ascii_fold(trimmed).to_ascii_lowercase();
-        match STREET_TYPE_ABBREVIATIONS
+
+        // Street-type abbreviation table (Tce → terrace, Hwy → highway, …).
+        if let Some((_, full)) = STREET_TYPE_ABBREVIATIONS
             .iter()
             .find(|(abbr, _)| *abbr == key_owned.as_str())
         {
-            Some((_, full)) => out.push_str(full),
-            None => out.push_str(word),
+            out.push_str(full);
+            continue;
         }
+
+        // Place-name abbreviation table (Saint/Mount/Fort), leading-only.
+        // Skip the last token so `Main St` (Street) stays literal; this
+        // mirrors the position rule in `apply_place_abbreviation_fold`.
+        if i != last {
+            let mapped = match key_owned.as_str() {
+                "saint" | "sainte" | "st" | "ste" => Some("st"),
+                "mount" | "mt" => Some("mt"),
+                "fort" | "ft" => Some("ft"),
+                _ => None,
+            };
+            if let Some(m) = mapped {
+                out.push_str(m);
+                continue;
+            }
+        }
+
+        out.push_str(word);
     }
     out
 }
