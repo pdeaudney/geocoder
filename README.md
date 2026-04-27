@@ -631,6 +631,36 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for:
 | Worldwide-build wall-time + memory envelopes | [`docs/worldwide-build.md`](docs/worldwide-build.md) |
 | Performance snapshots (LTO config, hashmap choice, read-path optimisations) | [`docs/performance/`](docs/performance/) |
 
+### Load testing
+
+Two k6 workloads, both driven through `scripts/bench-http.sh` (which boots
+the server, manages cold/warm OS-cache modes, runs k6 via Docker, merges
+JSON reports, and diffs against prior runs):
+
+```bash
+# AU workload (default) — five hardcoded-fixture scenarios.
+./scripts/bench-http.sh
+
+# Planet workload — three multi-country scenarios driven by Geonames-
+# derived fixtures across US/GB/FR/DE/NL/ES/AU/CA. Run the fixture
+# build once before the first planet bench (~50 s, downloads ~106 MB
+# from Geonames + a 1 MB Pelias clone).
+./scripts/bench/build-fixtures.sh
+./scripts/bench-http.sh --workload planet --index /data/index
+```
+
+The planet workload's three scenarios:
+
+  - `reverse_planet` — 5,000 balanced (lat, lon, country) coords, p99 SLO 50 ms
+  - `search_planet` — 2,000 freeform city queries, p99 SLO 100 ms
+  - `autocomplete_typeahead` — 1,458 prefixes spanning 1–6 chars across the 8 countries, p99 SLO 30 ms
+
+Reports land at `tests/regression/reports/http-bench-planet-<label>.json`
+(separate from the AU stream so prior-run diffs match workload to workload).
+Fixture build script + the JSONs themselves live under
+`scripts/bench/fixtures/`; refresh with `./scripts/bench/build-fixtures.sh`
+when Geonames publishes a new monthly snapshot.
+
 ## License
 
 Apache License, Version 2.0. Original copyright © Traccar (upstream project); additions copyright © this project's contributors.
