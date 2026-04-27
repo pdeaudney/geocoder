@@ -676,6 +676,45 @@ pub struct StructuredQuery<'a> {
     pub country_code: Option<&'a str>,
     pub kind: Option<u64>,
     pub limit: usize,
+    /// Optional proximity bias for ambiguous-name disambiguation. When
+    /// supplied, hits are ranked by `bm25 - α * log(distance_km + 1)`
+    /// so geographically-close matches outrank far ones at similar
+    /// BM25 scores. `Sydney` from a London bias still returns Sydney
+    /// AU (BM25 dominates — only one global match); `Cambridge` from
+    /// a Boston bias returns Cambridge MA before Cambridge UK.
+    /// See `BiasCoord::DISTANCE_ALPHA` for the tuning constant.
+    pub bias: Option<BiasCoord>,
+}
+
+/// Proximity-bias hint for `/search`. Validated at the API layer so
+/// the search path can rely on these being in-range.
+#[derive(Debug, Clone, Copy)]
+pub struct BiasCoord {
+    pub lat: f64,
+    pub lng: f64,
+}
+
+impl BiasCoord {
+    /// Tuning constant for `bm25 - α * log(distance_km + 1)`. Picked
+    /// so ~100 km of distance counterbalances roughly 0.5 BM25 units
+    /// (typical BM25 score spread for a same-name multi-doc query is
+    /// 1–3 units), enough to flip the ordering between same-name
+    /// candidates without overriding obviously-better text matches.
+    /// Empirically tuned in `tests/search_bias.rs`; raise the value
+    /// to bias more aggressively, lower to soften.
+    pub const DISTANCE_ALPHA: f64 = 0.10;
+
+    /// Validate range. Returns the coord on success, the offending
+    /// field name on failure so the caller can build a 400/Status.
+    pub fn try_new(lat: f64, lng: f64) -> Result<Self, &'static str> {
+        if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+            return Err("bias_lat");
+        }
+        if !lng.is_finite() || !(-180.0..=180.0).contains(&lng) {
+            return Err("bias_lng");
+        }
+        Ok(BiasCoord { lat, lng })
+    }
 }
 
 impl Forward {
@@ -940,9 +979,9 @@ impl Forward {
                     geocoder.forward.tantivy_dir = %active.dir_name,
                     geocoder.forward.index_variant = variant,
                 );
-                if let Some(hits) =
-                    fuzzy_span.in_scope(|| self.search_fuzzy(active, q_text, q.kind, q.limit))?
-                {
+                if let Some(hits) = fuzzy_span.in_scope(|| {
+                    self.search_fuzzy(active, q_text, q.kind, q.limit, q.bias.as_ref())
+                })? {
                     if !hits.is_empty() {
                         tracing::Span::current().record("geocoder.stage", "fuzzy");
                         tracing::Span::current().record("geocoder.match_count", hits.len());
@@ -977,6 +1016,7 @@ impl Forward {
         q_text: &str,
         kind_filter: Option<u64>,
         limit: usize,
+        bias: Option<&BiasCoord>,
     ) -> Result<Option<Vec<Hit>>, String> {
         let parsed = parse_freeform_query(q_text);
         if parsed.rest.is_empty() {
@@ -1017,10 +1057,11 @@ impl Forward {
                 .map_err(|e| format!("fetch doc: {e}"))?;
             hits.push(hit_from_doc(&doc, s, score)?);
         }
-        // Re-rank with the prominence boost, same as the strict path.
+        // Re-rank with the prominence boost + optional proximity bias,
+        // same as the strict path.
         hits.sort_by(|a, b| {
-            boosted_score(b)
-                .partial_cmp(&boosted_score(a))
+            boosted_score(b, bias)
+                .partial_cmp(&boosted_score(a, bias))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         hits.truncate(limit);
@@ -1174,9 +1215,10 @@ impl Forward {
         // street named "Sydney Lane"; "Alysse Close" in Baulkham Hills
         // still wins against a generic place match because the BM25
         // component dominates the boost.
+        let bias = q.bias.as_ref();
         candidates.sort_by(|a, b| {
-            let score_a = boosted_score(a);
-            let score_b = boosted_score(b);
+            let score_a = boosted_score(a, bias);
+            let score_b = boosted_score(b, bias);
             score_b
                 .partial_cmp(&score_a)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -1267,14 +1309,32 @@ fn parse_tantivy_country_prefix(name: &str) -> Option<[u8; 2]> {
 /// matches still beat weak ones regardless of rank. Exponent chosen
 /// empirically so "Sydney" ranks the city above streets named Sydney, but
 /// "Alysse Close Baulkham Hills" still prefers the highly-specific street.
-fn boosted_score(hit: &Hit) -> f32 {
-    // Treat rank 26 (streets) as the baseline. Lower rank → larger boost.
-    const BASELINE: f32 = 26.0;
-    let delta = (BASELINE - hit.rank as f32) / 10.0; // 1.0 at rank 16, 0 at rank 26
-    // Smooth positive multiplier; clamp so "missing rank" or unusual values
-    // don't blow up.
-    let boost = (1.0 + delta.max(0.0) * 0.4).clamp(1.0, 2.0);
-    hit.score * boost
+fn boosted_score(hit: &Hit, bias: Option<&BiasCoord>) -> f32 {
+    match bias {
+        None => {
+            // Nominatim-style prominence boost: lower rank wins among
+            // similar BM25 scores. A query for "Sydney" returns the
+            // city, not "Sydney Lane".
+            const BASELINE: f32 = 26.0;
+            let delta = (BASELINE - hit.rank as f32) / 10.0;
+            let boost = (1.0 + delta.max(0.0) * 0.4).clamp(1.0, 2.0);
+            hit.score * boost
+        }
+        Some(b) => {
+            // Proximity bias is the user's explicit intent: rank by
+            // BM25 + geographic closeness, NOT global admin
+            // prominence. Skipping the prominence boost here is the
+            // mechanism that lets a Melbourne user searching
+            // "St Kilda" see Melbourne's suburb (rank 19) above SA's
+            // admin centre (rank 16). The distance penalty is
+            // additive on the f32 BM25 score: ~0.5 units per ln-step
+            // of km. A 100 km miss costs ~0.46; a 10000 km miss
+            // ~0.92.
+            let d_km = crate::geo::haversine_m(hit.lat, hit.lng, b.lat, b.lng) / 1_000.0;
+            let penalty = (BiasCoord::DISTANCE_ALPHA as f32) * (d_km as f32 + 1.0).ln();
+            hit.score - penalty
+        }
+    }
 }
 
 /// Pull a required string field off a tantivy doc. Returns an `Err` instead

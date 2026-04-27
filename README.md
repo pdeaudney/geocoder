@@ -294,9 +294,27 @@ Parameters:
 | `country_code` | Single ISO 3166-1 alpha-2, or a comma-separated list (e.g. `US,CA,MX`). No cap on list length, but each code spawns one per-country search — keep it short (≤5) for sensible latency. |
 | `kind` | `place` or `street` (filter) |
 | `limit` | Integer 1–50 (default 10). Out-of-range values are silently clamped into this window. |
+| `bias_lat`, `bias_lng` | Optional proximity hint. When supplied, hits are re-ranked so geographically-close matches outrank far ones at similar BM25 scores. Both must be supplied together. Skips the FST fast-path. See [docs/SDK_PATTERNS.md](docs/SDK_PATTERNS.md) for client-side recipes. |
 | `h3_res` | Comma-separated H3 resolutions (0–15, max 4); returns an `h3` map per hit. |
 
 Response includes each hit's `confidence` label (`exact`, `interpolated`, `fallback`) and a `source` field when served from the FST fast-path.
+
+#### Disambiguating ambiguous queries
+
+`Cambridge` (UK + MA), `Münster` (DE + IL), `St Kilda` (Melbourne + Adelaide) — all return one prominent answer by default, which may not be the one the user meant. Pass `bias_lat`/`bias_lng` resolved from the user's known location to flip the ranking toward locally-relevant matches.
+
+```bash
+# Cambridge from a UK user → Cambridge UK
+GET /search?q=Cambridge&bias_lat=51.51&bias_lng=-0.13
+
+# Cambridge from a Boston user → Cambridge MA
+GET /search?q=Cambridge&bias_lat=42.36&bias_lng=-71.06
+
+# Sydney is unique globally — bias has no effect; still returns Sydney AU
+GET /search?q=Sydney&bias_lat=51.51&bias_lng=-0.13
+```
+
+The bias signal is a soft tiebreak (BM25 dominates when one match is clearly better), not a hard filter — searching `Tokyo` from London still finds Tokyo. See [docs/SDK_PATTERNS.md](docs/SDK_PATTERNS.md) for browser / mobile / backend recipes that source the coord from the right place per platform (browser Geolocation API, mobile GPS, cached profile, IP-to-coord chain through `/geocode/ip`).
 
 Features:
 
