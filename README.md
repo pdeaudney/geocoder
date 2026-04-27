@@ -563,6 +563,7 @@ In-flight queries keep the old `Arc<Index>` until they return; new queries see t
 | `GEOCODER_RELOAD_INTERVAL_SEC` | `5` | Reload marker poll interval |
 | `GEOCODER_ADMIN_CONFIG` | (embedded) | Path to a JSON file overriding the `admin_level` → output-field mapping |
 | `GEOLITE2_DB` | `$DATA_DIR/GeoLite2-City.mmdb` | MaxMind GeoLite2 path for IP geocoding |
+| `MAXMIND_FALLBACK_TO_DBIP` | `true` | When `MAXMIND_LICENSE_KEY` is unset, `fetch-data --maxmind` falls back to DB-IP's free IP-to-City Lite dataset (CC-BY 4.0, no signup, MMDB-format-compatible). Set to `false` for strict MaxMind-only mode. The `<dest>.mmdb.source` sidecar records which dataset is currently installed. |
 | `GEOCODER_LOG_FORMAT` | autopick: `pretty` if tty, `json` otherwise | Log encoder. `json` (one structured event per line), `pretty` (human-readable), or `compact`. |
 | `GEOCODER_LOG_DEDUP_WINDOW_SEC` | `30` | Per-callsite throttle window for repeated log events (suppresses opentelemetry-exporter spam during a collector outage). `0` disables. |
 | **OpenTelemetry traces + metrics** | | See the [Observability section](#observability) for end-to-end usage. |
