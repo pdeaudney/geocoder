@@ -54,28 +54,6 @@ tag exists.
 - **Re-evaluate when:** a deployment specifically targets a
   region (CIS, EA) where the OSM `name:en` gap is large.
 
-### ~~Arrondissement / numbered-suffix neighborhoods~~ — done
-
-Closed by the bench-fixture filter tightening below: FR-anchored
-name pattern (`^(Paris|Marseille|Lyon)\s\d`) drops the 36
-arrondissement variants Geonames tags as PPL/PPLA5. Sister case
-`la Nova Esquerra de l'Eixample` was tagged PPLX and dropped via
-the feature_code filter. Validation: `places.json` post-filter
-contains 0 such entries. CA First Nations reserves
-(`Cross Lake 19A`, `Skowkale 10`) verified preserved.
-
-### ~~Bench-fixture filter for non-OSM Geonames entries~~ — done
-
-Closed in `scripts/bench/build-fixtures.sh`: feature_code filter
-drops PPLX (sub-localities like Lyon's 9 arrondissements + ~7,500
-neighborhood entries across all 8 fixture countries) plus PPLH /
-PPLW / PPLQ (defunct places). FR-only name pattern catches the
-Paris/Marseille arrondissements that slip past the code filter.
-Net: ~7,500 false-negative-generating fixture rows removed; legit
-First Nations reserves and other digit-bearing real places
-preserved. Real pass-rate uplift lands on the next planet
-bench-accuracy run.
-
 ## Future evaluation
 
 ### Embedding / vector-based search for geocoding
