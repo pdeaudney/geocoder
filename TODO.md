@@ -9,23 +9,51 @@ today, but each represents a known gap worth coming back to.
 
 ## Search & indexing
 
-### Same-name disambiguation in `/search`
+### Tune `BiasCoord::DISTANCE_ALPHA` against diverse same-name fixtures
 
-Queries like `Münster`, `Cambridge`, `Mount Pleasant` resolve to
-exactly one of the many places sharing that name (the FST fast-path
-returns a single representative entry). Real users get a valid
-result but no signal that another match exists.
+α=0.10 was picked to make the AU St Kilda + cross-country Cambridge
+test cases land correctly. The constant is the only tuning knob in
+the bias path: `score = bm25 - α * ln(distance_km + 1)`.
 
-- **Workaround today:** structured queries with `country_code` or
-  `state` filters scope the lookup to the right region.
-- **Why it's deferred:** fixing it requires either a multi-value FST
-  payload (schema change, larger keys) or a Tantivy fallback merge
-  that runs alongside the FST hit and returns top-N (more wiring,
-  more latency variance). Marginal real-user benefit relative to
-  the implementation complexity.
-- **Re-evaluate when:** a deployment shows users overwhelmingly
-  picking ambiguous-name places via the wrong region — the
-  workaround is on the caller, not the index.
+- **What's missing:** a fixture of 20–50 same-name place pairs at
+  varying distances (20 km, 200 km, 2000 km, 20000 km), and an
+  automated sweep that proves α=0.10 ranks them correctly across
+  the distribution. Right now we have a handful of ad-hoc cases.
+- **Risk if mistuned:** too low → bias never wins (the original
+  Melbourne/SA failure mode); too high → bias overrides genuinely
+  better text matches. The α=0.10 + skip-prominence-on-bias combo
+  is empirically OK but isn't proven.
+- **Re-evaluate when:** post-planet rebuild bench-accuracy data
+  shows real-world bias-vs-no-bias quality.
+
+### BM25 boost on the `rank` field for unbiased queries
+
+Without bias, ranking quality for ambiguous names depends entirely
+on the multiplicative prominence boost in `boosted_score`. Tantivy
+already stores `rank` as a FAST/STORED field but doesn't include
+it in BM25 scoring. We could add a `BoostQuery` per term that
+weights matches by inverse rank, smoothing the binary "FST returns
+1, Tantivy returns N" cliff.
+
+- **Owner cost:** ~1 day. Tantivy's `BoostQuery` is already used
+  for the name-vs-suburb boost in `search_once`.
+- **Re-evaluate when:** post-planet rebuild data shows specific
+  rank inversions (e.g. a `Cambridge Lane` outranking `Cambridge`
+  city in BM25 alone).
+
+### Optional `bias_radius_km` hard filter
+
+The current bias is a soft re-rank — `Tokyo` from a London bias
+still finds Tokyo. Some callers want the opposite: "only return
+places within 50 km of this coord" (find-my-nearest-X use cases).
+
+- **Why it's deferred:** the `/search` shape is freeform-text-
+  first; a radius filter belongs on a separate "nearby search"
+  endpoint with a different semantic contract. Adding it as a
+  parameter to `/search` would muddle the contract.
+- **Re-evaluate when:** a customer specifically asks for
+  nearest-N-X-within-Y-km. A new endpoint (`/nearby?lat=&lng=&kind=`)
+  is a cleaner home for it than overloading `/search`.
 
 ### Border-precision reverse failures (~1 % at planet scale)
 

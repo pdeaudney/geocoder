@@ -97,6 +97,22 @@ impl Geocoder for GeocoderService {
         check_text("city", &r.city, crate::limits::STRUCTURED_FIELD)?;
         check_text("state", &r.state, crate::limits::STRUCTURED_FIELD)?;
         check_text("country_code", &r.country_code, crate::limits::COUNTRY_CODE_LIST)?;
+        let bias = match (r.bias_lat, r.bias_lng) {
+            (None, None) => None,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(Status::invalid_argument(
+                    "bias_lat and bias_lng must be supplied together",
+                ));
+            }
+            (Some(lat), Some(lng)) => match fwd::BiasCoord::try_new(lat, lng) {
+                Ok(b) => Some(b),
+                Err(field) => {
+                    return Err(Status::invalid_argument(format!(
+                        "{field}: out of range (lat ∈ [-90,90], lng ∈ [-180,180])"
+                    )));
+                }
+            },
+        };
         let h3_res = validate_h3_res(&r.h3_res)?;
         let Some(fwd) = self.forward.as_ref() else {
             return Err(Status::unimplemented("forward index not built"));
@@ -131,6 +147,7 @@ impl Geocoder for GeocoderService {
             country_code: empty_to_none(&r.country_code),
             kind: kind_filter,
             limit,
+            bias,
         };
         let hits = fwd
             .search_structured(structured)

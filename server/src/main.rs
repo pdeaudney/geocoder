@@ -129,6 +129,17 @@ struct SearchParams {
     limit: Option<usize>,
     #[serde(default)]
     h3_res: Option<String>,
+    /// Optional proximity bias for ambiguous-name disambiguation.
+    /// `bias_lat` and `bias_lng` must be supplied together. When set,
+    /// hits are re-ranked so geographically-close matches outrank far
+    /// ones at similar BM25 scores. Skips the FST fast-path (which
+    /// returns one globally-prominent hit). See docs/SDK_PATTERNS.md
+    /// for client-side patterns to source the coord (browser
+    /// geolocation, mobile GPS, IP→coord chain through `/geocode/ip`).
+    #[serde(default)]
+    bias_lat: Option<f64>,
+    #[serde(default)]
+    bias_lng: Option<f64>,
 }
 
 /// Resolve the `h3_res` query param to a validated list of resolutions.
@@ -839,6 +850,32 @@ async fn search(
     {
         return r;
     }
+
+    // Proximity bias: both bias_lat and bias_lng must be supplied or
+    // neither — half a coord is a programming error, not a useful
+    // partial signal. Range-validate via BiasCoord::try_new so the
+    // search path can rely on these being in spec.
+    let bias = match (params.bias_lat, params.bias_lng) {
+        (None, None) => None,
+        (Some(_), None) | (None, Some(_)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "bias_lat and bias_lng must be supplied together",
+            )
+                .into_response();
+        }
+        (Some(lat), Some(lng)) => match forward::BiasCoord::try_new(lat, lng) {
+            Ok(b) => Some(b),
+            Err(field) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("{field}: out of range (lat ∈ [-90,90], lng ∈ [-180,180])"),
+                )
+                    .into_response();
+            }
+        },
+    };
+
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -896,12 +933,16 @@ async fn search(
     // without touching tantivy. Radar's public architecture attributes
     // ~80% of their traffic to this fast-path. Skip when the query is
     // structured (street/city/state set), when the caller asked for
-    // multiple countries, when no FST is loaded, or when we'd need to
-    // over-fetch (fast-path returns exactly one hit).
+    // multiple countries, when no FST is loaded, when caller asked
+    // for limit > 1 (fast-path returns exactly one hit), or when a
+    // proximity bias is set (fast-path returns the globally-prominent
+    // pick, which contradicts the bias intent).
     let is_simple_freeform = params.street.is_none()
         && params.city.is_none()
         && params.state.is_none()
         && country_codes.len() <= 1
+        && limit == 1
+        && bias.is_none()
         && params.q.as_deref().is_some_and(|s| !s.trim().is_empty());
     if is_simple_freeform {
         if let Some(autoc) = autocomplete_idx.as_ref() {
@@ -974,6 +1015,7 @@ async fn search(
                 country_code: Some(cc),
                 kind: kind_filter,
                 limit,
+                bias,
             };
             match fwd.search_structured(structured) {
                 Ok(mut h) => merged.append(&mut h),
@@ -1000,6 +1042,7 @@ async fn search(
             country_code: country_codes.first().copied(),
             kind: kind_filter,
             limit,
+            bias,
         };
         match fwd.search_structured(structured) {
             Ok(h) => h,

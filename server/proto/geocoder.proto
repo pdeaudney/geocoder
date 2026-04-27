@@ -73,6 +73,20 @@ message SearchRequest {
   uint32 limit = 8;
   // Optional H3 resolutions (0–15) stamped on every hit. Max 4.
   repeated uint32 h3_res = 9;
+  // Optional proximity bias for ambiguous-name disambiguation. When
+  // both fields are present, hits are re-ranked so geographically-
+  // close matches outrank far ones at similar BM25 scores. Both
+  // MUST be supplied together; supplying only one returns
+  // InvalidArgument. Range: lat ∈ [-90, 90], lng ∈ [-180, 180].
+  // Skips the FST fast-path. See docs/SDK_PATTERNS.md for client-
+  // side patterns to source the coord (browser geolocation, mobile
+  // GPS, IP→coord chain through /geocode/ip).
+  //
+  // Uses proto3 `optional` so Null Island (0, 0) is a valid bias —
+  // distinguishing "set to zero" from "not set" is semantically
+  // important here.
+  optional double bias_lat = 10;
+  optional double bias_lng = 11;
 }
 
 message SearchHit {
