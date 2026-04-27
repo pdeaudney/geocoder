@@ -202,10 +202,21 @@ Build the indexes:
 make builder
 
 # Rust binaries (workspace target → ./target/release/)
-cargo build --release --manifest-path server/Cargo.toml
+cargo build --release --manifest-path server/Cargo.toml --bins
+cargo build --release -p wof-importer
 
 # Index an OSM PBF (mandatory — the rest are additive)
 ./build/build-index data/index data/pbf/*.osm.pbf
+
+# (Recommended) WhosOnFirst country polygons — runtime fallback for
+# country-code resolution when OSM's admin_level=2 boundary is
+# missing from the input PBF. Geofabrik regional extracts like
+# great-britain-latest and us-latest commonly drop the country
+# relation, so without this step /reverse queries in those regions
+# may return empty `country` fields. Reads the
+# whosonfirst-data-admin-*.db SQLite that `fetch-data --wof` placed
+# in ./data/ and writes wof_countries.bin into the index dir.
+./target/release/wof-importer ./data ./data/index
 
 # (Optional) forward search — tantivy per-country
 ./target/release/build-forward-index data/index --partition-by-country
@@ -587,11 +598,13 @@ In-flight queries keep the old `Arc<Index>` until they return; new queries see t
 | Binary | Purpose |
 |---|---|
 | `build-index` (C++) | Parse OSM PBF → OSM binary index |
+| `wof-importer` | WhosOnFirst SQLite → `wof_countries.bin` (runtime country-code fallback) |
 | `build-forward-index` | Tantivy index for `/search`. `--partition-by-country` emits per-country indexes |
 | `build-autocomplete-fst` | FST prefix index for `/autocomplete` + `/search` fast-path |
 | `build-postcode-lookup` | G-NAF suburb-modal postcode table |
 | `build-gnaf-index` | Full G-NAF address-point index |
 | `build-openaddresses-index` | Per-country OpenAddresses address-point index |
+| `fetch-data` | Acquire OSM PBF + WoF + OpenAddresses + MaxMind/DB-IP + G-NAF |
 | `query-server` | The HTTP + gRPC server |
 
 All Rust binaries take `--help`.
