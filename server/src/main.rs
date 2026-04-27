@@ -143,6 +143,23 @@ fn resolve_h3_res(raw: Option<&str>) -> Result<Vec<u8>, Response> {
     }
 }
 
+/// Check a single text param against `max` bytes. Returns `Some(400)`
+/// when the input is too long so the handler can `if let Some(r) =
+/// check_text(...) { return r; }`. Caps live in
+/// `query_server::limits` — same set the gRPC handlers use.
+fn check_text(name: &str, val: &str, max: usize) -> Option<Response> {
+    query_server::limits::check(name, val, max)
+        .err()
+        .map(|msg| (StatusCode::BAD_REQUEST, msg).into_response())
+}
+
+/// Same as [`check_text`] but for `Option<String>` params — skips
+/// validation when the field is absent. Convenience for the bulk
+/// of structured-search params that are optional.
+fn check_text_opt(name: &str, val: Option<&str>, max: usize) -> Option<Response> {
+    val.and_then(|s| check_text(name, s, max))
+}
+
 /// Liveness probe. 200 + `{"status":"ok"}` the moment the process
 /// can accept HTTP — no dependencies touched. Use this for k8s
 /// liveness probes and bare-bones ALB checks. Kept as the default
@@ -388,6 +405,9 @@ async fn reverse_geocode(
     metrics: axum::extract::Extension<Arc<Metrics>>,
 ) -> Response {
     let started = std::time::Instant::now();
+    if let Some(r) = check_text_opt("lang", params.lang.as_deref(), query_server::limits::LANG) {
+        return r;
+    }
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -443,6 +463,21 @@ async fn validate_address(
     metrics: axum::extract::Extension<Arc<Metrics>>,
 ) -> Response {
     let started = std::time::Instant::now();
+    use query_server::limits as L;
+    if let Some(r) = [
+        check_text("street", &params.street, L::STRUCTURED_FIELD),
+        check_text("city", &params.city, L::STRUCTURED_FIELD),
+        check_text("country_code", &params.country_code, L::COUNTRY_CODE_LIST),
+        check_text_opt("housenumber", params.housenumber.as_deref(), L::HOUSENUMBER),
+        check_text_opt("state", params.state.as_deref(), L::STRUCTURED_FIELD),
+        check_text_opt("postcode", params.postcode.as_deref(), L::POSTCODE),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    {
+        return r;
+    }
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -614,6 +649,17 @@ async fn autocomplete(
     metrics: axum::extract::Extension<Arc<Metrics>>,
 ) -> Response {
     let started = std::time::Instant::now();
+    use query_server::limits as L;
+    if let Some(r) = [
+        check_text("q", &params.q, L::AUTOCOMPLETE_Q),
+        check_text_opt("country_code", params.country_code.as_deref(), L::COUNTRY_CODE),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    {
+        return r;
+    }
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -692,6 +738,9 @@ async fn ip_geocode(
     metrics: axum::extract::Extension<Arc<Metrics>>,
 ) -> Response {
     let started = std::time::Instant::now();
+    if let Some(r) = check_text_opt("ip", params.ip.as_deref(), query_server::limits::IP) {
+        return r;
+    }
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -775,6 +824,21 @@ async fn search(
     metrics: axum::extract::Extension<Arc<Metrics>>,
 ) -> Response {
     let started = std::time::Instant::now();
+    use query_server::limits as L;
+    if let Some(r) = [
+        check_text_opt("q", params.q.as_deref(), L::SEARCH_Q),
+        check_text_opt("street", params.street.as_deref(), L::STRUCTURED_FIELD),
+        check_text_opt("housenumber", params.housenumber.as_deref(), L::HOUSENUMBER),
+        check_text_opt("city", params.city.as_deref(), L::STRUCTURED_FIELD),
+        check_text_opt("state", params.state.as_deref(), L::STRUCTURED_FIELD),
+        check_text_opt("country_code", params.country_code.as_deref(), L::COUNTRY_CODE_LIST),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    {
+        return r;
+    }
     let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
         Ok(r) => r,
         Err(resp) => return resp,
@@ -1422,6 +1486,13 @@ async fn main() {
         })
         .on_failure(DefaultOnFailure::new().level(Level::WARN));
 
+    // Global request-body cap. Geocoder endpoints are GET-only today
+    // (URL-bounded by upstream LBs to ~8 KB) but the cap is belt-and-
+    // braces against future POSTs and against any axum-internal path
+    // that might read a body. 64 KiB is generous — every per-field
+    // text cap in `query_server::limits` fits comfortably under it.
+    let body_limit = axum::extract::DefaultBodyLimit::max(64 * 1024);
+
     #[cfg(feature = "forward")]
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -1435,6 +1506,7 @@ async fn main() {
         .route("/autocomplete", get(autocomplete))
         .route("/geocode/ip", get(ip_geocode))
         .route("/h3", get(h3_endpoint))
+        .layer(body_limit)
         .layer(trace_layer.clone())
         .layer(axum::Extension(index.clone()))
         .layer(axum::Extension(forward_idx.clone()))
@@ -1454,6 +1526,7 @@ async fn main() {
         .route("/autocomplete", get(autocomplete))
         .route("/geocode/ip", get(ip_geocode))
         .route("/h3", get(h3_endpoint))
+        .layer(body_limit)
         .layer(trace_layer.clone())
         .layer(axum::Extension(index.clone()))
         .layer(axum::Extension(autocomplete_idx.clone()))
