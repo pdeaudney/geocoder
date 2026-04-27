@@ -242,6 +242,8 @@ The server is unauthenticated — every endpoint is open to any caller that can 
 
 Per-field input length caps and the global request-body limit (applied to both REST and gRPC) are documented in [docs/API_limits.md](docs/API_limits.md).
 
+Cross-script search behaviour (Cyrillic / Han / Arabic / Greek / Hebrew / Thai / Devanagari → Latin via ICU transliteration) is described in [docs/MULTILINGUAL_SEARCH.md](docs/MULTILINGUAL_SEARCH.md).
+
 ### GET /reverse
 
 Coordinate → address.
