@@ -399,8 +399,9 @@ impl Autocomplete {
 }
 
 /// Normalise a user-typed prefix the same way the builder did: lowercase,
-/// ASCII fold, strip non-alphanumeric. Short circuit on empty so callers
-/// don't spam the FST with a zero-length prefix (which would match everything).
+/// ASCII fold, strip non-alphanumeric, then collapse Saint/Mt/Ft place
+/// abbreviations. Short circuit on empty so callers don't spam the FST
+/// with a zero-length prefix (which would match everything).
 pub fn normalise_prefix(q: &str) -> String {
     let mut out = String::with_capacity(q.len());
     for ch in q.chars() {
@@ -412,8 +413,50 @@ pub fn normalise_prefix(q: &str) -> String {
             }
         }
     }
-    let trimmed = out.trim();
-    trimmed.to_owned()
+    fold_place_abbreviations(out.trim())
+}
+
+/// Place-name abbreviation collapse. Inputs are expected to already be
+/// lowercase, ASCII-folded, single-space-separated tokens (i.e. the
+/// output of `normalise_prefix` / `normalise_fst_key` minus this step).
+///
+/// Whole-word, position-aware:
+///   saint / sainte / st / ste  →  st
+///   mount / mt                 →  mt
+///   fort / ft                  →  ft
+///
+/// Only the LEADING tokens of a multi-token phrase are folded — never
+/// the trailing token. That preserves the convention in OSM where `St`
+/// at the end of a street name means "Street" (e.g. `Main St`) and
+/// `St` at the start means "Saint" (e.g. `St Kilda`). Single-token
+/// inputs are returned unchanged.
+///
+/// MUST be applied identically at FST build, FST query, Tantivy build,
+/// and Tantivy query — see `tests/abbrev_symmetry.rs`.
+pub fn fold_place_abbreviations(s: &str) -> String {
+    let parts: Vec<&str> = s.split(' ').filter(|t| !t.is_empty()).collect();
+    if parts.len() < 2 {
+        return s.to_owned();
+    }
+    let last = parts.len() - 1;
+    let mut out = String::with_capacity(s.len());
+    for (i, tok) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let mapped = if i == last {
+            *tok
+        } else {
+            match *tok {
+                "saint" | "sainte" | "st" | "ste" => "st",
+                "mount" | "mt" => "mt",
+                "fort" | "ft" => "ft",
+                _ => *tok,
+            }
+        };
+        out.push_str(mapped);
+    }
+    out
 }
 
 fn ascii_fold_char(ch: char) -> String {
@@ -723,8 +766,39 @@ mod tests {
     #[test]
     fn normalises_prefixes() {
         assert_eq!(normalise_prefix("Éliz"), "eliz");
+        // "St" stays literal as a trailing token (Street, not Saint).
         assert_eq!(normalise_prefix("  MAIN  St  "), "main st");
         assert_eq!(normalise_prefix(""), "");
+    }
+
+    #[test]
+    fn collapses_saint_mount_fort_when_leading() {
+        // Saint/St/Sainte/Ste → st when leading.
+        assert_eq!(normalise_prefix("Saint Kilda"), "st kilda");
+        assert_eq!(normalise_prefix("St Kilda"), "st kilda");
+        assert_eq!(normalise_prefix("Sainte-Foy"), "st foy");
+        assert_eq!(normalise_prefix("Ste-Foy"), "st foy");
+
+        // Mount/Mt → mt when leading.
+        assert_eq!(normalise_prefix("Mount Pleasant"), "mt pleasant");
+        assert_eq!(normalise_prefix("Mt Pleasant"), "mt pleasant");
+
+        // Fort/Ft → ft when leading.
+        assert_eq!(normalise_prefix("Fort Worth"), "ft worth");
+        assert_eq!(normalise_prefix("Ft Worth"), "ft worth");
+
+        // Trailing `St`/`Mt`/`Ft` are NOT collapsed (they're suffixes,
+        // not Saint-style prefixes).
+        assert_eq!(normalise_prefix("Hampton St"), "hampton st");
+        assert_eq!(normalise_prefix("Camp Mt"), "camp mt");
+
+        // Single-token queries are returned unchanged (no position to apply).
+        assert_eq!(normalise_prefix("Saint"), "saint");
+        assert_eq!(normalise_prefix("Mt"), "mt");
+
+        // Three+ tokens: the leading saint still collapses.
+        assert_eq!(normalise_prefix("Saint James Court"), "st james court");
+        assert_eq!(normalise_prefix("St James Court"), "st james court");
     }
 
     #[test]

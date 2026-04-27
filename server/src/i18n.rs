@@ -82,6 +82,26 @@ impl I18nNames {
             .ok()
             .map(|idx| records[idx].name_id)
     }
+
+    /// All alternate-language names for one entity. Returns
+    /// `(lang_code, name_id)` tuples. The on-disk array is sorted by
+    /// `(entity_type, entity_id, lang_code)`, so we partition_point
+    /// to the run's start and walk while `(entity_type, entity_id)`
+    /// stays constant. O(log N + k) where k is the per-entity count.
+    pub fn alternates_for(
+        &self,
+        entity_type: u8,
+        entity_id: u32,
+    ) -> impl Iterator<Item = (u16, u32)> + '_ {
+        let records = self.records();
+        let start = records.partition_point(|rec| {
+            (rec.entity_type, rec.entity_id) < (entity_type, entity_id)
+        });
+        records[start..]
+            .iter()
+            .take_while(move |rec| rec.entity_type == entity_type && rec.entity_id == entity_id)
+            .map(|rec| (rec.lang_code, rec.name_id))
+    }
 }
 
 /// Parse a user-supplied language tag like `"en"`, `"FR"`, `"en-US"` into
