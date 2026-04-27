@@ -150,15 +150,75 @@ checks the response payloads:
     --label gb10-planet-accuracy
 ```
 
-### First accuracy run results
+### Accuracy run results (500 rows × 3 scenarios = 1500 cases)
 
-500 rows × 3 scenarios = 1500 cases on the GB10 planet index:
+| Scenario | Pre-fix | Post-fix | Δ |
+|---|---:|---:|---:|
+| `reverse` | 98.80 % | **98.80 %** | unchanged (border-precision noise, structural) |
+| `search` | 79.00 % | **81.00 %** | +2.00 pp |
+| `autocomplete` | 94.80 % | **99.00 %** | **+4.20 pp** (diacritic-fold fix) |
+| **overall** | 90.87 % | **92.93 %** | **passes 0.90 threshold** |
 
-| Scenario | Pass rate | Failure pattern |
-|---|---:|---|
-| `reverse` | 494 / 500 (**98.8 %**) | All 6 failures within ~5 km of national borders (CA/US, NL/BE, DE/LU, DE/PL, FR/CH). Admin polygon edge-precision noise. |
-| `search` | 395 / 500 (**79.0 %**) — pre-fixes; **~92 %** post-fixes | Two distinct issues: (a) duplicate-name cities (Münster, Olathe, Mount Pleasant exist in many places of the same country — geocoder ranks a different valid member first), (b) Geonames neighborhood entries (Notre-Dame-de-Grâce, Saint Kilda, Salamanca-the-Madrid-neighborhood) that aren't OSM place points. |
-| `autocomplete` | 474 / 500 (**94.8 %**) — pre-fix; **~99 %** post-fix | Every failure was a diacritic-prefix mismatch (würs/baró/gröben/lodèv). **Bug in the comparator's normalisation, not the geocoder** — fixed in the same commit as this snapshot. |
+Both runs measured 2026-04-27 against the GB10 planet index. The
+"fix" was the diacritic-normalisation + top-K-walk commit
+(`df0e127`).
+
+### Per-country breakdown (post-fix)
+
+| Country | reverse | search | autocomplete |
+|---|---:|---:|---:|
+| AU | 100.0 % | 87.0 % | 100.0 % |
+| CA | 98.6 % | 76.6 % | 96.6 % |
+| DE | 97.1 % | 82.8 % | 100.0 % |
+| ES | 100.0 % | 77.8 % | 95.9 % |
+| FR | 98.3 % | 77.6 % | 100.0 % |
+| GB | 100.0 % | 96.8 % | 100.0 % |
+| NL | 96.8 % | 96.2 % | 100.0 % |
+| US | 100.0 % | 48.3 % | 100.0 % |
+
+### Why search top-K walking didn't fully fix the duplicate-name issue
+
+Every search "wrong city" failure post-fix reads
+`(top: <N> km, considered 1)`. The geocoder returns **one** result
+for these queries even though `limit=10` was requested. That's the
+FST fast-path: when the query exactly matches a normalised place
+name, the FST returns the single highest-ranked entry directly,
+bypassing the Tantivy multi-result path. So walking the 10-result
+array doesn't help when the array has length 1.
+
+This isn't a geocoder regression — the API for `/search?q=Münster`
+is "give me the best Münster, not all of them," and that's working.
+It does mean **same-name disambiguation can only be fixed at the
+fixture level**, not in the assertion. Two follow-up paths:
+
+1. Filter the fixture to drop rows whose name appears more than once
+   in Geonames within the same country. Fixture shrinks ~10–15 %,
+   expected search pass rate ~95 %. ~5 LOC in the build-fixtures.sh
+   Python emitter.
+2. Augment the search query with admin1 (state/province) from
+   Geonames so duplicate names disambiguate via context:
+   `q=Münster Nordrhein-Westfalen&country_code=de`. More realistic
+   query shape, more work to wire (needs the `admin1Codes.txt` join
+   in the fixture builder).
+
+Path 1 is the cheap fix; path 2 captures the "structured query"
+production traffic shape better. Either or both is reasonable
+follow-up work.
+
+### Real geocoder gap surfaced (out of scope here)
+
+`The Hague` (NL), `Saint Kilda` (AU), and similar English-language
+queries for places OSM stores under their local names returned
+zero results. OSM has *Den Haag*, FST canonicalises to `den haag`,
+English `the hague` doesn't match. The i18n layer (`name:en` tags
+via `--lang`) is wired for `/reverse` but the forward-search FST
+builder doesn't fold endonyms + exonyms into the same key. Affects
+real users typing English city names for European/Asian cities
+(Cologne/Köln, Munich/München, Vienna/Wien, Florence/Firenze).
+
+Tracked as an open follow-up, not chased in this snapshot's commit
+because it touches the FST build pipeline rather than the
+load-test infrastructure.
 
 ### Per-country breakdown (first run)
 
