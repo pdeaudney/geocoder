@@ -127,37 +127,7 @@ cargo build --release --manifest-path server/Cargo.toml --bin fetch-data
 ./target/release/fetch-data --region planet --wof
 ```
 
-Full CLI surface (`./target/release/fetch-data --help`):
-
-```text
-Acquire OSM PBF + WoF + OpenAddresses + MaxMind + G-NAF for the geocoder build pipeline.
-
-Usage: fetch-data [OPTIONS]
-
-Options:
-      --data-dir <DATA_DIR>            Output root. Layout: <dir>/pbf/, <dir>/openaddresses/, etc
-                                       [env: DATA_DIR=] [default: ./data]
-      --region <REGION>                OSM region preset (see the region table below)
-      --wof                            Fetch WhosOnFirst admin SQLite
-      --wof-countries <WOF_COUNTRIES>  WoF scope: "planet" (default), "none", or
-                                       space-separated alpha-2 codes
-                                       [env: WOF_COUNTRIES=] [default: planet]
-      --openaddresses                  Fetch OpenAddresses (requires AWS creds for
-                                       s3://v2.openaddresses.io)
-      --oa-sources <OA_SOURCES>        OA source filter — "all" (default) or
-                                       space-/comma-separated alpha-2 codes
-                                       [env: OA_SOURCES=] [default: all]
-      --maxmind                        Fetch MaxMind GeoLite2-City (requires MAXMIND_LICENSE_KEY)
-      --gnaf                           Fetch G-NAF (requires GNAF_ARCHIVE_URL)
-      --parallel <PARALLEL>            Concurrent download streams (e.g. all-continents)
-                                       [env: FETCH_PARALLEL=] [default: 4]
-      --force                          Re-download even if local data appears fresh
-      --no-verify-md5                  Skip MD5 verification against upstream sidecar
-      --no-resume                      Disable resuming from <dest>.partial files
-      --quiet                          No terminal progress bars (logs are unaffected)
-  -h, --help                           Print help (see more with '--help')
-  -V, --version                        Print version
-```
+Run `./target/release/fetch-data --help` for the full flag set (region presets, WoF / OpenAddresses / MaxMind / G-NAF toggles, parallelism, force/resume, MD5 verification).
 
 Each PBF lands at `data/pbf/<region>-latest.osm.pbf` with three
 sidecars next to it:

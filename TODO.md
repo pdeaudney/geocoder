@@ -54,30 +54,6 @@ tag exists.
 - **Re-evaluate when:** a deployment specifically targets a
   region (CIS, EA) where the OSM `name:en` gap is large.
 
-### Arrondissement / numbered-suffix neighborhoods
-
-`Marseille 06`, `Paris 12 Reuilly` (FR arrondissements with
-suffixed numbers); `la Nova Esquerra de l'Eixample` (Geonames
-neighborhood entries that aren't OSM places). These show up as
-fixture-quality issues in the bench-accuracy sweep, not as real
-geocoder bugs.
-
-- **Why it's deferred:** OSM modeling concern, not normalisation.
-- **Re-evaluate when:** the fixture filter for the bench-accuracy
-  corpus is overhauled (next bullet).
-
-### Bench-fixture filter for non-OSM Geonames entries
-
-The current Geonames fixture (`scripts/bench/fixtures/`) includes
-neighborhoods that don't exist as OSM places, dragging the
-bench-accuracy pass rate down for non-bug reasons. Tighten the
-`build-fixtures.sh` filter to drop fclass=PPL placeholders and
-sub-suburb neighborhoods.
-
-- **Owner cost:** ~half a day. Mostly fixture inspection.
-- **Re-evaluate when:** the next planet rebuild — easier to
-  validate the new pass-rate baseline if the fixture is clean.
-
 ## Future evaluation
 
 ### Embedding / vector-based search for geocoding
