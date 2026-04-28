@@ -117,15 +117,46 @@ url = "2"
 # decoder priority chain in the WoF fetch path). 1.5 KB lib, well
 # tested across platforms; cheaper than reimplementing PATH split.
 which = "7"
+# ICU CLDR transliteration via system libicu (FFI). Used by the
+# build pipeline ONLY — `build-forward-index` and
+# `build-autocomplete-fst` emit Latin transliterations of every
+# non-Latin name (Cyrillic, Greek, Han, Kana, Arabic, Hebrew, Thai,
+# Devanagari, Persian, …) into the index files. The runtime
+# query-server does not link libicu — the transliterated forms are
+# baked into the on-disk index and read back as plain UTF-8.
+#
+# Why not ICU4X (`icu_experimental`): ICU4X 0.5 ships baked CLDR
+# data for only Han/Kana/Ethiopic plus a handful of per-language
+# Cyrillic BGN scripts. Russian/Greek/Arabic/Thai/Devanagari Latin
+# transliterators are not bundled — the very scripts our
+# multilingual users need. ICU4X requires `datagen` to compile
+# additional rules, which adds significant build complexity for
+# parity with libicu.
+#
+# Build-host install: `apt install libicu-dev` (Debian/Ubuntu),
+# `brew install icu4c` (macOS — set PKG_CONFIG_PATH to the formula
+# pkgconfig dir). See README "Build from source" for details.
+rust_icu_utrans = { version = "5", optional = true }
+rust_icu_ustring = { version = "5", optional = true }
+rust_icu_common = { version = "5", optional = true }
+rust_icu_sys = { version = "5", optional = true }
 
 [features]
-default = ["forward", "grpc"]
+default = ["forward", "grpc", "translit"]
 # `forward` wires in tantivy for the /search endpoint. Drop it for a lean
 # reverse-only build.
 forward = ["dep:tantivy"]
 # `grpc` starts a gRPC server alongside the REST API on a separate port.
 # Messages mirror the REST JSON shape; see server/proto/geocoder.proto.
 grpc = ["dep:tonic", "dep:prost"]
+# `translit` enables ICU-based transliteration in the build
+# pipeline (build-forward-index, build-autocomplete-fst). Default-on
+# so the index picks up Cyrillic / CJK / Arabic / Greek / Hebrew /
+# Thai / Devanagari Latin transliterations. Operators serving an
+# exclusively-Latin corpus can build the runtime query-server
+# without this feature; the build binaries gate it via
+# required-features.
+translit = ["dep:rust_icu_utrans", "dep:rust_icu_ustring", "dep:rust_icu_common", "dep:rust_icu_sys"]
 
 [build-dependencies]
 tonic-build = "0.12"
@@ -157,7 +188,7 @@ path = "src/main.rs"
 [[bin]]
 name = "build-forward-index"
 path = "src/bin/build_forward_index.rs"
-required-features = ["forward"]
+required-features = ["forward", "translit"]
 
 [[bin]]
 name = "build-postcode-lookup"
@@ -174,6 +205,7 @@ path = "src/bin/build_openaddresses_index.rs"
 [[bin]]
 name = "build-autocomplete-fst"
 path = "src/bin/build_autocomplete_fst.rs"
+required-features = ["translit"]
 
 [[bin]]
 name = "fetch-data"

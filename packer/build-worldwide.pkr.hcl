@@ -218,6 +218,19 @@ build {
       "    protobuf-compiler \\",
       "    zlib1g-dev libbz2-dev libexpat1-dev liblz4-dev \\",
       "    libdeflate-dev \\",
+      // libicu-dev + clang + libclang-dev: required by the Rust
+      // crate's `translit` feature (default-on) for ICU-based
+      // Cyrillic / Han / Arabic / Greek / Hebrew / Thai /
+      // Devanagari → Latin transliteration in the build pipeline.
+      // libicu-dev provides the headers and shared lib; clang +
+      // libclang-dev provide the bindgen toolchain rust_icu_sys
+      // uses to generate Rust bindings against the local libicu.
+      // Without clang, bindgen fails with "'stddef.h' file not
+      // found" because it can't find clang's own builtin
+      // headers. Adds ~150 MB to the AMI total; the resulting
+      // index files are libicu-free, so the serving AMI doesn't
+      // need any of it.
+      "    libicu-dev pkg-config clang libclang-dev \\",
       "    git curl ca-certificates \\",
       "    awscli \\",
       "    bzip2 unzip \\",

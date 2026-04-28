@@ -66,21 +66,69 @@ borders are simplified at varying detail by region.
 - **Re-evaluate when:** a customer specifically needs sub-km
   border-side accuracy in a region where OSM is sparse.
 
-### Generalised transliteration (Cyrillic, CJK, Arabic)
+### CJK word segmentation via `icu_segmenter`
 
-`Belgrade`/`Београд`, `Tokyo`/`東京`, `Cairo`/`القاهرة`. The current
-fix handles ASCII-Latin endonyms via OSM `name:xx` tags; non-Latin
-scripts only cross-resolve when an explicit `name:en`/`name:de`
-tag exists.
+Compound CJK queries like `渋谷駅` (Shibuya Station), `東京タワー`
+(Tokyo Tower), `北京大学` (Peking University) survive the existing
+tokenizer as ONE multi-byte token, transliterate to one Latin
+token (`shibuyaeki`), and don't match docs indexed with the
+component tokens separately.
 
-- **Workaround today:** OSM `name:en` coverage is good for major
-  cities; minor places drop out.
-- **Why it's deferred:** ICU transliteration is heavyweight to
-  embed and the cost-benefit is a rounding error at planet scale
-  (most non-Latin places that real users query DO have a `name:en`
-  tag).
-- **Re-evaluate when:** a deployment specifically targets a
-  region (CIS, EA) where the OSM `name:en` gap is large.
+- **Why it's needed.** CJK has no inter-word spaces. Single-place
+  CJK queries (`東京`, `北京`, `銀座`) work fine because the canonical
+  OSM name is also one CJK token; compound queries break.
+- **Why symmetric query-side change is required.** Unlike translit,
+  CJK segmentation can't be build-time-only. Segmenting `東京駅` at
+  build time means the index has `東京` + `駅` separately; a query
+  for `東京駅` still arrives as one token at runtime. The query path
+  MUST tokenise the same way the build path does.
+- **Library.** `icu_segmenter` (ICU4X, pure Rust). WordSegmenter
+  handles CJK + Thai + Khmer + Lao + Myanmar uniformly.
+- **Estimated scope.** ~3-5 days. Insertion points: shared
+  segmenter helper; call from build-time `tantivy_doc` /
+  `Candidate.aliases` BEFORE transliteration; call from runtime
+  `tokenize_user_input` / `normalise_prefix`. New symmetry test
+  mirroring `abbrev_symmetry.rs`. Plus a Tantivy custom token
+  filter on the `name`/`suburb`/`state` fields.
+- **Re-evaluate trigger.** Post-PR planet bench-accuracy data
+  shows multi-word CJK queries as ≥10 % of non-English-native
+  misses. If CJK traffic is dominated by single-place queries,
+  this never fires.
+
+### Hand-curated exonym table
+
+`Moscow`/`Cologne`/`Vienna`/`Khartoum` are translated names, not
+transliterations. ICU produces `al-Kharṭūm` from `الخرطوم`, never
+`Khartoum`. OSM `name:en` covers these for major cities, but
+patchy on smaller places.
+
+- **Scope.** ~200 entries planet-wide, high-leverage. Build-time
+  expansion same shape as translit.
+- **Re-evaluate when:** post-PR data shows English exonym misses
+  dominating CIS/EA non-Latin failures.
+
+### libicu version recorded in index manifest
+
+ICU upgrades may change Latin transliterations for some inputs.
+Today operators rebuild when they upgrade libicu, but there's no
+detection — the runtime query-server doesn't link libicu so it
+can't compare versions.
+
+- **Scope.** ~half day. Add `manifest.json` writer at index root
+  during build (already proposed for a separate cleanup); include
+  `libicu_version`, `transliteration_schemes`, `builder_git_sha`.
+  Optional `Forward::open` warning on suspected staleness based
+  on file mtime + a sentinel.
+- **Why deferred:** runtime is libicu-free, so cross-version
+  mismatch is a recall regression (stale Latin forms), not a
+  correctness issue. Operator-driven rebuild policy works without it.
+
+### Pinyin Wade-Giles scheme (Taiwan)
+
+Currently we only emit modern Pinyin (`Han-Latin` + `Han-Latin/Names`).
+Taiwan-targeted deployments may need Wade-Giles too (`Han-Latin/Wadegiles`).
+~few extra lines in `TRANSLITERATOR_DEFS`. Defer until a Taiwan
+deployment specifically asks.
 
 ## Future evaluation
 
@@ -107,6 +155,8 @@ Links to the snapshot docs that explain the fixes already shipped
 — useful when triaging a regression that overlaps:
 
 - `docs/performance/forward-search-i18n-2026-04-27.md` — i18n
-  expansion + Saint/Mount/Fort fold (this PR).
+  expansion + Saint/Mount/Fort fold (PR #11).
+- `docs/performance/forward-search-translit-2026-04-29.md` — ICU
+  transliteration for non-Latin scripts (this PR).
 - `docs/performance/load-test-planet-2026-04-27.md` — planet
   bench-accuracy baseline that surfaced the items above.

@@ -16,8 +16,23 @@ RUN mkdir build && cd build && cmake ../builder && make -j$(nproc)
 # Stage 2: Build Rust server
 FROM rust:bookworm AS builder-rust
 
+# libicu-dev is required by the `translit` feature (default-on) for
+# building build-forward-index / build-autocomplete-fst with
+# Cyrillic / Han / Arabic / Greek / Hebrew / Thai / Devanagari Latin
+# transliteration. The runtime query-server doesn't link libicu —
+# but the build binaries do, and they're shipped into the runtime
+# image so the `auto` entrypoint can rebuild the index.
+#
+# clang + libclang-dev: rust_icu_sys uses bindgen to generate
+# Rust bindings against whatever libicu is installed. bindgen
+# needs libclang at compile time (NOT runtime) to parse the ICU
+# C headers. Without these, bindgen fails with
+# "'stddef.h' file not found" because clang can't locate its own
+# builtin headers' resource directory.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake protobuf-compiler \
+    libicu-dev pkg-config \
+    clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -34,10 +49,18 @@ RUN cargo build --release --manifest-path server/Cargo.toml \
 # Stage 3: Runtime
 FROM debian:bookworm-slim
 
+# libicu72 is the runtime shared library for libicu (matches the
+# libicu-dev version on Bookworm). Required because the build
+# binaries (build-forward-index, build-autocomplete-fst) shipped
+# into this image link libicu for translit support. The
+# query-server itself doesn't depend on libicu — operators
+# building a serve-only image can fork this Dockerfile to drop
+# the build binaries and the libicu runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libs2-0 \
     zlib1g libbz2-1.0 libexpat1 liblz4-1 \
     libdeflate0 \
+    libicu72 \
     curl ca-certificates \
     lbzip2 \
     unzip \

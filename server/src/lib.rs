@@ -28,6 +28,8 @@ pub mod openaddresses;
 pub mod postcode;
 pub mod shadow;
 pub mod telemetry;
+#[cfg(feature = "translit")]
+pub mod translit;
 pub mod wof_countries;
 
 #[cfg(feature = "grpc")]
