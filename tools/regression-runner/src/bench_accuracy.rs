@@ -391,9 +391,20 @@ fn run_search(
 
     for row in rows.iter().take(take) {
         let q_enc = urlencode(&row.q);
+        // Pass the fixture's lat_hint/lng_hint as bias_lat/bias_lng so
+        // BM25 + distance tiebreak picks the geographically-correct
+        // same-name match (Carrollton GA vs TX, Aurora CO vs IL,
+        // Cornwall ON vs UK, Münster NW vs LU). Without this, the
+        // bench-accuracy tool measures unbiased BM25 ranking — which
+        // is correct *recall* but not the product-realistic answer
+        // when callers in production pass a user location. See
+        // docs/MULTILINGUAL_SEARCH.md and README /search params for
+        // the bias_lat/bias_lng spec.
         let url = format!(
-            "{base_url}/search?q={q_enc}&country_code={cc}&limit=10",
+            "{base_url}/search?q={q_enc}&country_code={cc}&bias_lat={lat}&bias_lng={lng}&limit=10",
             cc = row.country_code,
+            lat = row.lat_hint,
+            lng = row.lng_hint,
         );
         let cs = summary
             .by_country

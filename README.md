@@ -294,7 +294,7 @@ Parameters:
 | `country_code` | Single ISO 3166-1 alpha-2, or a comma-separated list (e.g. `US,CA,MX`). No cap on list length, but each code spawns one per-country search — keep it short (≤5) for sensible latency. |
 | `kind` | `place` or `street` (filter) |
 | `limit` | Integer 1–50 (default 10). Out-of-range values are silently clamped into this window. |
-| `bias_lat`, `bias_lng` | Optional proximity hint. When supplied, hits are re-ranked so geographically-close matches outrank far ones at similar BM25 scores. Both must be supplied together. Skips the FST fast-path. See [docs/SDK_PATTERNS.md](docs/SDK_PATTERNS.md) for client-side recipes. |
+| `bias_lat`, `bias_lng` | Optional **soft proximity re-rank**. WGS84 coord; both required together; range `[-90,90]` × `[-180,180]`. Hits are re-ranked by `bm25 − α·ln(distance_km + 1)` so geographically-close matches outrank far ones **at similar BM25 scores**. Not a filter: `Tokyo` from a London bias still returns Tokyo (BM25 dominates). Helps with same-name disambiguation (`Cambridge`, `Aurora`, `Münster`, `St Kilda`). Skips the FST fast-path. See [docs/SDK_PATTERNS.md](docs/SDK_PATTERNS.md) for client-side recipes. |
 | `h3_res` | Comma-separated H3 resolutions (0–15, max 4); returns an `h3` map per hit. |
 
 Response includes each hit's `confidence` label (`exact`, `interpolated`, `fallback`) and a `source` field when served from the FST fast-path.
@@ -314,7 +314,7 @@ GET /search?q=Cambridge&bias_lat=42.36&bias_lng=-71.06
 GET /search?q=Sydney&bias_lat=51.51&bias_lng=-0.13
 ```
 
-The bias signal is a soft tiebreak (BM25 dominates when one match is clearly better), not a hard filter — searching `Tokyo` from London still finds Tokyo. See [docs/SDK_PATTERNS.md](docs/SDK_PATTERNS.md) for browser / mobile / backend recipes that source the coord from the right place per platform (browser Geolocation API, mobile GPS, cached profile, IP-to-coord chain through `/geocode/ip`).
+The bias signal is a soft tiebreak (BM25 dominates when one match is clearly better), not a hard filter — searching `Tokyo` from London still finds Tokyo. For the full bias model (scoring formula, when it activates, what it doesn't do), see [docs/QUERY_BIAS.md](docs/QUERY_BIAS.md). For client-side patterns to source the coord per platform (browser Geolocation API, mobile GPS, cached profile, IP-to-coord chain through `/geocode/ip`), see [docs/SDK_PATTERNS.md](docs/SDK_PATTERNS.md).
 
 Features:
 
