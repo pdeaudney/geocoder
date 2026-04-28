@@ -33,9 +33,6 @@ if [ ! -x "$SERVER_BIN" ] || [ ! -x "$RUNNER_BIN" ]; then
     $CARGO build --release -p regression-runner --bin regression-runner
 fi
 
-echo "==> seeding regression auth token into $INDEX_DIR/geocoder.json"
-./scripts/seed-test-token.sh "$INDEX_DIR"
-
 BIND="127.0.0.1:$PORT"
 LOG="$(mktemp -t worldwide-server.XXXXXX.log)"
 echo "==> starting query-server on $BIND (log: $LOG)"
