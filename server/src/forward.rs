@@ -718,13 +718,23 @@ pub struct BiasCoord {
 
 impl BiasCoord {
     /// Tuning constant for `bm25 - α * log(distance_km + 1)`. Picked
-    /// so ~100 km of distance counterbalances roughly 0.5 BM25 units
+    /// so ~100 km of distance counterbalances roughly 1 BM25 unit
     /// (typical BM25 score spread for a same-name multi-doc query is
     /// 1–3 units), enough to flip the ordering between same-name
     /// candidates without overriding obviously-better text matches.
     /// Empirically tuned in `tests/search_bias.rs`; raise the value
     /// to bias more aggressively, lower to soften.
-    pub const DISTANCE_ALPHA: f64 = 0.10;
+    ///
+    /// History: started at 0.10 (validated against AU St Kilda + UK
+    /// Cambridge cases). Bumped to 0.20 after the planet bench-
+    /// accuracy run with bias hints showed Aurora US, Montgomery US,
+    /// Cornwall CA, Saint-Eustache CA, Greensboro US still picking
+    /// the wrong same-name member. At α=0.10 the penalty delta
+    /// between a 20 km hit and a 900 km hit is ~0.38 BM25 units,
+    /// which the wrong-name BM25 advantage routinely exceeded. At
+    /// α=0.20 the delta doubles to ~0.76, giving the bias enough
+    /// headroom to flip those cases.
+    pub const DISTANCE_ALPHA: f64 = 0.20;
 
     /// Validate range. Returns the coord on success, the offending
     /// field name on failure so the caller can build a 400/Status.
@@ -1250,11 +1260,32 @@ impl Forward {
 
         let boolean = BooleanQuery::new(clauses);
         let limit = q.limit.max(1).min(50);
-        // Over-fetch so we can re-rank by (bm25 × rank-prominence) without
-        // losing interesting candidates that a pure BM25 sort would miss.
-        // 3× the requested limit keeps this cheap while giving the
-        // prominence-boost enough material to work with.
-        let oversample = (limit * 3).min(150);
+        // Over-fetch so we can re-rank without losing interesting
+        // candidates that a pure BM25 sort would miss. Two regimes:
+        //
+        //   No bias: re-rank only applies the prominence boost
+        //     (multiplicative; rarely changes top-N membership). 3×
+        //     the requested limit (cap 150) is plenty.
+        //
+        //   With bias: re-rank applies a distance penalty that CAN
+        //     pull a far-by-BM25 doc above closer-but-different
+        //     same-name members. Same-name clusters routinely have
+        //     10-30+ same-token docs in a single country (`Aurora`
+        //     in the US has Aurora CO/IL/IN/IA/MO/NE/NY/NC/OH/OR/TX/
+        //     UT plus streets and parks; same shape for `Cornwall`,
+        //     `Montgomery`, `Greensboro`, `Springfield`). If the
+        //     RIGHT same-name member sits at BM25 rank 30+, a
+        //     30-candidate pool excludes it before bias runs and
+        //     re-ranking can't recover it. Bump the pool to 500
+        //     (15× headroom) so bias has enough material to flip
+        //     the obvious cases. Cost is one extra Tantivy query
+        //     pass over a larger TopDocs heap — adds <1 ms at
+        //     planet scale, paid only on bias-enabled queries.
+        let oversample = if q.bias.is_some() {
+            (limit * 30).min(500)
+        } else {
+            (limit * 3).min(150)
+        };
         let top = searcher
             .search(&boolean, &TopDocs::with_limit(oversample))
             .map_err(|e| format!("search: {e}"))?;
