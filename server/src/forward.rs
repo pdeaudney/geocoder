@@ -1260,11 +1260,32 @@ impl Forward {
 
         let boolean = BooleanQuery::new(clauses);
         let limit = q.limit.max(1).min(50);
-        // Over-fetch so we can re-rank by (bm25 × rank-prominence) without
-        // losing interesting candidates that a pure BM25 sort would miss.
-        // 3× the requested limit keeps this cheap while giving the
-        // prominence-boost enough material to work with.
-        let oversample = (limit * 3).min(150);
+        // Over-fetch so we can re-rank without losing interesting
+        // candidates that a pure BM25 sort would miss. Two regimes:
+        //
+        //   No bias: re-rank only applies the prominence boost
+        //     (multiplicative; rarely changes top-N membership). 3×
+        //     the requested limit (cap 150) is plenty.
+        //
+        //   With bias: re-rank applies a distance penalty that CAN
+        //     pull a far-by-BM25 doc above closer-but-different
+        //     same-name members. Same-name clusters routinely have
+        //     10-30+ same-token docs in a single country (`Aurora`
+        //     in the US has Aurora CO/IL/IN/IA/MO/NE/NY/NC/OH/OR/TX/
+        //     UT plus streets and parks; same shape for `Cornwall`,
+        //     `Montgomery`, `Greensboro`, `Springfield`). If the
+        //     RIGHT same-name member sits at BM25 rank 30+, a
+        //     30-candidate pool excludes it before bias runs and
+        //     re-ranking can't recover it. Bump the pool to 500
+        //     (15× headroom) so bias has enough material to flip
+        //     the obvious cases. Cost is one extra Tantivy query
+        //     pass over a larger TopDocs heap — adds <1 ms at
+        //     planet scale, paid only on bias-enabled queries.
+        let oversample = if q.bias.is_some() {
+            (limit * 30).min(500)
+        } else {
+            (limit * 3).min(150)
+        };
         let top = searcher
             .search(&boolean, &TopDocs::with_limit(oversample))
             .map_err(|e| format!("search: {e}"))?;
