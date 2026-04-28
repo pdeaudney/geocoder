@@ -718,13 +718,23 @@ pub struct BiasCoord {
 
 impl BiasCoord {
     /// Tuning constant for `bm25 - α * log(distance_km + 1)`. Picked
-    /// so ~100 km of distance counterbalances roughly 0.5 BM25 units
+    /// so ~100 km of distance counterbalances roughly 1 BM25 unit
     /// (typical BM25 score spread for a same-name multi-doc query is
     /// 1–3 units), enough to flip the ordering between same-name
     /// candidates without overriding obviously-better text matches.
     /// Empirically tuned in `tests/search_bias.rs`; raise the value
     /// to bias more aggressively, lower to soften.
-    pub const DISTANCE_ALPHA: f64 = 0.10;
+    ///
+    /// History: started at 0.10 (validated against AU St Kilda + UK
+    /// Cambridge cases). Bumped to 0.20 after the planet bench-
+    /// accuracy run with bias hints showed Aurora US, Montgomery US,
+    /// Cornwall CA, Saint-Eustache CA, Greensboro US still picking
+    /// the wrong same-name member. At α=0.10 the penalty delta
+    /// between a 20 km hit and a 900 km hit is ~0.38 BM25 units,
+    /// which the wrong-name BM25 advantage routinely exceeded. At
+    /// α=0.20 the delta doubles to ~0.76, giving the bias enough
+    /// headroom to flip those cases.
+    pub const DISTANCE_ALPHA: f64 = 0.20;
 
     /// Validate range. Returns the coord on success, the offending
     /// field name on failure so the caller can build a 400/Status.

@@ -44,18 +44,19 @@ With bias on, the hint coord pushes the locally-correct match to the top.
 score = bm25 − α · ln(distance_km + 1)
 ```
 
-with `α = 0.10` (a constant in [`server/src/forward.rs::BiasCoord::DISTANCE_ALPHA`](../server/src/forward.rs)).
+with `α = 0.20` (a constant in [`server/src/forward.rs::BiasCoord::DISTANCE_ALPHA`](../server/src/forward.rs)).
 
 Why `ln` and not linear distance:
 
 - Distance from the user is rarely linear in importance. A 1 km miss vs a 10 km miss matters more than a 100 km miss vs a 1000 km miss; both far cases are "definitely not local".
-- `ln(distance_km + 1)` gives ~0.46 penalty at 100 km, ~0.92 at 10 000 km — bounded growth, so a clearly-better text match always wins.
+- `ln(distance_km + 1)` gives ~0.92 penalty at 100 km and ~1.84 at 10 000 km under α=0.20 — bounded growth, so a clearly-better text match still wins on global queries (`Sydney` from London).
 - The `+1` in `ln(distance_km + 1)` keeps the penalty at zero distance well-defined (`ln(1) = 0`).
 
-Why `α = 0.10`:
+Why `α = 0.20`:
 
-- Empirical. Tuned on the original same-name test set (`St Kilda` Melbourne vs SA, `Cambridge` UK vs MA). Higher values made the bias too aggressive (overrode genuinely better text matches); lower values made it too weak to flip same-name candidates.
-- The TODO captures "tune α against a diverse same-name fixture" as a follow-up — bench-accuracy with bias enabled (post PR #15 + the bench-fixture upgrade) gives the first principled data.
+- Empirical. The constant was originally `0.10`, validated against the small AU St Kilda + UK Cambridge test set. The first planet bench-accuracy run with bias hints (PR #16) showed `0.10` wasn't aggressive enough — Aurora US (top 297 km off), Montgomery US (626 km), Cornwall CA (904 km), Saint-Eustache CA (1842 km), Greensboro US (414 km) all stayed wrong because the BM25 gap between same-name members exceeded the penalty budget.
+- At α=0.10 the penalty delta between a 20 km hit and a 900 km hit is ~0.38 BM25 units. At α=0.20 it doubles to ~0.76, giving bias enough headroom to flip those cases without breaking globally-prominent hits.
+- The TODO captures "tune α against a diverse same-name fixture" as a follow-up — current value comes from a planet-scale bench-accuracy result, not a synthetic sweep. If post-bump bench-accuracy shows new regressions in unique-name queries, that's the data point to retune again.
 - Operators wanting to evaluate sensitivity can edit the constant locally and rebuild.
 
 ## When the bias path activates
