@@ -701,10 +701,58 @@ public:
 
     void area(const osmium::Area& area) {
         const char* boundary = area.tags()["boundary"];
-        if (!boundary) return;
+        const char* place_tag = area.tags()["place"];
 
-        bool is_admin = (std::strcmp(boundary, "administrative") == 0);
-        bool is_postal = (std::strcmp(boundary, "postal_code") == 0);
+        bool is_admin = boundary && std::strcmp(boundary, "administrative") == 0;
+        bool is_postal = boundary && std::strcmp(boundary, "postal_code") == 0;
+
+        // Areas tagged `place=*` (typically on admin relations for
+        // major cities — Aurora IL, Cornwall ON, Münster DE,
+        // Saint-Eustache QC, Griffith NSW) need to land in
+        // place_points.bin so /search can find them by name. They
+        // also legitimately land in admin_polygons.bin when they
+        // also carry boundary=administrative — both are correct,
+        // they answer different questions (reverse vs forward).
+        // Without this, large cities tagged on relations rather
+        // than as separate place=city nodes are missing from
+        // forward search entirely.
+        bool has_useful_place = place_tag && place_rank(place_tag) > 0;
+
+        if (!is_admin && !is_postal && !has_useful_place) return;
+
+        // Place-point emission for areas with a place=* tag. Done
+        // FIRST so we always emit even if downstream admin-polygon
+        // checks bail (e.g., admin_level out of range). Centroid
+        // is computed from the first valid outer ring; for cities
+        // with multipolygon admin boundaries this is approximate
+        // but adequate for ranking purposes.
+        if (has_useful_place) {
+            const char* pname = area.tags()["name"];
+            if (pname && *pname) {
+                double sum_lat = 0.0, sum_lng = 0.0;
+                int valid = 0;
+                for (const auto& outer_ring : area.outer_rings()) {
+                    for (const auto& nr : outer_ring) {
+                        if (nr.location().valid()) {
+                            sum_lat += nr.location().lat();
+                            sum_lng += nr.location().lon();
+                            valid++;
+                        }
+                    }
+                }
+                if (valid > 0) {
+                    uint8_t prank = place_rank(place_tag);
+                    uint32_t place_id = add_place_point(
+                        sum_lat / valid, sum_lng / valid, prank, pname);
+                    if (place_id != UINT32_MAX) {
+                        collect_i18n_names(area.tags(), /*type=*/1, place_id);
+                    }
+                }
+            }
+        }
+
+        // Admin / postal polygon emission only fires if the area
+        // has the appropriate boundary tag.
         if (!is_admin && !is_postal) return;
 
         uint8_t admin_level = 0;
