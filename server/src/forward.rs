@@ -766,13 +766,35 @@ impl Forward {
             });
         }
 
+        // Default tantivy/ load is best-effort. A common failure mode
+        // is an empty/stale `tantivy/` directory left over from a
+        // previous build (e.g. a `build-forward-index <dir>` that ran
+        // before `--partition-by-country` was used). Propagating the
+        // open error from THIS dir would also lose the per-country
+        // dirs, which is the actual data the operator wants. Log
+        // and skip instead.
         let default_path = dir.join("tantivy");
         let default = if default_path.exists() && default_path.is_dir() {
-            Some(Self::open_one(&default_path)?)
+            match Self::open_one(&default_path) {
+                Ok(idx) => Some(idx),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "query_server::forward",
+                        path = %default_path.display(),
+                        error = %e,
+                        "default tantivy/ dir present but failed to open; \
+                         continuing with per-country indexes only"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
 
+        // Per-country loop is also best-effort: a single broken
+        // `tantivy_<cc>/` shouldn't take down /search for every other
+        // country. Skip the broken one with a warning, keep the rest.
         let mut per_country: std::collections::HashMap<[u8; 2], FieldedIndex> =
             std::collections::HashMap::new();
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -787,7 +809,21 @@ impl Forward {
                 if !path.is_dir() {
                     continue;
                 }
-                per_country.insert(cc, Self::open_one(&path)?);
+                match Self::open_one(&path) {
+                    Ok(idx) => {
+                        per_country.insert(cc, idx);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "query_server::forward",
+                            path = %path.display(),
+                            error = %e,
+                            cc = %String::from_utf8_lossy(&cc),
+                            "per-country tantivy_<cc>/ dir failed to open; \
+                             skipping (other countries still served)"
+                        );
+                    }
+                }
             }
         }
         Ok(Forward { per_country, default })

@@ -1189,22 +1189,45 @@ fn enrich_hit(
     })
 }
 
-/// Try to open the tantivy forward-geocoding index at `<data_dir>/tantivy`.
-/// Returns `None` (and logs) when the directory doesn't exist — the server
-/// still starts, but `/search` will respond 501 until an index is built.
+/// Try to open the tantivy forward-geocoding index. Pass the
+/// **data directory** (the parent that contains either a single
+/// `tantivy/` subdirectory, or sibling `tantivy_<cc>/` subdirs from
+/// a `--partition-by-country` build, or both); `Forward::open`
+/// handles both layouts. Returns `None` (and logs) when no forward
+/// index is present — the server still starts, but `/search` will
+/// respond 501 until an index is built.
+///
+/// Earlier versions of this function joined `tantivy` to the data
+/// dir before calling `Forward::open`. That worked for the
+/// monolithic single-`tantivy/` layout but silently broke
+/// partitioned builds: the per-country `tantivy_<cc>/` dirs are
+/// siblings of `tantivy/`, not children, so opening from
+/// `<data_dir>/tantivy` makes them invisible. The result was the
+/// `Forward::pick()` call returning `no_index` and every search
+/// returning `{"results": []}` despite the per-country indexes
+/// being intact on disk.
 #[cfg(feature = "forward")]
 fn load_forward_index(data_dir: &str) -> Option<Arc<Forward>> {
-    let dir = Path::new(data_dir).join("tantivy");
+    let dir = Path::new(data_dir);
     if !dir.exists() {
         tracing::warn!(
             target: "query_server::startup",
             path = %dir.display(),
             data_dir = %data_dir,
-            "forward index not found; /search disabled — run build-forward-index"
+            "data directory not found; /search disabled"
         );
         return None;
     }
-    match Forward::open(&dir) {
+    match Forward::open(dir) {
+        Ok(fwd) if fwd.is_empty() => {
+            tracing::warn!(
+                target: "query_server::startup",
+                path = %dir.display(),
+                "no forward index found (no tantivy/ or tantivy_<cc>/ \
+                 subdirectories); /search disabled — run build-forward-index"
+            );
+            None
+        }
         Ok(fwd) => {
             tracing::info!(
                 target: "query_server::startup",
