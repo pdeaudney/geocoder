@@ -28,9 +28,10 @@ use fst::MapBuilder;
 use query_server::autocomplete::{AutocompleteEntry, KIND_PLACE, KIND_STREET};
 use query_server::i18n::ENTITY_PLACE;
 use query_server::{
-    as_typed_slice, Index, NodeCoord, PlacePoint, WayHeader, DEFAULT_ADMIN_CELL_LEVEL,
+    as_typed_slice, manifest, Index, NodeCoord, PlacePoint, WayHeader, DEFAULT_ADMIN_CELL_LEVEL,
     DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL,
 };
+use serde_json::json;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
@@ -97,10 +98,36 @@ fn main() {
         }
     };
 
-    if let Err(e) = run(&dir, country_filter.as_ref(), layout) {
-        eprintln!("build failed: {e}");
-        std::process::exit(1);
+    let t0 = Instant::now();
+    match run(&dir, country_filter.as_ref(), layout) {
+        Err(e) => {
+            eprintln!("build failed: {e}");
+            std::process::exit(1);
+        }
+        Ok(stats) => {
+            let extra = json!({
+                "layout": match layout {
+                    Layout::PerCountry => "per-country",
+                    Layout::Unified => "unified",
+                    Layout::Both => "both",
+                },
+                "country_count": stats.country_count,
+                "total_entries": stats.total_entries,
+                "total_keys": stats.total_keys,
+                "build_seconds": t0.elapsed().as_secs_f64(),
+            });
+            if let Err(e) = manifest::write(&dir, "autocomplete", extra) {
+                eprintln!("warning: failed to write manifest_autocomplete.json: {e}");
+            }
+        }
     }
+}
+
+#[derive(Default)]
+struct RunStats {
+    country_count: usize,
+    total_entries: u64,
+    total_keys: u64,
 }
 
 /// Per-country staging state. Lives at module scope so `emit_unified`
@@ -140,7 +167,7 @@ fn run(
     dir: &PathBuf,
     country_filter: Option<&HashSet<[u8; 2]>>,
     layout: Layout,
-) -> Result<(), String> {
+) -> Result<RunStats, String> {
     let dir_str = dir
         .to_str()
         .ok_or_else(|| format!("non-utf8 path: {}", dir.display()))?;
@@ -460,7 +487,12 @@ fn run(
         );
     }
 
-    Ok(())
+    let mut stats = RunStats { country_count: ccs.len(), ..Default::default() };
+    for pc in by_country.values() {
+        stats.total_entries += pc.entries.len() as u64;
+        stats.total_keys += pc.keys.len() as u64;
+    }
+    Ok(stats)
 }
 
 fn emit_per_country(

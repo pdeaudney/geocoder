@@ -41,6 +41,47 @@ find_path(LIBDEFLATE_INCLUDE_DIR libdeflate.h
 
 add_executable(build-index src/build_index.cpp)
 
+# Git provenance — captured at configure time and stamped into the
+# manifest_reverse.json the builder writes at index root. Operators
+# inspect that file to verify which code produced the on-disk index
+# before triggering a multi-hour planet rebuild.
+find_package(Git QUIET)
+set(BUILDER_GIT_SHA "unknown")
+set(BUILDER_GIT_DIRTY "unknown")
+if(Git_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE _git_sha_out
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _git_sha_rc
+    )
+    if(_git_sha_rc EQUAL 0 AND NOT "${_git_sha_out}" STREQUAL "")
+        set(BUILDER_GIT_SHA "${_git_sha_out}")
+    endif()
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} status --porcelain
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE _git_status_out
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _git_status_rc
+    )
+    if(_git_status_rc EQUAL 0)
+        if("${_git_status_out}" STREQUAL "")
+            set(BUILDER_GIT_DIRTY "false")
+        else()
+            set(BUILDER_GIT_DIRTY "true")
+        endif()
+    endif()
+endif()
+message(STATUS "build-index: git sha=${BUILDER_GIT_SHA} dirty=${BUILDER_GIT_DIRTY}")
+target_compile_definitions(build-index PRIVATE
+    GEOCODER_GIT_SHA="${BUILDER_GIT_SHA}"
+    GEOCODER_GIT_DIRTY="${BUILDER_GIT_DIRTY}"
+)
+
 # Vendored ankerl::unordered_dense (single-header, MIT-licensed) at
 # third_party/ankerl/. Replaces std::unordered_map across the
 # builder's ingestion path: dense flat storage, separate-payload

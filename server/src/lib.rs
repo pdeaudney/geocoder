@@ -23,6 +23,7 @@ pub mod i18n;
 pub mod ip_geo;
 pub mod h3_cell;
 pub mod limits;
+pub mod manifest;
 pub mod metrics;
 pub mod openaddresses;
 pub mod postcode;

@@ -16,7 +16,8 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use query_server::forward;
+use query_server::{forward, manifest};
+use serde_json::json;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -59,19 +60,35 @@ fn main() {
         .unwrap_or_default();
 
     let t0 = std::time::Instant::now();
-    let result: Result<(), String> = if partition {
+    let result: Result<serde_json::Value, String> = if partition {
         eprintln!("Building per-country tantivy indexes under {} (heap={} MB)", source.display(), heap_mb);
         forward::build_partitioned_with_heap(&source, &source, heap_bytes).map(|stats| {
             let mut countries: Vec<_> = stats.keys().collect();
             countries.sort();
+            let mut total_places: u64 = 0;
+            let mut total_streets: u64 = 0;
+            let mut by_country = serde_json::Map::new();
             for cc in countries {
                 let s = &stats[cc];
                 eprintln!(
                     "  tantivy_{}{}: {} places + {} streets",
                     cc[0] as char, cc[1] as char, s.places, s.streets
                 );
+                total_places += s.places as u64;
+                total_streets += s.streets as u64;
+                let key = format!("{}{}", cc[0] as char, cc[1] as char);
+                by_country.insert(key, json!({ "places": s.places, "streets": s.streets }));
             }
             eprintln!("Built {} country indexes in {:.1}s", stats.len(), t0.elapsed().as_secs_f64());
+            json!({
+                "layout": "per-country",
+                "country_count": stats.len(),
+                "total_places": total_places,
+                "total_streets": total_streets,
+                "tantivy_heap_mb": heap_mb,
+                "build_seconds": t0.elapsed().as_secs_f64(),
+                "by_country": by_country,
+            })
         })
     } else {
         let dest = args
@@ -89,11 +106,26 @@ fn main() {
                 stats.streets,
                 t0.elapsed().as_secs_f64()
             );
+            json!({
+                "layout": "monolithic",
+                "dest": dest.display().to_string(),
+                "places": stats.places,
+                "streets": stats.streets,
+                "tantivy_heap_mb": heap_mb,
+                "build_seconds": t0.elapsed().as_secs_f64(),
+            })
         })
     };
 
-    if let Err(e) = result {
-        eprintln!("Build failed: {e}");
-        std::process::exit(1);
+    match result {
+        Err(e) => {
+            eprintln!("Build failed: {e}");
+            std::process::exit(1);
+        }
+        Ok(extra) => {
+            if let Err(e) = manifest::write(&source, "forward", extra) {
+                eprintln!("warning: failed to write manifest_forward.json: {e}");
+            }
+        }
     }
 }

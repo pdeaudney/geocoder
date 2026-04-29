@@ -1350,6 +1350,51 @@ static void write_index(const std::string& output_dir) {
     // Every .tmp has been written successfully; atomically swap them
     // into the live names. Destructor would remove them if this throws.
     iw.commit_all();
+
+    // manifest_reverse.json — written *after* commit_all so a partial
+    // build never publishes a manifest claiming success. Mirrors the
+    // Rust-side `manifest::write` helper. Operators read these files
+    // before / after a rebuild to verify the new binary actually
+    // changed the data instead of burning a multi-hour rebuild on a
+    // binary that has the same code as the previous one.
+#ifndef GEOCODER_GIT_SHA
+#define GEOCODER_GIT_SHA "unknown"
+#endif
+#ifndef GEOCODER_GIT_DIRTY
+#define GEOCODER_GIT_DIRTY "unknown"
+#endif
+    {
+        const std::string manifest_path = output_dir + "/manifest_reverse.json";
+        std::ofstream f(manifest_path);
+        const auto unix_now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const std::string dirty_raw = GEOCODER_GIT_DIRTY;
+        const char* dirty_json = (dirty_raw == "true") ? "true" : "false";
+        const char* dirty_known = (dirty_raw == "unknown") ? "false" : "true";
+        f << "{\n"
+          << "  \"tool\": \"reverse\",\n"
+          << "  \"git_sha\": \"" << GEOCODER_GIT_SHA << "\",\n"
+          << "  \"git_dirty\": " << dirty_json << ",\n"
+          << "  \"git_dirty_known\": " << dirty_known << ",\n"
+          << "  \"built_at_unix\": " << unix_now << ",\n"
+          << "  \"counts\": {\n"
+          << "    \"place_points\": " << place_points.size() << ",\n"
+          << "    \"street_ways\": " << ways.size() << ",\n"
+          << "    \"addr_points\": " << addr_points.size() << ",\n"
+          << "    \"interp_ways\": " << interp_ways.size() << ",\n"
+          << "    \"admin_polygons\": " << admin_polygons.size() << ",\n"
+          << "    \"i18n_names\": " << i18n_names.size() << ",\n"
+          << "    \"geo_cells\": " << sorted_geo_cells.size() << ",\n"
+          << "    \"admin_cells\": " << cell_to_admin.size() << ",\n"
+          << "    \"place_cells\": " << cell_to_places.size() << "\n"
+          << "  }\n"
+          << "}\n";
+        if (!f) {
+            std::cerr << "warning: failed to write " << manifest_path << std::endl;
+        } else {
+            std::cerr << "wrote " << manifest_path << std::endl;
+        }
+    }
 }
 
 // --- Main ---
