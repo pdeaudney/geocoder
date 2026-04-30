@@ -40,6 +40,14 @@ pub const KIND_STREET: u64 = 2;
 pub struct ForwardSchema {
     pub schema: Schema,
     pub name: Field,
+    /// Multilingual aliases — `name:xx` translations and Latin
+    /// transliterations for non-Latin scripts. Indexed in a separate
+    /// field so the canonical `name` field stays short and BM25
+    /// length normalization doesn't tank the canonical term's score
+    /// for major cities (Sydney has 81 `name:xx` tags; without this
+    /// split, the place_point's "sydney" token scored 0.28 vs 8.0
+    /// for "Sydney Street", and never appeared in top-K).
+    pub alt_name: Field,
     pub name_raw: Field,
     pub suburb: Field,
     pub state: Field,
@@ -119,6 +127,7 @@ impl ForwardSchema {
             .set_stored();
 
         let name = schema.add_text_field("name", text_opts.clone());
+        let alt_name = schema.add_text_field("alt_name", text_opts.clone());
         let name_raw = schema.add_text_field("name_raw", STRING | STORED);
         // Enrichment fields — tokenized so "baulkham hills" matches both tokens.
         let suburb = schema.add_text_field("suburb", text_opts.clone());
@@ -132,6 +141,7 @@ impl ForwardSchema {
         ForwardSchema {
             schema: schema.build(),
             name,
+            alt_name,
             name_raw,
             suburb,
             state,
@@ -815,6 +825,29 @@ fn append_translit(name_indexed: &mut String, source: &str) {
 #[cfg(not(feature = "translit"))]
 fn append_translit(_name_indexed: &mut String, _source: &str) {}
 
+/// Tokenise on whitespace, drop tokens whose ASCII-folded lowercase form
+/// has already been seen, and re-join. Preserves first-occurrence order so
+/// the canonical name remains at index 0 (its tokens dominate term-frequency
+/// ranking). Intentionally case- and accent-insensitive: matches the
+/// indexing analyzer's `LowerCaser` + `AsciiFoldingFilter` so we don't keep
+/// two tokens that the analyzer will collapse anyway.
+fn dedup_indexed_tokens(s: &str) -> String {
+    let mut seen: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(16);
+    let mut out = String::with_capacity(s.len());
+    for tok in s.split_whitespace() {
+        let key = ascii_fold(tok).to_ascii_lowercase();
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(tok);
+    }
+    out
+}
+
 fn tantivy_doc(
     s: &ForwardSchema,
     name: &str,
@@ -844,24 +877,59 @@ fn tantivy_doc(
     // for `the hague` matches the Den Haag entry via the `hague` token,
     // courtesy of tantivy's SimpleTokenizer + AsciiFoldingFilter +
     // LowerCaser pipeline.
+    // Canonical name + transliteration of the canonical name go into the
+    // primary `name` field. Multilingual `name:xx` alternates and their
+    // transliterations go into a separate `alt_name` field (see field
+    // doc). Without the split, BM25 length normalization collapses the
+    // canonical term's score for major cities with many translations.
     let mut name_indexed = canonicalise_phrase(name);
     append_translit(&mut name_indexed, name);
+    name_indexed = dedup_indexed_tokens(&name_indexed);
+
+    let mut alt_indexed = String::new();
     for alt in alternates {
         let canonical_alt = canonicalise_phrase(alt);
         if canonical_alt.trim().is_empty() {
             continue;
         }
-        if !name_indexed.is_empty() {
-            name_indexed.push(' ');
+        if !alt_indexed.is_empty() {
+            alt_indexed.push(' ');
         }
-        name_indexed.push_str(canonical_alt.trim());
-        append_translit(&mut name_indexed, alt);
+        alt_indexed.push_str(canonical_alt.trim());
+        append_translit(&mut alt_indexed, alt);
     }
+    // Strip any token that's already in the primary name field — keeps
+    // alt_name strictly additive ("Sydney" appears N times across the
+    // German/French/Italian/etc. name:xx tags but doesn't need to appear
+    // in alt_name at all). Then dedup remaining tokens for the same
+    // length-normalization reason as the primary field.
+    if !alt_indexed.is_empty() {
+        let mut already: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for tok in name_indexed.split_whitespace() {
+            already.insert(ascii_fold(tok).to_ascii_lowercase());
+        }
+        let mut filtered = String::with_capacity(alt_indexed.len());
+        for tok in alt_indexed.split_whitespace() {
+            let key = ascii_fold(tok).to_ascii_lowercase();
+            if key.is_empty() || already.contains(&key) {
+                continue;
+            }
+            already.insert(key);
+            if !filtered.is_empty() {
+                filtered.push(' ');
+            }
+            filtered.push_str(tok);
+        }
+        alt_indexed = filtered;
+    }
+
     let suburb_indexed = suburb.map(canonicalise_phrase).unwrap_or_default();
     let state_indexed = state.map(canonicalise_phrase).unwrap_or_default();
 
     doc!(
         s.name => name_indexed,
+        s.alt_name => alt_indexed,
         s.name_raw => name,
         s.suburb => suburb_indexed,
         s.state => state_indexed,
@@ -1076,6 +1144,7 @@ impl Forward {
         };
         let schema = ForwardSchema {
             name: field("name")?,
+            alt_name: field("alt_name")?,
             name_raw: field("name_raw")?,
             suburb: field("suburb")?,
             state: field("state")?,
@@ -1450,6 +1519,11 @@ impl Forward {
                 // factor: streets named X should clearly beat streets in
                 // suburb X when X appears in the query.
                 const NAME_BOOST: f32 = 3.0;
+                // Multilingual aliases ride at a lower boost than the
+                // canonical name — they're additive coverage (Cyrillic /
+                // CJK queries, exonyms) but should not outrank a doc
+                // whose canonical OSM name contains the query term.
+                const ALT_NAME_BOOST: f32 = 2.0;
                 let name_q: Box<dyn Query> = Box::new(BoostQuery::new(
                     Box::new(TermQuery::new(
                         Term::from_field_text(s.name, tok),
@@ -1457,12 +1531,22 @@ impl Forward {
                     )),
                     NAME_BOOST,
                 ));
+                let alt_name_q: Box<dyn Query> = Box::new(BoostQuery::new(
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(s.alt_name, tok),
+                        IndexRecordOption::WithFreqs,
+                    )),
+                    ALT_NAME_BOOST,
+                ));
                 let suburb_q: Box<dyn Query> = Box::new(TermQuery::new(
                     Term::from_field_text(s.suburb, tok),
                     IndexRecordOption::WithFreqs,
                 ));
-                let tok_clauses: Vec<(Occur, Box<dyn Query>)> =
-                    vec![(Occur::Should, name_q), (Occur::Should, suburb_q)];
+                let tok_clauses: Vec<(Occur, Box<dyn Query>)> = vec![
+                    (Occur::Should, name_q),
+                    (Occur::Should, alt_name_q),
+                    (Occur::Should, suburb_q),
+                ];
                 let token_q = BooleanQuery::new(tok_clauses);
                 clauses.push((Occur::Must, Box::new(token_q)));
             }
@@ -1716,7 +1800,16 @@ pub fn tokenize_user_input(s: &str) -> Vec<String> {
     let raw_tokens: Vec<String> = folded
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
-        .map(|t| canonicalise_token(&t.to_ascii_lowercase()).to_owned())
+        .map(|t| {
+            // Unicode-aware lowercase to mirror tantivy's `LowerCaser`
+            // analyzer step. `to_ascii_lowercase` is a no-op on non-Latin
+            // scripts so a query like `Сидней` (capital С = U+0421) would
+            // never match the indexed `сидней` (lowercase Cyrillic) — a
+            // silent recall failure for every Cyrillic / Greek / Cherokee
+            // / Armenian etc. query that wasn't already lowercase.
+            let lower: String = t.chars().flat_map(char::to_lowercase).collect();
+            canonicalise_token(&lower).to_owned()
+        })
         .collect();
     apply_place_abbreviation_fold(raw_tokens)
 }
