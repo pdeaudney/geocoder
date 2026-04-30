@@ -10,10 +10,19 @@
 fn main() {
     println!("cargo:rerun-if-changed=proto/geocoder.proto");
     println!("cargo:rerun-if-changed=build.rs");
-    // Re-stamp the SHA when HEAD moves or the index changes (the git
-    // dir may live outside cargo's default watched set).
+    // Re-stamp the SHA when the working tree changes. `.git/HEAD`
+    // changes only on branch switches; `.git/index` changes on
+    // staging operations; same-branch commits update the per-branch
+    // ref file (or `.git/packed-refs` when refs are packed). Watch
+    // all four so a new commit triggers rebuild.
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/index");
+    println!("cargo:rerun-if-changed=../.git/packed-refs");
+    if let Ok(head) = std::fs::read_to_string("../.git/HEAD") {
+        if let Some(branch_ref) = head.strip_prefix("ref: ").map(|s| s.trim()) {
+            println!("cargo:rerun-if-changed=../.git/{branch_ref}");
+        }
+    }
 
     let sha = match git(&["rev-parse", "--short=12", "HEAD"]) {
         Some(s) => s,

@@ -20,10 +20,23 @@ pub fn git_sha() -> &'static str {
     env!("GEOCODER_GIT_SHA")
 }
 
-/// `"true"` if the working tree had uncommitted changes at build time,
-/// `"false"` if clean, `"unknown"` if git wasn't queryable.
-pub fn git_dirty() -> &'static str {
-    env!("GEOCODER_GIT_DIRTY")
+/// Working-tree state at compile time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitDirty {
+    Clean,
+    Dirty,
+    Unknown,
+}
+
+/// Parsed view of the `GEOCODER_GIT_DIRTY` build-time env var. Used
+/// by the manifest writer; downstream code should prefer this enum
+/// over re-parsing the raw string.
+pub fn git_dirty_state() -> GitDirty {
+    match env!("GEOCODER_GIT_DIRTY") {
+        "true" => GitDirty::Dirty,
+        "false" => GitDirty::Clean,
+        _ => GitDirty::Unknown,
+    }
 }
 
 /// Write `<dir>/manifest_<tool>.json`. `extra` is merged into the
@@ -32,11 +45,12 @@ pub fn git_dirty() -> &'static str {
 /// module.
 pub fn write(dir: &Path, tool: &str, extra: Value) -> std::io::Result<()> {
     let now = chrono::Utc::now();
+    let dirty = git_dirty_state();
     let mut obj = json!({
         "tool": tool,
         "git_sha": git_sha(),
-        "git_dirty": git_dirty() == "true",
-        "git_dirty_known": git_dirty() != "unknown",
+        "git_dirty": dirty == GitDirty::Dirty,
+        "git_dirty_known": dirty != GitDirty::Unknown,
         "built_at_unix": now.timestamp(),
         "built_at_iso": now.to_rfc3339(),
     });

@@ -152,6 +152,56 @@ pub struct BuildStats {
     pub streets: usize,
 }
 
+/// Signed-area-weighted polygon centroid (lat, lng). Falls back to the
+/// arithmetic mean when the polygon has fewer than 3 vertices or is
+/// degenerate (collinear vertices, zero signed area). Vertex-density
+/// independent — important for admin polygons whose boundary is densely
+/// sampled along coast / mountain edges and sparse along straight
+/// inland sections.
+fn polygon_centroid(verts: &[NodeCoord]) -> (f64, f64) {
+    let n = verts.len();
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let mean = || -> (f64, f64) {
+        let sum_lat: f64 = verts.iter().map(|v| v.lat as f64).sum();
+        let sum_lng: f64 = verts.iter().map(|v| v.lng as f64).sum();
+        (sum_lat / n as f64, sum_lng / n as f64)
+    };
+    if n < 3 {
+        return mean();
+    }
+    let mut a2 = 0.0f64;
+    let mut cx = 0.0f64;
+    let mut cy = 0.0f64;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let xi = verts[i].lng as f64;
+        let yi = verts[i].lat as f64;
+        let xj = verts[j].lng as f64;
+        let yj = verts[j].lat as f64;
+        let cross = xi * yj - xj * yi;
+        a2 += cross;
+        cx += (xi + xj) * cross;
+        cy += (yi + yj) * cross;
+    }
+    if a2.abs() < 1e-12 {
+        return mean();
+    }
+    let factor = 1.0 / (3.0 * a2);
+    (cy * factor, cx * factor)
+}
+
+/// Bucket a (lat, lng) into a 0.1°-grid cell (~11 km at the equator) for
+/// the place/admin-polygon dedup pass. Coarse enough that a city's
+/// `place=*` point and its `boundary=administrative` polygon centroid
+/// land in the same bucket; fine enough that two distinct cities sharing
+/// a name (Springfield IL vs Springfield MO ~ 290 km apart) stay distinct.
+#[inline]
+fn coord_bucket(lat: f64, lng: f64) -> (i32, i32) {
+    ((lat * 10.0).round() as i32, (lng * 10.0).round() as i32)
+}
+
 /// Build a single monolithic tantivy index at `dest`. Everything goes in
 /// one bucket — queries are filtered by the indexed `country_code` field
 /// rather than dispatched to a different tantivy per country.
@@ -249,6 +299,25 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
         }
     }
 
+    // Build a (name_id, ~11km bucket) signature set from place_points
+    // so admin polygons that duplicate an existing place=* doc can be
+    // dropped. Without dedup, a city with both place=town AND
+    // boundary=administrative ends up as two near-identical Tantivy
+    // docs at the same coord — BM25 ranking then becomes order-of-
+    // insertion-dependent under bias.
+    let mut place_signature: std::collections::HashSet<(u32, i32, i32)> =
+        std::collections::HashSet::new();
+    if let Some(pp) = idx.place_points.as_ref() {
+        let points: &[PlacePoint] = as_typed_slice(pp);
+        for p in points {
+            if idx.get_string(p.name_id).is_empty() {
+                continue;
+            }
+            let (b_lat, b_lng) = coord_bucket(p.lat as f64, p.lng as f64);
+            place_signature.insert((p.name_id, b_lat, b_lng));
+        }
+    }
+
     // Admin polygons (levels 4-10). Indexed as place-kind docs so
     // admin-unit queries like "Saint-Quentin-en-Yvelines",
     // "Hansestadt Stade", "Marburg an der Lahn" — formal names sitting
@@ -270,14 +339,16 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
         if cnt == 0 || off + cnt > admin_vertices.len() {
             continue;
         }
-        let mut sum_lat = 0.0f64;
-        let mut sum_lng = 0.0f64;
-        for v in &admin_vertices[off..off + cnt] {
-            sum_lat += v.lat as f64;
-            sum_lng += v.lng as f64;
+        let (lat, lng) = polygon_centroid(&admin_vertices[off..off + cnt]);
+
+        // Drop when an existing place_point already covers this
+        // (name, ~11km bucket) cell. The place_point is more
+        // authoritative (carries the OSM-curated `place=*` rank).
+        let (b_lat, b_lng) = coord_bucket(lat, lng);
+        if place_signature.contains(&(poly.name_id, b_lat, b_lng)) {
+            continue;
         }
-        let lat = sum_lat / cnt as f64;
-        let lng = sum_lng / cnt as f64;
+
         let admin = idx.find_admin(lat, lng);
 
         // entity_type=0 for admin polygons (mirrors the C++ builder's
@@ -510,9 +581,26 @@ pub fn build_partitioned_with_heap(
     // live on `boundary=administrative` polygons rather than `place=*`
     // points — return a result. Country (2-3) and postal code (11)
     // are skipped: too generic, or non-name codes.
+    // Build a (name_id, ~11km bucket) signature from place_points so
+    // admin polygons duplicating an existing place=* doc can be
+    // dropped — see the monolithic path for rationale.
+    let mut place_signature: std::collections::HashSet<(u32, i32, i32)> =
+        std::collections::HashSet::new();
+    if let Some(pp) = idx.place_points.as_ref() {
+        let points: &[PlacePoint] = as_typed_slice(pp);
+        for p in points {
+            if idx.get_string(p.name_id).is_empty() {
+                continue;
+            }
+            let (b_lat, b_lng) = coord_bucket(p.lat as f64, p.lng as f64);
+            place_signature.insert((p.name_id, b_lat, b_lng));
+        }
+    }
+
     {
         let polys: &[crate::AdminPolygon] = as_typed_slice(&idx.admin_polygons);
         let admin_vertices: &[NodeCoord] = as_typed_slice(&idx.admin_vertices);
+        let place_signature_ref = &place_signature;
         let admin_candidates: Vec<([u8; 2], PendingDoc<'_>)> = polys
             .par_iter()
             .enumerate()
@@ -529,14 +617,11 @@ pub fn build_partitioned_with_heap(
                 if cnt == 0 || off + cnt > admin_vertices.len() {
                     return None;
                 }
-                let mut sum_lat = 0.0f64;
-                let mut sum_lng = 0.0f64;
-                for v in &admin_vertices[off..off + cnt] {
-                    sum_lat += v.lat as f64;
-                    sum_lng += v.lng as f64;
+                let (lat, lng) = polygon_centroid(&admin_vertices[off..off + cnt]);
+                let (b_lat, b_lng) = coord_bucket(lat, lng);
+                if place_signature_ref.contains(&(poly.name_id, b_lat, b_lng)) {
+                    return None;
                 }
-                let lat = sum_lat / cnt as f64;
-                let lng = sum_lng / cnt as f64;
                 let admin = idx.find_admin(lat, lng);
                 let cc = country_bytes(admin.country_code)?;
 

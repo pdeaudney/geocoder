@@ -32,6 +32,12 @@
 #include <s2/s2loop.h>
 #include <s2/s2builder.h>
 
+// Generated at build time by cmake/UpdateGitVersion.cmake; defines
+// GEOCODER_GIT_SHA and GEOCODER_GIT_DIRTY string literals. The header
+// is regenerated only when the SHA or dirty flag changes, so it does
+// not invalidate ccache hits on no-op rebuilds.
+#include "git_version.h"
+
 // Vendored at builder/third_party/ankerl/unordered_dense.h (v4.8.1, MIT).
 // Replaces std::unordered_map on the build-time hot path — chained-bucket
 // libstdc++ unordered_map is "slow across the board" on insert-heavy
@@ -1353,16 +1359,21 @@ static void write_index(const std::string& output_dir) {
         std::sort(i18n_names.begin(), i18n_names.end(), [](const I18nName& a, const I18nName& b) {
             if (a.entity_type != b.entity_type) return a.entity_type < b.entity_type;
             if (a.entity_id != b.entity_id) return a.entity_id < b.entity_id;
-            return a.lang_code < b.lang_code;
+            if (a.lang_code != b.lang_code) return a.lang_code < b.lang_code;
+            return a.name_id < b.name_id;
         });
-        // Collapse duplicate (type, id, lang) triples — OSM occasionally
-        // repeats tags (e.g. name:en on both an area and its relation);
-        // keep the first which is stable under our order.
+        // Collapse only fully-duplicate records (same type, id, lang AND
+        // name_id). The name_id check is required because alt_name is
+        // multi-valued (split on ';') so a single entity legitimately
+        // emits N records all with lang_code=LANG_ALT_NAME but distinct
+        // values; dropping name_id from the key would silently keep
+        // only one variant.
         i18n_names.erase(std::unique(i18n_names.begin(), i18n_names.end(),
             [](const I18nName& a, const I18nName& b) {
                 return a.entity_type == b.entity_type
                     && a.entity_id == b.entity_id
-                    && a.lang_code == b.lang_code;
+                    && a.lang_code == b.lang_code
+                    && a.name_id == b.name_id;
             }), i18n_names.end());
         std::ofstream f = open_tmp_out(iw, "i18n_names.bin");
         f.write(reinterpret_cast<const char*>(i18n_names.data()),
@@ -1413,13 +1424,8 @@ static void write_index(const std::string& output_dir) {
     // Rust-side `manifest::write` helper. Operators read these files
     // before / after a rebuild to verify the new binary actually
     // changed the data instead of burning a multi-hour rebuild on a
-    // binary that has the same code as the previous one.
-#ifndef GEOCODER_GIT_SHA
-#define GEOCODER_GIT_SHA "unknown"
-#endif
-#ifndef GEOCODER_GIT_DIRTY
-#define GEOCODER_GIT_DIRTY "unknown"
-#endif
+    // binary that has the same code as the previous one. The macros
+    // are defined in git_version.h, regenerated at every build.
     {
         const std::string manifest_path = output_dir + "/manifest_reverse.json";
         std::ofstream f(manifest_path);

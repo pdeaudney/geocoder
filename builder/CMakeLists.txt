@@ -41,46 +41,25 @@ find_path(LIBDEFLATE_INCLUDE_DIR libdeflate.h
 
 add_executable(build-index src/build_index.cpp)
 
-# Git provenance — captured at configure time and stamped into the
-# manifest_reverse.json the builder writes at index root. Operators
-# inspect that file to verify which code produced the on-disk index
-# before triggering a multi-hour planet rebuild.
-find_package(Git QUIET)
-set(BUILDER_GIT_SHA "unknown")
-set(BUILDER_GIT_DIRTY "unknown")
-if(Git_FOUND)
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE _git_sha_out
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-        RESULT_VARIABLE _git_sha_rc
-    )
-    if(_git_sha_rc EQUAL 0 AND NOT "${_git_sha_out}" STREQUAL "")
-        set(BUILDER_GIT_SHA "${_git_sha_out}")
-    endif()
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} status --porcelain
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE _git_status_out
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-        RESULT_VARIABLE _git_status_rc
-    )
-    if(_git_status_rc EQUAL 0)
-        if("${_git_status_out}" STREQUAL "")
-            set(BUILDER_GIT_DIRTY "false")
-        else()
-            set(BUILDER_GIT_DIRTY "true")
-        endif()
-    endif()
-endif()
-message(STATUS "build-index: git sha=${BUILDER_GIT_SHA} dirty=${BUILDER_GIT_DIRTY}")
-target_compile_definitions(build-index PRIVATE
-    GEOCODER_GIT_SHA="${BUILDER_GIT_SHA}"
-    GEOCODER_GIT_DIRTY="${BUILDER_GIT_DIRTY}"
+# Git provenance — refreshed at every build via a custom_target that
+# regenerates `git_version.h` before build-index compiles. Capturing
+# at configure time (the previous approach) shipped a stale SHA when
+# operators ran `make builder` after a new commit without re-running
+# cmake; that defeated the manifest's whole purpose. The CMake script
+# at cmake/UpdateGitVersion.cmake only rewrites the header when the
+# values actually changed, so steady-state recompiles are unaffected.
+set(GIT_VERSION_HEADER "${CMAKE_CURRENT_BINARY_DIR}/git_version.h")
+add_custom_target(update_git_version ALL
+    BYPRODUCTS "${GIT_VERSION_HEADER}"
+    COMMAND ${CMAKE_COMMAND}
+        -DOUTPUT=${GIT_VERSION_HEADER}
+        -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/UpdateGitVersion.cmake
+    COMMENT "Updating git_version.h"
+    VERBATIM
 )
+add_dependencies(build-index update_git_version)
+target_include_directories(build-index PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 # Vendored ankerl::unordered_dense (single-header, MIT-licensed) at
 # third_party/ankerl/. Replaces std::unordered_map across the

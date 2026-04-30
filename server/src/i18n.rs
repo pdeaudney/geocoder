@@ -132,7 +132,17 @@ pub fn pack_lang_code(lang: &str) -> Option<u16> {
     if !a.is_ascii_alphabetic() || !b.is_ascii_alphabetic() {
         return None;
     }
-    Some(a as u16 | ((b as u16) << 8))
+    let packed = a as u16 | ((b as u16) << 8);
+    // Lowercase ASCII letters are 0x61..=0x7A so any packed value lies
+    // in 0x6161..=0x7A7A — comfortably above the LANG_OFFICIAL_NAME /
+    // LANG_ALT_NAME sentinels (0x0001 / 0x0002). The debug_assert
+    // documents and locks the invariant in case the alphabetic check
+    // above is ever loosened.
+    debug_assert!(
+        packed != LANG_OFFICIAL_NAME && packed != LANG_ALT_NAME,
+        "pack_lang_code produced a sentinel value"
+    );
+    Some(packed)
 }
 
 #[cfg(test)]
