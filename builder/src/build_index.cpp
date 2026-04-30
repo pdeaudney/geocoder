@@ -464,17 +464,80 @@ static bool is_included_highway(const char* value) {
 // Returns 0 to skip this place tag (not useful for address output).
 // --- Localized names (`name:<lang>`) ---
 
-// Capture `name:xx` tags (xx = 2 ASCII letters) on the given OSM entity
-// and append them to the global i18n_names table. `entity_type` is 0 for
-// admin polygons, 1 for place points. `entity_id` must be the same index
-// the runtime uses to look up the entity (i.e. admin_polygons.size() -1
-// or place_points.size() - 1 depending on type, captured by the caller
-// before it increments).
+// Sentinel `lang_code` values for non-language-tagged alternate names.
+// They live below the ASCII-letter range that `pack_lang_code` produces
+// (`'a'` = 0x61, so any valid lang_code is ≥ 0x6161), so they cannot
+// collide with a real `name:xx` entry. The Rust runtime's
+// `pack_lang_code` cannot emit these values either, so a `lang=`
+// query never accidentally selects them; only the iterator path
+// (`alternates_for`) returns them, which is exactly the build-time
+// path that appends them to the indexed `name` field.
+// Mirrors LANG_OFFICIAL_NAME / LANG_ALT_NAME in server/src/i18n.rs.
+constexpr uint16_t LANG_OFFICIAL_NAME = 0x0001;
+constexpr uint16_t LANG_ALT_NAME = 0x0002;
+
+static void emit_alias(uint8_t entity_type, uint32_t entity_id,
+                       uint16_t lang_code, const char* value) {
+    if (!value || !*value) return;
+    I18nName rec{};
+    rec.entity_type = entity_type;
+    rec.lang_code = lang_code;
+    rec.entity_id = entity_id;
+    rec.name_id = strings.intern(value);
+    i18n_names.push_back(rec);
+    i18n_count_total++;
+}
+
+// Capture `name:xx` tags (xx = 2 ASCII letters), plus `official_name` and
+// `alt_name`, on the given OSM entity and append them to the global
+// i18n_names table. `entity_type` is 0 for admin polygons, 1 for place
+// points. `entity_id` must be the same index the runtime uses to look up
+// the entity (i.e. admin_polygons.size() -1 or place_points.size() - 1
+// depending on type, captured by the caller before it increments).
 template <typename Tags>
 static void collect_i18n_names(const Tags& tags, uint8_t entity_type, uint32_t entity_id) {
     for (const auto& tag : tags) {
         const char* k = tag.key();
-        if (!k || std::strncmp(k, "name:", 5) != 0) {
+        if (!k) continue;
+
+        // `official_name` and `alt_name` — formal / alternate names that
+        // OSM stores without a language suffix. Indexing them as
+        // additional aliases lets queries like "Hansestadt Stade",
+        // "Marburg an der Lahn", "Universitäts- und Hansestadt
+        // Greifswald" match a place whose canonical `name` is just
+        // "Stade" / "Marburg" / "Greifswald". `alt_name` may be
+        // semicolon-separated (per OSM convention); split and emit
+        // each variant.
+        if (std::strcmp(k, "official_name") == 0) {
+            emit_alias(entity_type, entity_id, LANG_OFFICIAL_NAME, tag.value());
+            continue;
+        }
+        if (std::strcmp(k, "alt_name") == 0) {
+            const char* v = tag.value();
+            if (!v) continue;
+            // Split on ';' and trim leading whitespace per OSM convention.
+            std::string buf;
+            for (const char* p = v;; ++p) {
+                if (*p == ';' || *p == '\0') {
+                    // Trim trailing whitespace.
+                    while (!buf.empty() && std::isspace(static_cast<unsigned char>(buf.back()))) {
+                        buf.pop_back();
+                    }
+                    if (!buf.empty()) {
+                        emit_alias(entity_type, entity_id, LANG_ALT_NAME, buf.c_str());
+                    }
+                    if (*p == '\0') break;
+                    buf.clear();
+                } else {
+                    // Trim leading whitespace.
+                    if (buf.empty() && std::isspace(static_cast<unsigned char>(*p))) continue;
+                    buf.push_back(*p);
+                }
+            }
+            continue;
+        }
+
+        if (std::strncmp(k, "name:", 5) != 0) {
             continue;
         }
         const char* suffix = k + 5;
@@ -494,13 +557,7 @@ static void collect_i18n_names(const Tags& tags, uint8_t entity_type, uint32_t e
         uint16_t lang_code = static_cast<uint16_t>(suffix[0])
             | (static_cast<uint16_t>(suffix[1]) << 8);
 
-        I18nName rec{};
-        rec.entity_type = entity_type;
-        rec.lang_code = lang_code;
-        rec.entity_id = entity_id;
-        rec.name_id = strings.intern(value);
-        i18n_names.push_back(rec);
-        i18n_count_total++;
+        emit_alias(entity_type, entity_id, lang_code, value);
     }
 }
 

@@ -30,6 +30,20 @@ pub struct I18nRecord {
 pub const ENTITY_ADMIN: u8 = 0;
 pub const ENTITY_PLACE: u8 = 1;
 
+/// Sentinel `lang_code` values for non-language-tagged alternate names
+/// (OSM `official_name`, `alt_name`). They live below the ASCII-letter
+/// range that `pack_lang_code` produces (`'a'` = 0x61, so any valid
+/// lang code is ≥ 0x6161), so they cannot collide with a real
+/// `name:xx` entry, and `pack_lang_code` cannot emit them either —
+/// a `lang=of` query won't accidentally select an `official_name`
+/// record. The build-time iterator (`alternates_for`) is the only
+/// path that surfaces them, which is exactly where they belong: as
+/// extra terms appended to the indexed `name` field. Mirrors
+/// `LANG_OFFICIAL_NAME` / `LANG_ALT_NAME` in
+/// `builder/src/build_index.cpp`.
+pub const LANG_OFFICIAL_NAME: u16 = 0x0001;
+pub const LANG_ALT_NAME: u16 = 0x0002;
+
 pub struct I18nNames {
     mmap: Mmap,
 }
