@@ -15,7 +15,10 @@ fn main() {
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/index");
 
-    let sha = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let sha = match git(&["rev-parse", "--short=12", "HEAD"]) {
+        Some(s) => s,
+        None => "unknown".to_string(),
+    };
     let dirty = match git(&["status", "--porcelain"]) {
         Some(s) if !s.is_empty() => "true",
         Some(_) => "false",

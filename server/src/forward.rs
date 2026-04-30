@@ -249,6 +249,71 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
         }
     }
 
+    // Admin polygons (levels 4-10). Indexed as place-kind docs so
+    // admin-unit queries like "Saint-Quentin-en-Yvelines",
+    // "Hansestadt Stade", "Marburg an der Lahn" — formal names sitting
+    // on `boundary=administrative` polygons rather than `place=*`
+    // points — return a result. Country (2-3) and postal code (11)
+    // are skipped: too generic, or non-name codes.
+    let polys: &[crate::AdminPolygon] = as_typed_slice(&idx.admin_polygons);
+    let admin_vertices: &[NodeCoord] = as_typed_slice(&idx.admin_vertices);
+    for (poly_id, poly) in polys.iter().enumerate() {
+        if poly.admin_level < 4 || poly.admin_level > 10 {
+            continue;
+        }
+        let name = idx.get_string(poly.name_id);
+        if name.is_empty() {
+            continue;
+        }
+        let off = poly.vertex_offset as usize;
+        let cnt = poly.vertex_count as usize;
+        if cnt == 0 || off + cnt > admin_vertices.len() {
+            continue;
+        }
+        let mut sum_lat = 0.0f64;
+        let mut sum_lng = 0.0f64;
+        for v in &admin_vertices[off..off + cnt] {
+            sum_lat += v.lat as f64;
+            sum_lng += v.lng as f64;
+        }
+        let lat = sum_lat / cnt as f64;
+        let lng = sum_lng / cnt as f64;
+        let admin = idx.find_admin(lat, lng);
+
+        // entity_type=0 for admin polygons (mirrors the C++ builder's
+        // i18n_names emission at builder/src/build_index.cpp:816).
+        let alternates: Vec<&str> = match idx.i18n_names.as_ref() {
+            Some(i) => i
+                .alternates_for(crate::i18n::ENTITY_ADMIN, poly_id as u32)
+                .map(|(_, name_id)| idx.get_string(name_id))
+                .filter(|alt| !alt.is_empty() && *alt != name)
+                .collect(),
+            None => Vec::new(),
+        };
+
+        // Rank derived from admin_level: level 4 (state) → 12, level 8
+        // (municipality) → 16, level 10 (suburb) → 18. Lower = more
+        // prominent. Mirrors PlacePoint.rank semantics so the bias
+        // re-rank treats both kinds uniformly.
+        let rank = (poly.admin_level as u64) + 8;
+
+        writer
+            .add_document(tantivy_doc(
+                &schema_handle,
+                name,
+                &alternates,
+                KIND_PLACE,
+                rank,
+                lat,
+                lng,
+                admin.city,
+                admin.state,
+                admin.country_code,
+            ))
+            .map_err(|e| format!("index admin polygon: {e}"))?;
+        stats.places += 1;
+    }
+
     // Streets
     let ways: &[WayHeader] = as_typed_slice(&idx.street_ways);
     let nodes: &[NodeCoord] = as_typed_slice(&idx.street_nodes);
@@ -435,6 +500,80 @@ pub fn build_partitioned_with_heap(
             })
             .collect();
         for (cc, doc) in place_candidates {
+            buckets.entry(cc).or_default().push(doc);
+        }
+    }
+
+    // Admin polygons (levels 4-10). Indexed as place-kind docs so
+    // admin-unit queries like "Saint-Quentin-en-Yvelines",
+    // "Hansestadt Stade", "Marburg an der Lahn" — formal names that
+    // live on `boundary=administrative` polygons rather than `place=*`
+    // points — return a result. Country (2-3) and postal code (11)
+    // are skipped: too generic, or non-name codes.
+    {
+        let polys: &[crate::AdminPolygon] = as_typed_slice(&idx.admin_polygons);
+        let admin_vertices: &[NodeCoord] = as_typed_slice(&idx.admin_vertices);
+        let admin_candidates: Vec<([u8; 2], PendingDoc<'_>)> = polys
+            .par_iter()
+            .enumerate()
+            .filter_map(|(poly_id, poly)| {
+                if poly.admin_level < 4 || poly.admin_level > 10 {
+                    return None;
+                }
+                let name = idx.get_string(poly.name_id);
+                if name.is_empty() {
+                    return None;
+                }
+                let off = poly.vertex_offset as usize;
+                let cnt = poly.vertex_count as usize;
+                if cnt == 0 || off + cnt > admin_vertices.len() {
+                    return None;
+                }
+                let mut sum_lat = 0.0f64;
+                let mut sum_lng = 0.0f64;
+                for v in &admin_vertices[off..off + cnt] {
+                    sum_lat += v.lat as f64;
+                    sum_lng += v.lng as f64;
+                }
+                let lat = sum_lat / cnt as f64;
+                let lng = sum_lng / cnt as f64;
+                let admin = idx.find_admin(lat, lng);
+                let cc = country_bytes(admin.country_code)?;
+
+                // entity_type=0 for admin polygons (mirrors the C++
+                // builder at builder/src/build_index.cpp:816).
+                let alternates: Vec<&str> = match idx.i18n_names.as_ref() {
+                    Some(i) => i
+                        .alternates_for(crate::i18n::ENTITY_ADMIN, poly_id as u32)
+                        .map(|(_, name_id)| idx.get_string(name_id))
+                        .filter(|alt| !alt.is_empty() && *alt != name)
+                        .collect(),
+                    None => Vec::new(),
+                };
+
+                // Rank from admin_level: level 4 (state) → 12, level
+                // 8 (municipality) → 16, level 10 (suburb) → 18.
+                // Lower = more prominent. Same scale as PlacePoint.rank
+                // so bias re-rank treats both kinds uniformly.
+                let rank = (poly.admin_level as u64) + 8;
+
+                Some((
+                    cc,
+                    PendingDoc {
+                        name,
+                        alternates,
+                        kind: KIND_PLACE,
+                        rank,
+                        lat,
+                        lng,
+                        suburb: admin.city,
+                        state: admin.state,
+                        country_code: cc,
+                    },
+                ))
+            })
+            .collect();
+        for (cc, doc) in admin_candidates {
             buckets.entry(cc).or_default().push(doc);
         }
     }

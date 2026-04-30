@@ -46,10 +46,9 @@ pub fn write(dir: &Path, tool: &str, extra: Value) -> std::io::Result<()> {
         }
     }
     let path = dir.join(format!("manifest_{tool}.json"));
-    let bytes = serde_json::to_vec_pretty(&obj)
-        .expect("manifest serialization is total over our value shape");
     let mut f = std::fs::File::create(&path)?;
-    f.write_all(&bytes)?;
+    serde_json::to_writer_pretty(&mut f, &obj)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     f.write_all(b"\n")?;
     eprintln!("wrote {}", path.display());
     Ok(())
