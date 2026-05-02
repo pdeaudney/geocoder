@@ -61,6 +61,12 @@ pub struct ForwardSchema {
     /// Empty for non-POI docs.
     pub category: Field,
     pub rank: Field,
+    /// Prominence importance score, 0..255. Sourced from the place
+    /// builder's `compute_place_importance` (population log + wikidata +
+    /// wikipedia bonuses). Stored & FAST so `boosted_score` can read it
+    /// at re-rank time. Always present on place docs; 0 for streets,
+    /// admins, and POIs (those have separate prominence signals).
+    pub importance: Field,
     pub lat: Field,
     pub lng: Field,
 }
@@ -147,6 +153,7 @@ impl ForwardSchema {
         // matches every amenity:* doc.
         let category = schema.add_text_field("category", text_opts);
         let rank = schema.add_u64_field("rank", FAST | STORED);
+        let importance = schema.add_u64_field("importance", FAST | STORED);
         let lat = schema.add_f64_field("lat", STORED | FAST);
         let lng = schema.add_f64_field("lng", STORED | FAST);
 
@@ -161,6 +168,7 @@ impl ForwardSchema {
             kind,
             category,
             rank,
+            importance,
             lat,
             lng,
         }
@@ -311,6 +319,7 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                     &alternates,
                     KIND_PLACE,
                     p.rank as u64,
+                    p.importance as u64,
                     lat,
                     lng,
                     admin.city,
@@ -399,6 +408,7 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                 &alternates,
                 KIND_PLACE,
                 rank,
+                0,
                 lat,
                 lng,
                 admin.city,
@@ -444,6 +454,7 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                 &[],
                 KIND_STREET,
                 26,
+                0,
                 lat,
                 lng,
                 admin.city,
@@ -495,6 +506,7 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                     &alternates,
                     KIND_POI,
                     poi.rank as u64,
+                    0,
                     lat,
                     lng,
                     suburb,
@@ -572,6 +584,10 @@ pub fn build_partitioned_with_heap(
         alternates: Vec<&'a str>,
         kind: u64,
         rank: u64,
+        /// Prominence importance, 0..255. Filled from PlacePoint
+        /// `importance` for places; 0 for streets, admin polygons, and
+        /// POIs (no signal collected for those at index time).
+        importance: u64,
         lat: f64,
         lng: f64,
         suburb: Option<&'a str>,
@@ -641,6 +657,7 @@ pub fn build_partitioned_with_heap(
                         alternates,
                         kind: KIND_PLACE,
                         rank: p.rank as u64,
+                        importance: p.importance as u64,
                         lat,
                         lng,
                         suburb: admin.city,
@@ -730,6 +747,7 @@ pub fn build_partitioned_with_heap(
                         alternates,
                         kind: KIND_PLACE,
                         rank,
+                        importance: 0,
                         lat,
                         lng,
                         suburb: admin.city,
@@ -783,6 +801,7 @@ pub fn build_partitioned_with_heap(
                     alternates: Vec::new(),
                     kind: KIND_STREET,
                     rank: 26,
+                    importance: 0,
                     lat,
                     lng,
                     suburb: admin.city,
@@ -843,6 +862,7 @@ pub fn build_partitioned_with_heap(
                         alternates,
                         kind: KIND_POI,
                         rank: poi.rank as u64,
+                        importance: 0,
                         lat,
                         lng,
                         suburb,
@@ -906,6 +926,7 @@ pub fn build_partitioned_with_heap(
                         &d.alternates,
                         d.kind,
                         d.rank,
+                        d.importance,
                         d.lat,
                         d.lng,
                         d.suburb,
@@ -989,6 +1010,7 @@ fn tantivy_doc(
     alternates: &[&str],
     kind: u64,
     rank: u64,
+    importance: u64,
     lat: f64,
     lng: f64,
     suburb: Option<&str>,
@@ -1073,6 +1095,7 @@ fn tantivy_doc(
         s.kind => kind,
         s.category => category,
         s.rank => rank,
+        s.importance => importance,
         s.lat => lat,
         s.lng => lng,
     )
@@ -1289,6 +1312,7 @@ impl Forward {
             kind: field("kind")?,
             category: field("category")?,
             rank: field("rank")?,
+            importance: field("importance")?,
             lat: field("lat")?,
             lng: field("lng")?,
             schema: schema_raw,
@@ -1728,7 +1752,13 @@ impl Forward {
         //     pass over a larger TopDocs heap — adds <1 ms at
         //     planet scale, paid only on bias-enabled queries.
         let oversample = if q.bias.is_some() {
-            (limit * 30).min(500)
+            // Cap raised from 500 → 1000 after Arlington (us) /
+            // Cornwall (ca) / Aurora (us) failures: highly-ambiguous
+            // toponyms in the US/UK can have 200+ name-only matches
+            // per country, and the right answer occasionally sits past
+            // BM25-rank 500. The extra 500 docs are cheap (TopDocs is
+            // a heap), and only paid on bias-enabled queries.
+            (limit * 30).min(1_000)
         } else {
             (limit * 3).min(150)
         };
@@ -1861,13 +1891,41 @@ fn boosted_score(hit: &Hit, bias: Option<&BiasCoord>) -> f32 {
             // prominence. Skipping the prominence boost here is the
             // mechanism that lets a Melbourne user searching
             // "St Kilda" see Melbourne's suburb (rank 19) above SA's
-            // admin centre (rank 16). The distance penalty is
-            // additive on the f32 BM25 score: ~0.5 units per ln-step
-            // of km. A 100 km miss costs ~0.46; a 10000 km miss
-            // ~0.92.
-            let d_km = crate::geo::haversine_m(hit.lat, hit.lng, b.lat, b.lng) / 1_000.0;
-            let penalty = (BiasCoord::DISTANCE_ALPHA as f32) * (d_km as f32 + 1.0).ln();
-            hit.score - penalty
+            // admin centre (rank 16).
+            //
+            // Penalty curve is piecewise:
+            //   d ≤ NEAR_RADIUS_KM (500): gentle ln penalty, same as
+            //     the original soft-bias regime. Within this band BM25
+            //     differences still dominate, so a slightly-better text
+            //     match a few hundred km away can win.
+            //   d > NEAR_RADIUS_KM:       ln penalty + linear penalty
+            //     in km beyond the radius. A candidate 1500 km away
+            //     pays an extra full BM25 unit on top of the ln term.
+            //     This is the mechanism that stops Arlington TX from
+            //     beating Arlington VA when the bias hint is on DC —
+            //     under pure-ln penalty their ~2000 km distance only
+            //     bought ~0.7 BM25 units, which TX's stronger BM25
+            //     routinely overcame. The linear component adds ~1.5
+            //     more units at that distance, decisively flipping it.
+            const NEAR_RADIUS_KM: f32 = 500.0;
+            const FAR_PENALTY_PER_KM: f32 = 1.0 / 1_000.0;
+            let d_km = (crate::geo::haversine_m(hit.lat, hit.lng, b.lat, b.lng) / 1_000.0) as f32;
+            let near_penalty = (BiasCoord::DISTANCE_ALPHA as f32) * (d_km + 1.0).ln();
+            let far_penalty = (d_km - NEAR_RADIUS_KM).max(0.0) * FAR_PENALTY_PER_KM;
+
+            // Prominence bonus from index-time importance signals
+            // (population log + wikidata + wikipedia). Saturates at
+            // 1.5 BM25 units, which is enough to flip a Wikipedia-
+            // backed major city above an obscure same-name village
+            // when both sit within similar distance from the bias
+            // hint. Scale chosen so an importance==255 doc gets the
+            // full bonus; <50 (no wiki, low population) contributes
+            // ~0.3 units. Only place docs carry meaningful importance
+            // (others stored 0), so streets and POIs see no bonus.
+            const IMPORTANCE_BONUS_MAX: f32 = 1.5;
+            let importance_bonus = (hit.importance as f32 / 255.0) * IMPORTANCE_BONUS_MAX;
+
+            hit.score + importance_bonus - near_penalty - far_penalty
         }
     }
 }
@@ -1912,6 +1970,11 @@ fn hit_from_doc(doc: &TantivyDocument, s: &ForwardSchema, score: f32) -> Result<
         country_code: optional_str(doc, s.country_code),
         kind: required_u64(doc, s.kind, "kind")?,
         rank: required_u64(doc, s.rank, "rank")?,
+        // Importance is stored on every doc but only meaningful for
+        // place kind. Default 0 here lets pre-importance indexes (built
+        // before this field landed) keep loading without a schema-
+        // mismatch error.
+        importance: doc.get_first(s.importance).and_then(|v| v.as_u64()).unwrap_or(0),
         lat: required_f64(doc, s.lat, "lat")?,
         lng: required_f64(doc, s.lng, "lng")?,
         score,
@@ -2165,6 +2228,12 @@ pub struct Hit {
     pub country_code: Option<String>,
     pub kind: u64,
     pub rank: u64,
+    /// Prominence importance, 0..255. 0 for non-place docs (admin
+    /// polygons, streets, POIs) and for place docs from indexes built
+    /// before importance ingestion landed. Not part of the public JSON
+    /// response; used only for re-ranking.
+    #[serde(skip)]
+    pub importance: u64,
     pub lat: f64,
     pub lng: f64,
     pub score: f32,
@@ -2180,4 +2249,112 @@ pub fn fuzzy_name(schema: &ForwardSchema, token: &str, distance: u8) -> Box<dyn 
         distance,
         true,
     ))
+}
+
+#[cfg(test)]
+mod bias_curve_tests {
+    use super::*;
+
+    fn hit(score: f32, lat: f64, lng: f64) -> Hit {
+        hit_with_importance(score, lat, lng, 0)
+    }
+
+    fn hit_with_importance(score: f32, lat: f64, lng: f64, importance: u64) -> Hit {
+        Hit {
+            name: String::new(),
+            suburb: None,
+            state: None,
+            country_code: None,
+            kind: 0,
+            rank: 16,
+            importance,
+            lat,
+            lng,
+            score,
+        }
+    }
+
+    /// Arlington failure regression. Bias hint over Washington DC; a
+    /// stronger-BM25 Arlington TX (~2000 km away) used to beat the
+    /// weaker-BM25 Arlington VA (0 km from hint) under the pure-ln
+    /// penalty. The piecewise curve adds a linear far-distance term
+    /// that flips the ordering.
+    #[test]
+    fn far_distance_penalty_flips_ambiguous_winner() {
+        let bias = BiasCoord { lat: 38.88, lng: -77.10 };
+        let arlington_va = hit(2.0, 38.88, -77.10);
+        let arlington_tx = hit(4.0, 32.74, -97.32);
+
+        let s_va = boosted_score(&arlington_va, Some(&bias));
+        let s_tx = boosted_score(&arlington_tx, Some(&bias));
+
+        assert!(
+            s_va > s_tx,
+            "Arlington VA ({s_va}) should outrank Arlington TX ({s_tx})"
+        );
+    }
+
+    /// Within the near radius, BM25 should still dominate small
+    /// distance differences. A clearly-better text match a few hundred
+    /// km away beats a weak match at the bias point.
+    #[test]
+    fn near_radius_lets_bm25_dominate() {
+        let bias = BiasCoord { lat: 0.0, lng: 0.0 };
+        let strong_at_300km = hit(5.0, 2.7, 0.0); // ~300 km north
+        let weak_at_origin  = hit(1.0, 0.0, 0.0);
+
+        let s_strong = boosted_score(&strong_at_300km, Some(&bias));
+        let s_weak   = boosted_score(&weak_at_origin, Some(&bias));
+
+        assert!(s_strong > s_weak, "strong BM25 within near radius should still win");
+    }
+
+    /// Without bias the prominence boost is preserved — a rank-16 city
+    /// should outscore a rank-26 street at equal BM25.
+    #[test]
+    fn no_bias_uses_prominence_boost() {
+        let mut city   = hit(1.0, 0.0, 0.0); city.rank = 16;
+        let mut street = hit(1.0, 0.0, 0.0); street.rank = 26;
+
+        let s_city   = boosted_score(&city, None);
+        let s_street = boosted_score(&street, None);
+
+        assert!(s_city > s_street, "city should outscore street under prominence boost");
+    }
+
+    /// Importance bonus flips the ranking among co-located same-name
+    /// candidates. A wikipedia-backed major city (importance 200) at
+    /// the bias hint should outscore a same-distance obscure village
+    /// (importance 0) even when the village has slightly stronger
+    /// BM25.
+    #[test]
+    fn importance_bonus_flips_close_ambiguous() {
+        let bias = BiasCoord { lat: 0.0, lng: 0.0 };
+        let major   = hit_with_importance(2.0, 0.0, 0.0, 200);
+        let obscure = hit_with_importance(2.5, 0.0, 0.0, 0);
+
+        let s_major   = boosted_score(&major, Some(&bias));
+        let s_obscure = boosted_score(&obscure, Some(&bias));
+
+        assert!(
+            s_major > s_obscure,
+            "major (importance=200, bm25=2.0) should outrank obscure \
+             (importance=0, bm25=2.5): got major={s_major}, obscure={s_obscure}"
+        );
+    }
+
+    /// Importance bonus is bounded — it cannot single-handedly flip
+    /// vastly different BM25 scores. A 5-unit BM25 gap dwarfs the
+    /// max 1.5-unit importance bonus.
+    #[test]
+    fn importance_bonus_cannot_overpower_bm25() {
+        let bias = BiasCoord { lat: 0.0, lng: 0.0 };
+        let weak_major   = hit_with_importance(1.0, 0.0, 0.0, 255);
+        let strong_plain = hit_with_importance(6.0, 0.0, 0.0, 0);
+
+        let s_weak   = boosted_score(&weak_major, Some(&bias));
+        let s_strong = boosted_score(&strong_plain, Some(&bias));
+
+        assert!(s_strong > s_weak, "BM25 should dominate when the gap is large");
+    }
 }

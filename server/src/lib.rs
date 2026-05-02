@@ -143,7 +143,15 @@ pub struct PlacePoint {
     /// Nominatim-style address rank: 16 = city/town/village, 19 = suburb,
     /// 20 = hamlet. Lower rank = larger/more prominent feature.
     pub rank: u8,
-    _pad: [u8; 3],
+    /// Prominence score derived at index time from `population`,
+    /// `wikidata`, and `wikipedia` tags (saturating, 0..255).
+    /// Forward-search ranking uses this as a tiebreaker among same-name
+    /// candidates under proximity bias — a `wikipedia`-backed major
+    /// city outranks a same-named obscure village even when text BM25
+    /// favours the latter. See `builder/src/build_index.cpp`
+    /// `compute_place_importance` for the exact formula.
+    pub importance: u8,
+    _pad: [u8; 2],
 }
 
 /// A POI (amenity/shop/tourism/aeroway/historic/leisure/office/

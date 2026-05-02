@@ -48,7 +48,7 @@ fn node_coord_size() {
 
 #[test]
 fn place_point_size() {
-    // f32 + f32 + u32 + u8 + 3B pad = 16
+    // f32 + f32 + u32 + u8 (rank) + u8 (importance) + 2B pad = 16
     assert_eq!(size_of::<PlacePoint>(), 16);
     assert_eq!(align_of::<PlacePoint>(), 4);
 }

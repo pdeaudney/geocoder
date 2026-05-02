@@ -163,6 +163,80 @@ struct Candidate<'a> {
     name_id: u32,
 }
 
+/// Romance/Germanic place names commonly carry a leading definite
+/// article that real users typing in autocomplete won't include.
+/// Returns the name with that article stripped, or `None` if the name
+/// does not start with one. Two forms are recognised:
+///   - Space-separated: "A Fonsagrada" → "Fonsagrada", "The Hague" →
+///     "Hague", "Le Havre" → "Havre".
+///   - Apostrophe-elision: "L'Aquila" → "Aquila", "L'Aigle" → "Aigle"
+///     (Italian / French / Catalan; both ASCII `'` and Unicode `’`).
+/// The article match is case-insensitive; the returned remainder is
+/// untouched so the existing FST normaliser handles the rest.
+///
+/// Conservative on purpose: only definite-article forms (the/le/la/el/...);
+/// no demonstratives, possessives, or prepositions. False positives
+/// here would index unrelated entries under the stripped key —
+/// e.g. stripping "I" from English "I-95 corridor" would be wrong
+/// (handled by the language-aware list staying short).
+fn strip_leading_article(name: &str) -> Option<String> {
+    let trimmed = name.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Apostrophe-elision: L', D', N', etc. (no space after the article).
+    // Inspect the first two CHARS (not bytes) so the Unicode right single
+    // quotation mark `’` (3 bytes in UTF-8) doesn't get sliced mid-codepoint.
+    let mut chars = trimmed.chars();
+    if let (Some(c0), Some(c1)) = (chars.next(), chars.next()) {
+        let head_lower: String = [c0, c1].iter().flat_map(|c| c.to_lowercase()).collect();
+        let is_elision = matches!(
+            head_lower.as_str(),
+            "l'" | "l\u{2019}" | "d'" | "d\u{2019}" | "n'" | "n\u{2019}"
+        );
+        if is_elision {
+            let after = c0.len_utf8() + c1.len_utf8();
+            let rest = trimmed[after..].trim_start();
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+    }
+
+    // Space-separated articles.
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let first = parts.next()?;
+    let rest = parts.next().map(str::trim_start).unwrap_or("");
+    if rest.is_empty() {
+        return None;
+    }
+    let first_lower: String = first.chars().flat_map(char::to_lowercase).collect();
+
+    // Definite articles across English / French / Spanish / Italian /
+    // Portuguese / Galician / Catalan / German / Dutch / Welsh. Single-
+    // character entries are dangerous (Galician "A"/"O", Welsh "Y") but
+    // necessary for real OSM names like "A Coruña" / "O Barco" /
+    // "Y Fenni" — the FST emits BOTH the full and stripped variants,
+    // so a false-strip just adds an extra (harmless) index entry.
+    const ARTICLES: &[&str] = &[
+        "the",                       // English
+        "le", "la", "les",           // French
+        "el", "los", "las",          // Spanish
+        "il", "lo", "i", "gli",      // Italian
+        "o", "a", "os", "as",        // Portuguese / Galician
+        "els",                       // Catalan (overlaps les / el)
+        "der", "die", "das",         // German
+        "de", "het",                 // Dutch
+        "y", "yr",                   // Welsh
+    ];
+    if ARTICLES.contains(&first_lower.as_str()) {
+        Some(rest.to_string())
+    } else {
+        None
+    }
+}
+
 fn run(
     dir: &PathBuf,
     country_filter: Option<&HashSet<[u8; 2]>>,
@@ -233,6 +307,29 @@ fn run(
                 continue;
             }
             insert_key(pc, alias_key, entry_idx, cand.rank);
+        }
+
+        // Article-stripped variants. "A Fonsagrada" → also indexed as
+        // "Fonsagrada"; "L'Aquila" → also "Aquila". Lets users typing
+        // the recognisable part of a name reach entries whose canonical
+        // OSM form starts with a definite article. Cost is an extra FST
+        // key per article-bearing name (~5-10% of names in IT/FR/ES/PT/
+        // GL/CA/CY OSM data). Dedup against the canonical key happens
+        // via the BTreeMap, so non-article names cost only the article
+        // probe, no extra insert.
+        if let Some(stripped) = strip_leading_article(cand.name) {
+            let stripped_key = normalise_fst_key(&stripped);
+            if !stripped_key.is_empty() && stripped_key != key {
+                insert_key(pc, stripped_key, entry_idx, cand.rank);
+            }
+        }
+        for alias in &cand.aliases {
+            if let Some(stripped) = strip_leading_article(alias) {
+                let stripped_key = normalise_fst_key(&stripped);
+                if !stripped_key.is_empty() && stripped_key != key {
+                    insert_key(pc, stripped_key, entry_idx, cand.rank);
+                }
+            }
         }
 
         // Latin transliterations of every non-Latin source name
@@ -771,4 +868,67 @@ fn read_cstr(pool: &[u8], offset: u32) -> &str {
 /// implementation to keep in sync.
 fn normalise_fst_key(s: &str) -> String {
     query_server::autocomplete::normalise_prefix(s)
+}
+
+#[cfg(test)]
+mod article_strip_tests {
+    use super::strip_leading_article;
+
+    #[test]
+    fn galician_a_fonsagrada() {
+        assert_eq!(strip_leading_article("A Fonsagrada"), Some("Fonsagrada".into()));
+        assert_eq!(strip_leading_article("A Coruña"),     Some("Coruña".into()));
+    }
+
+    #[test]
+    fn english_the_hague() {
+        assert_eq!(strip_leading_article("The Hague"), Some("Hague".into()));
+        assert_eq!(strip_leading_article("the Bronx"), Some("Bronx".into()));
+    }
+
+    #[test]
+    fn french_le_havre_les_baux() {
+        assert_eq!(strip_leading_article("Le Havre"), Some("Havre".into()));
+        assert_eq!(strip_leading_article("La Rochelle"), Some("Rochelle".into()));
+        assert_eq!(strip_leading_article("Les Baux-de-Provence"), Some("Baux-de-Provence".into()));
+    }
+
+    #[test]
+    fn spanish_el_la_los_las() {
+        assert_eq!(strip_leading_article("El Escorial"), Some("Escorial".into()));
+        assert_eq!(strip_leading_article("La Coruña"),  Some("Coruña".into()));
+        assert_eq!(strip_leading_article("Los Angeles"), Some("Angeles".into()));
+        assert_eq!(strip_leading_article("Las Vegas"),  Some("Vegas".into()));
+    }
+
+    #[test]
+    fn italian_apostrophe_elision() {
+        assert_eq!(strip_leading_article("L'Aquila"), Some("Aquila".into()));
+        assert_eq!(strip_leading_article("L\u{2019}Aigle"), Some("Aigle".into())); // Unicode apostrophe
+    }
+
+    #[test]
+    fn german_dutch_welsh() {
+        assert_eq!(strip_leading_article("Der Spiegel"), Some("Spiegel".into()));
+        assert_eq!(strip_leading_article("De Wolden"),   Some("Wolden".into()));
+        assert_eq!(strip_leading_article("Y Fenni"),     Some("Fenni".into()));
+        assert_eq!(strip_leading_article("Yr Wyddgrug"), Some("Wyddgrug".into()));
+    }
+
+    #[test]
+    fn no_article_no_strip() {
+        assert_eq!(strip_leading_article("Madrid"),    None);
+        assert_eq!(strip_leading_article("Berlin"),    None);
+        assert_eq!(strip_leading_article("Paris"),     None);
+        // Single-token names where the only token happens to be an
+        // article are also returned as None — there's nothing to strip.
+        assert_eq!(strip_leading_article("La"),        None);
+        assert_eq!(strip_leading_article(""),          None);
+    }
+
+    #[test]
+    fn case_insensitive_match() {
+        assert_eq!(strip_leading_article("LA Habana"),    Some("Habana".into()));
+        assert_eq!(strip_leading_article("THE Bronx"),    Some("Bronx".into()));
+    }
 }

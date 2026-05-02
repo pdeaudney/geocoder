@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -104,12 +105,21 @@ struct NodeCoord {
 
 // place=* point feature (city/town/village/suburb/hamlet) — used as a
 // fallback locality when admin boundaries don't cover an area.
+//
+// `importance` is a Nominatim-style prominence score derived from
+// `population` (log scale), `wikidata`, and `wikipedia` tags at index
+// time. The runtime uses it when proximity-biasing a search so that
+// among same-name candidates within similar distance the more
+// internationally-known place wins (Arlington VA outranks Arlington TX
+// even when text BM25 favours TX, given a Washington-DC bias hint).
+// 0..255, saturating; see `compute_place_importance` for the formula.
 struct PlacePoint {
     float lat;
     float lng;
     uint32_t name_id;
     uint8_t rank;         // Nominatim-style address rank: 16=city/town, 19=suburb, 20=hamlet
-    uint8_t _pad[3];
+    uint8_t importance;   // 0..255, derived from population + wiki tags
+    uint8_t _pad[2];
 };
 
 // POI feature (amenity/shop/tourism/aeroway/historic/...). Indexed
@@ -864,10 +874,43 @@ static bool try_emit_poi(double lat, double lng, const Tags& tags) {
     return false;
 }
 
+// Importance score from Nominatim-style prominence signals. Saturates
+// at 255 so it fits in u8. Values:
+//   - population: log10(pop)/8.0 * 100. log10(100M) = 8 ⇒ 100, 1M ⇒ 75,
+//     100k ⇒ 62, 10k ⇒ 50, 1k ⇒ 37. Below ~10k contributes little.
+//   - +30 if `wikidata` tag present.
+//   - +50 if `wikipedia` tag present.
+// Wikipedia is the strongest single signal; combined with a real
+// population this commonly saturates for major world cities (75 + 30 +
+// 50 = 155, room remains for super-prominent capitals like Tokyo
+// where population alone hits 87).
+template <typename Tags>
+static uint8_t compute_place_importance(const Tags& tags) {
+    uint32_t score = 0;
+
+    const char* pop = tags["population"];
+    if (pop && *pop) {
+        char* end = nullptr;
+        double n = std::strtod(pop, &end);
+        if (end != pop && n > 0.0 && std::isfinite(n)) {
+            double normalized = std::log10(n) / 8.0;
+            if (normalized > 1.0) normalized = 1.0;
+            if (normalized < 0.0) normalized = 0.0;
+            score += static_cast<uint32_t>(normalized * 100.0);
+        }
+    }
+
+    if (tags["wikidata"]  != nullptr) score += 30;
+    if (tags["wikipedia"] != nullptr) score += 50;
+
+    return static_cast<uint8_t>(std::min<uint32_t>(score, 255));
+}
+
 // Returns the `place_id` the point was assigned to, or UINT32_MAX when
 // the point was dropped. Callers can pass that id plus the feature's
 // OSM tag list into `collect_i18n_names` to capture localized name:xx.
-static uint32_t add_place_point(double lat, double lng, uint8_t rank, const char* name) {
+static uint32_t add_place_point(double lat, double lng, uint8_t rank,
+                                uint8_t importance, const char* name) {
     if (!name || !*name) return UINT32_MAX;
     uint32_t place_id = checked_u32(place_points.size(), "place_points id");
     place_points.push_back({
@@ -875,7 +918,8 @@ static uint32_t add_place_point(double lat, double lng, uint8_t rank, const char
         static_cast<float>(lng),
         strings.intern(name),
         rank,
-        {0, 0, 0},
+        importance,
+        {0, 0},
     });
 
     // Index at kAdminCellLevel so nearest-neighbour queries use the same
@@ -1165,8 +1209,19 @@ static bool process_address_tags(double lat, double lng, const Tags& tags,
 static uint32_t add_admin_polygon(const std::vector<std::pair<double,double>>& vertices,
                                    const char* name, uint8_t admin_level,
                                    const char* country_code) {
-    // Simplify large polygons
-    auto simplified = simplify_polygon(vertices, 500);
+    // Vertex cap scaled by admin_level. Country borders (level 2) need
+    // high fidelity because reverse-geocode failures cluster within a
+    // few km of international borders — at 500 vertices a country
+    // outline drifts kilometres in places, putting query points on
+    // the wrong side of the border. States/provinces (level 4) need
+    // moderate detail; suburbs/cities (level 8+) tolerate aggressive
+    // simplification because they're rarely the deciding boundary.
+    size_t max_vertices;
+    if (admin_level <= 2)      max_vertices = 8000;  // countries
+    else if (admin_level <= 4) max_vertices = 3000;  // states/provinces
+    else if (admin_level <= 6) max_vertices = 1500;  // counties/regions
+    else                       max_vertices = 500;   // cities/districts/suburbs
+    auto simplified = simplify_polygon(vertices, max_vertices);
     if (simplified.size() < 3) return UINT32_MAX;
 
     uint32_t poly_id = checked_u32(admin_polygons.size(), "admin_polygon id");
@@ -1211,7 +1266,8 @@ public:
             uint8_t rank = place_rank(place);
             if (rank > 0) {
                 const char* name = node.tags()["name"];
-                uint32_t place_id = add_place_point(lat, lng, rank, name);
+                uint8_t importance = compute_place_importance(node.tags());
+                uint32_t place_id = add_place_point(lat, lng, rank, importance, name);
                 if (place_id != UINT32_MAX) {
                     collect_i18n_names(node.tags(), ENTITY_PLACE, place_id);
                 }
@@ -1288,7 +1344,8 @@ public:
                 if (place && way_name && *way_name) {
                     uint8_t rank = place_rank(place);
                     if (rank > 0) {
-                        uint32_t place_id = add_place_point(clat, clng, rank, way_name);
+                        uint8_t importance = compute_place_importance(way.tags());
+                        uint32_t place_id = add_place_point(clat, clng, rank, importance, way_name);
                         if (place_id != UINT32_MAX) {
                             collect_i18n_names(way.tags(), ENTITY_PLACE, place_id);
                         }
@@ -1392,8 +1449,9 @@ public:
                 if (needs_centroid) compute_centroid();
                 if (centroid_valid) {
                     uint8_t prank = place_rank(place_tag);
+                    uint8_t pimp = compute_place_importance(area.tags());
                     uint32_t place_id = add_place_point(
-                        cent_lat, cent_lng, prank, pname);
+                        cent_lat, cent_lng, prank, pimp, pname);
                     if (place_id != UINT32_MAX) {
                         collect_i18n_names(area.tags(), ENTITY_PLACE, place_id);
                     }
