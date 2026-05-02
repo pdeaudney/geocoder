@@ -35,16 +35,31 @@ use tantivy::{
 
 pub const KIND_PLACE: u64 = 1;
 pub const KIND_STREET: u64 = 2;
+pub const KIND_POI: u64 = 3;
 
 /// Schema handle — kept together so build + query code agree on field ids.
 pub struct ForwardSchema {
     pub schema: Schema,
     pub name: Field,
+    /// Multilingual aliases — `name:xx` translations and Latin
+    /// transliterations for non-Latin scripts. Indexed in a separate
+    /// field so the canonical `name` field stays short and BM25
+    /// length normalization doesn't tank the canonical term's score
+    /// for major cities (Sydney has 81 `name:xx` tags; without this
+    /// split, the place_point's "sydney" token scored 0.28 vs 8.0
+    /// for "Sydney Street", and never appeared in top-K).
+    pub alt_name: Field,
     pub name_raw: Field,
     pub suburb: Field,
     pub state: Field,
     pub country_code: Field,
     pub kind: Field,
+    /// POI category — `<key>:<value>` interned at build time
+    /// (`amenity:cafe`, `tourism:attraction`, ...). Indexed (tokenised
+    /// on `:`) so callers can pass e.g. `category=amenity` to filter to
+    /// any amenity, or `category=cafe` to filter to cafes specifically.
+    /// Empty for non-POI docs.
+    pub category: Field,
     pub rank: Field,
     pub lat: Field,
     pub lng: Field,
@@ -119,12 +134,18 @@ impl ForwardSchema {
             .set_stored();
 
         let name = schema.add_text_field("name", text_opts.clone());
+        let alt_name = schema.add_text_field("alt_name", text_opts.clone());
         let name_raw = schema.add_text_field("name_raw", STRING | STORED);
         // Enrichment fields — tokenized so "baulkham hills" matches both tokens.
         let suburb = schema.add_text_field("suburb", text_opts.clone());
-        let state = schema.add_text_field("state", text_opts);
+        let state = schema.add_text_field("state", text_opts.clone());
         let country_code = schema.add_text_field("country_code", STRING | STORED);
         let kind = schema.add_u64_field("kind", INDEXED | FAST | STORED);
+        // category is tokenised (the colon in `amenity:cafe` becomes a
+        // word break) so a freeform query for "cafe" matches POIs of
+        // type amenity:cafe, and a structured `category=amenity` filter
+        // matches every amenity:* doc.
+        let category = schema.add_text_field("category", text_opts);
         let rank = schema.add_u64_field("rank", FAST | STORED);
         let lat = schema.add_f64_field("lat", STORED | FAST);
         let lng = schema.add_f64_field("lng", STORED | FAST);
@@ -132,11 +153,13 @@ impl ForwardSchema {
         ForwardSchema {
             schema: schema.build(),
             name,
+            alt_name,
             name_raw,
             suburb,
             state,
             country_code,
             kind,
+            category,
             rank,
             lat,
             lng,
@@ -150,6 +173,56 @@ impl ForwardSchema {
 pub struct BuildStats {
     pub places: usize,
     pub streets: usize,
+}
+
+/// Signed-area-weighted polygon centroid (lat, lng). Falls back to the
+/// arithmetic mean when the polygon has fewer than 3 vertices or is
+/// degenerate (collinear vertices, zero signed area). Vertex-density
+/// independent — important for admin polygons whose boundary is densely
+/// sampled along coast / mountain edges and sparse along straight
+/// inland sections.
+fn polygon_centroid(verts: &[NodeCoord]) -> (f64, f64) {
+    let n = verts.len();
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let mean = || -> (f64, f64) {
+        let sum_lat: f64 = verts.iter().map(|v| v.lat as f64).sum();
+        let sum_lng: f64 = verts.iter().map(|v| v.lng as f64).sum();
+        (sum_lat / n as f64, sum_lng / n as f64)
+    };
+    if n < 3 {
+        return mean();
+    }
+    let mut a2 = 0.0f64;
+    let mut cx = 0.0f64;
+    let mut cy = 0.0f64;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let xi = verts[i].lng as f64;
+        let yi = verts[i].lat as f64;
+        let xj = verts[j].lng as f64;
+        let yj = verts[j].lat as f64;
+        let cross = xi * yj - xj * yi;
+        a2 += cross;
+        cx += (xi + xj) * cross;
+        cy += (yi + yj) * cross;
+    }
+    if a2.abs() < 1e-12 {
+        return mean();
+    }
+    let factor = 1.0 / (3.0 * a2);
+    (cy * factor, cx * factor)
+}
+
+/// Bucket a (lat, lng) into a 0.1°-grid cell (~11 km at the equator) for
+/// the place/admin-polygon dedup pass. Coarse enough that a city's
+/// `place=*` point and its `boundary=administrative` polygon centroid
+/// land in the same bucket; fine enough that two distinct cities sharing
+/// a name (Springfield IL vs Springfield MO ~ 290 km apart) stay distinct.
+#[inline]
+fn coord_bucket(lat: f64, lng: f64) -> (i32, i32) {
+    ((lat * 10.0).round() as i32, (lng * 10.0).round() as i32)
 }
 
 /// Build a single monolithic tantivy index at `dest`. Everything goes in
@@ -225,7 +298,7 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                 .as_ref()
                 .map(|i| {
                     i.alternates_for(crate::i18n::ENTITY_PLACE, place_id as u32)
-                        .map(|(_, name_id)| idx.get_string(name_id))
+                        .map(|(_, _, name_id)| idx.get_string(name_id))
                         .filter(|alt| !alt.is_empty() && *alt != name)
                         .collect()
                 })
@@ -243,10 +316,98 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                     admin.city,
                     admin.state,
                     admin.country_code,
+                    "",
                 ))
                 .map_err(|e| format!("index place: {e}"))?;
             stats.places += 1;
         }
+    }
+
+    // Build a (name_id, ~11km bucket) signature set from place_points
+    // so admin polygons that duplicate an existing place=* doc can be
+    // dropped. Without dedup, a city with both place=town AND
+    // boundary=administrative ends up as two near-identical Tantivy
+    // docs at the same coord — BM25 ranking then becomes order-of-
+    // insertion-dependent under bias.
+    let mut place_signature: std::collections::HashSet<(u32, i32, i32)> =
+        std::collections::HashSet::new();
+    if let Some(pp) = idx.place_points.as_ref() {
+        let points: &[PlacePoint] = as_typed_slice(pp);
+        for p in points {
+            if idx.get_string(p.name_id).is_empty() {
+                continue;
+            }
+            let (b_lat, b_lng) = coord_bucket(p.lat as f64, p.lng as f64);
+            place_signature.insert((p.name_id, b_lat, b_lng));
+        }
+    }
+
+    // Admin polygons (levels 4-10). Indexed as place-kind docs so
+    // admin-unit queries like "Saint-Quentin-en-Yvelines",
+    // "Hansestadt Stade", "Marburg an der Lahn" — formal names sitting
+    // on `boundary=administrative` polygons rather than `place=*`
+    // points — return a result. Country (2-3) and postal code (11)
+    // are skipped: too generic, or non-name codes.
+    let polys: &[crate::AdminPolygon] = as_typed_slice(&idx.admin_polygons);
+    let admin_vertices: &[NodeCoord] = as_typed_slice(&idx.admin_vertices);
+    for (poly_id, poly) in polys.iter().enumerate() {
+        if poly.admin_level < 4 || poly.admin_level > 10 {
+            continue;
+        }
+        let name = idx.get_string(poly.name_id);
+        if name.is_empty() {
+            continue;
+        }
+        let off = poly.vertex_offset as usize;
+        let cnt = poly.vertex_count as usize;
+        if cnt == 0 || off + cnt > admin_vertices.len() {
+            continue;
+        }
+        let (lat, lng) = polygon_centroid(&admin_vertices[off..off + cnt]);
+
+        // Drop when an existing place_point already covers this
+        // (name, ~11km bucket) cell. The place_point is more
+        // authoritative (carries the OSM-curated `place=*` rank).
+        let (b_lat, b_lng) = coord_bucket(lat, lng);
+        if place_signature.contains(&(poly.name_id, b_lat, b_lng)) {
+            continue;
+        }
+
+        let admin = idx.find_admin(lat, lng);
+
+        // entity_type=0 for admin polygons (mirrors the C++ builder's
+        // i18n_names emission at builder/src/build_index.cpp:816).
+        let alternates: Vec<&str> = match idx.i18n_names.as_ref() {
+            Some(i) => i
+                .alternates_for(crate::i18n::ENTITY_ADMIN, poly_id as u32)
+                .map(|(_, _, name_id)| idx.get_string(name_id))
+                .filter(|alt| !alt.is_empty() && *alt != name)
+                .collect(),
+            None => Vec::new(),
+        };
+
+        // Rank derived from admin_level: level 4 (state) → 12, level 8
+        // (municipality) → 16, level 10 (suburb) → 18. Lower = more
+        // prominent. Mirrors PlacePoint.rank semantics so the bias
+        // re-rank treats both kinds uniformly.
+        let rank = (poly.admin_level as u64) + 8;
+
+        writer
+            .add_document(tantivy_doc(
+                &schema_handle,
+                name,
+                &alternates,
+                KIND_PLACE,
+                rank,
+                lat,
+                lng,
+                admin.city,
+                admin.state,
+                admin.country_code,
+                "",
+            ))
+            .map_err(|e| format!("index admin polygon: {e}"))?;
+        stats.places += 1;
     }
 
     // Streets
@@ -288,9 +449,61 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                 admin.city,
                 admin.state,
                 admin.country_code,
+                "",
             ))
             .map_err(|e| format!("index street: {e}"))?;
         stats.streets += 1;
+    }
+
+    // POIs (commit 5). Index every named amenity/shop/tourism/etc.
+    // alongside places and streets so /search returns "Sydney Opera
+    // House" for the tourism POI in Sydney. Category is the interned
+    // `<key>:<value>` string. Tagged parent_place_id (from
+    // addr:city/suburb/locality) wins over geometric find_admin
+    // enrichment when set — matches the AddrPoint behaviour.
+    if let Some(pois_mmap) = idx.poi_points.as_ref() {
+        let pois: &[crate::PoiPoint] = as_typed_slice(pois_mmap);
+        for (poi_id, poi) in pois.iter().enumerate() {
+            let name = idx.get_string(poi.name_id);
+            if name.is_empty() {
+                continue;
+            }
+            let lat = poi.lat as f64;
+            let lng = poi.lng as f64;
+            let geo_admin = idx.find_admin(lat, lng);
+            let tagged_parent: Option<&str> = if poi.parent_place_id != 0 {
+                Some(idx.get_string(poi.parent_place_id))
+            } else {
+                None
+            };
+            let suburb = tagged_parent.or(geo_admin.city);
+            let category = idx.get_string(poi.category_id);
+            let alternates: Vec<&str> = idx
+                .i18n_names
+                .as_ref()
+                .map(|i| {
+                    i.alternates_for(crate::i18n::ENTITY_POI, poi_id as u32)
+                        .map(|(_, _, name_id)| idx.get_string(name_id))
+                        .filter(|alt| !alt.is_empty() && *alt != name)
+                        .collect()
+                })
+                .unwrap_or_default();
+            writer
+                .add_document(tantivy_doc(
+                    &schema_handle,
+                    name,
+                    &alternates,
+                    KIND_POI,
+                    poi.rank as u64,
+                    lat,
+                    lng,
+                    suburb,
+                    geo_admin.state,
+                    geo_admin.country_code,
+                    category,
+                ))
+                .map_err(|e| format!("index poi: {e}"))?;
+        }
     }
 
     writer
@@ -364,6 +577,9 @@ pub fn build_partitioned_with_heap(
         suburb: Option<&'a str>,
         state: Option<&'a str>,
         country_code: [u8; 2],
+        /// POI category — `<key>:<value>` interned in strings.bin
+        /// (e.g. `amenity:cafe`). Empty for non-POI docs.
+        category: &'a str,
     }
 
     // Helper: resolve a doc's country code from find_admin-derived bytes.
@@ -412,7 +628,7 @@ pub fn build_partitioned_with_heap(
                     .as_ref()
                     .map(|i| {
                         i.alternates_for(crate::i18n::ENTITY_PLACE, place_id as u32)
-                            .map(|(_, name_id)| idx.get_string(name_id))
+                            .map(|(_, _, name_id)| idx.get_string(name_id))
                             .filter(|alt| !alt.is_empty() && *alt != name)
                             .collect()
                     })
@@ -430,11 +646,101 @@ pub fn build_partitioned_with_heap(
                         suburb: admin.city,
                         state: admin.state,
                         country_code: cc,
+                        category: "",
                     },
                 ))
             })
             .collect();
         for (cc, doc) in place_candidates {
+            buckets.entry(cc).or_default().push(doc);
+        }
+    }
+
+    // Admin polygons (levels 4-10). Indexed as place-kind docs so
+    // admin-unit queries like "Saint-Quentin-en-Yvelines",
+    // "Hansestadt Stade", "Marburg an der Lahn" — formal names that
+    // live on `boundary=administrative` polygons rather than `place=*`
+    // points — return a result. Country (2-3) and postal code (11)
+    // are skipped: too generic, or non-name codes.
+    // Build a (name_id, ~11km bucket) signature from place_points so
+    // admin polygons duplicating an existing place=* doc can be
+    // dropped — see the monolithic path for rationale.
+    let mut place_signature: std::collections::HashSet<(u32, i32, i32)> =
+        std::collections::HashSet::new();
+    if let Some(pp) = idx.place_points.as_ref() {
+        let points: &[PlacePoint] = as_typed_slice(pp);
+        for p in points {
+            if idx.get_string(p.name_id).is_empty() {
+                continue;
+            }
+            let (b_lat, b_lng) = coord_bucket(p.lat as f64, p.lng as f64);
+            place_signature.insert((p.name_id, b_lat, b_lng));
+        }
+    }
+
+    {
+        let polys: &[crate::AdminPolygon] = as_typed_slice(&idx.admin_polygons);
+        let admin_vertices: &[NodeCoord] = as_typed_slice(&idx.admin_vertices);
+        let place_signature_ref = &place_signature;
+        let admin_candidates: Vec<([u8; 2], PendingDoc<'_>)> = polys
+            .par_iter()
+            .enumerate()
+            .filter_map(|(poly_id, poly)| {
+                if poly.admin_level < 4 || poly.admin_level > 10 {
+                    return None;
+                }
+                let name = idx.get_string(poly.name_id);
+                if name.is_empty() {
+                    return None;
+                }
+                let off = poly.vertex_offset as usize;
+                let cnt = poly.vertex_count as usize;
+                if cnt == 0 || off + cnt > admin_vertices.len() {
+                    return None;
+                }
+                let (lat, lng) = polygon_centroid(&admin_vertices[off..off + cnt]);
+                let (b_lat, b_lng) = coord_bucket(lat, lng);
+                if place_signature_ref.contains(&(poly.name_id, b_lat, b_lng)) {
+                    return None;
+                }
+                let admin = idx.find_admin(lat, lng);
+                let cc = country_bytes(admin.country_code)?;
+
+                // entity_type=0 for admin polygons (mirrors the C++
+                // builder at builder/src/build_index.cpp:816).
+                let alternates: Vec<&str> = match idx.i18n_names.as_ref() {
+                    Some(i) => i
+                        .alternates_for(crate::i18n::ENTITY_ADMIN, poly_id as u32)
+                        .map(|(_, _, name_id)| idx.get_string(name_id))
+                        .filter(|alt| !alt.is_empty() && *alt != name)
+                        .collect(),
+                    None => Vec::new(),
+                };
+
+                // Rank from admin_level: level 4 (state) → 12, level
+                // 8 (municipality) → 16, level 10 (suburb) → 18.
+                // Lower = more prominent. Same scale as PlacePoint.rank
+                // so bias re-rank treats both kinds uniformly.
+                let rank = (poly.admin_level as u64) + 8;
+
+                Some((
+                    cc,
+                    PendingDoc {
+                        name,
+                        alternates,
+                        kind: KIND_PLACE,
+                        rank,
+                        lat,
+                        lng,
+                        suburb: admin.city,
+                        state: admin.state,
+                        country_code: cc,
+                        category: "",
+                    },
+                ))
+            })
+            .collect();
+        for (cc, doc) in admin_candidates {
             buckets.entry(cc).or_default().push(doc);
         }
     }
@@ -482,6 +788,7 @@ pub fn build_partitioned_with_heap(
                     suburb: admin.city,
                     state: admin.state,
                     country_code: cc,
+                    category: "",
                 },
             ))
         })
@@ -495,6 +802,62 @@ pub fn build_partitioned_with_heap(
         }
     }
     drop(seen);
+
+    // POIs (commit 5). Same partition + dedup pattern as places —
+    // par_iter the find_admin enrichment then bucket by country.
+    if let Some(pois_mmap) = idx.poi_points.as_ref() {
+        let pois: &[crate::PoiPoint] = as_typed_slice(pois_mmap);
+        let poi_candidates: Vec<([u8; 2], PendingDoc<'_>)> = pois
+            .par_iter()
+            .enumerate()
+            .filter_map(|(poi_id, poi)| {
+                let name = idx.get_string(poi.name_id);
+                if name.is_empty() {
+                    return None;
+                }
+                let lat = poi.lat as f64;
+                let lng = poi.lng as f64;
+                let geo_admin = idx.find_admin(lat, lng);
+                let cc = country_bytes(geo_admin.country_code)?;
+                let tagged_parent: Option<&str> = if poi.parent_place_id != 0 {
+                    Some(idx.get_string(poi.parent_place_id))
+                } else {
+                    None
+                };
+                let suburb = tagged_parent.or(geo_admin.city);
+                let category = idx.get_string(poi.category_id);
+                let alternates: Vec<&str> = idx
+                    .i18n_names
+                    .as_ref()
+                    .map(|i| {
+                        i.alternates_for(crate::i18n::ENTITY_POI, poi_id as u32)
+                            .map(|(_, _, name_id)| idx.get_string(name_id))
+                            .filter(|alt| !alt.is_empty() && *alt != name)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some((
+                    cc,
+                    PendingDoc {
+                        name,
+                        alternates,
+                        kind: KIND_POI,
+                        rank: poi.rank as u64,
+                        lat,
+                        lng,
+                        suburb,
+                        state: geo_admin.state,
+                        country_code: cc,
+                        category,
+                    },
+                ))
+            })
+            .collect();
+        for (cc, doc) in poi_candidates {
+            buckets.entry(cc).or_default().push(doc);
+        }
+    }
+
     eprintln!(
         "[stage] forward_classify: {:.3}s ({} countries, {} docs)",
         phase1.elapsed().as_secs_f64(),
@@ -548,11 +911,17 @@ pub fn build_partitioned_with_heap(
                         d.suburb,
                         d.state,
                         Some(d.country_code),
+                        d.category,
                     ))
                     .map_err(|e| format!("index doc: {e}"))?;
                 if d.kind == KIND_PLACE {
                     stats.places += 1;
                 } else {
+                    // Streets and POIs both increment the streets
+                    // counter — BuildStats predates KIND_POI and
+                    // having a separate per-kind tally would touch
+                    // every consumer of BuildStats. The aggregate
+                    // count is still what operators care about.
                     stats.streets += 1;
                 }
             }
@@ -591,6 +960,29 @@ fn append_translit(name_indexed: &mut String, source: &str) {
 #[cfg(not(feature = "translit"))]
 fn append_translit(_name_indexed: &mut String, _source: &str) {}
 
+/// Tokenise on whitespace, drop tokens whose ASCII-folded lowercase form
+/// has already been seen, and re-join. Preserves first-occurrence order so
+/// the canonical name remains at index 0 (its tokens dominate term-frequency
+/// ranking). Intentionally case- and accent-insensitive: matches the
+/// indexing analyzer's `LowerCaser` + `AsciiFoldingFilter` so we don't keep
+/// two tokens that the analyzer will collapse anyway.
+fn dedup_indexed_tokens(s: &str) -> String {
+    let mut seen: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(16);
+    let mut out = String::with_capacity(s.len());
+    for tok in s.split_whitespace() {
+        let key = ascii_fold(tok).to_ascii_lowercase();
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(tok);
+    }
+    out
+}
+
 fn tantivy_doc(
     s: &ForwardSchema,
     name: &str,
@@ -602,6 +994,7 @@ fn tantivy_doc(
     suburb: Option<&str>,
     state: Option<&str>,
     country_code: Option<[u8; 2]>,
+    category: &str,
 ) -> TantivyDocument {
     // Enrichment fields are genuinely optional per-document: a street in
     // Antarctica may have no suburb. We store "" for "unknown" and treat it
@@ -620,29 +1013,65 @@ fn tantivy_doc(
     // for `the hague` matches the Den Haag entry via the `hague` token,
     // courtesy of tantivy's SimpleTokenizer + AsciiFoldingFilter +
     // LowerCaser pipeline.
+    // Canonical name + transliteration of the canonical name go into the
+    // primary `name` field. Multilingual `name:xx` alternates and their
+    // transliterations go into a separate `alt_name` field (see field
+    // doc). Without the split, BM25 length normalization collapses the
+    // canonical term's score for major cities with many translations.
     let mut name_indexed = canonicalise_phrase(name);
     append_translit(&mut name_indexed, name);
+    name_indexed = dedup_indexed_tokens(&name_indexed);
+
+    let mut alt_indexed = String::new();
     for alt in alternates {
         let canonical_alt = canonicalise_phrase(alt);
         if canonical_alt.trim().is_empty() {
             continue;
         }
-        if !name_indexed.is_empty() {
-            name_indexed.push(' ');
+        if !alt_indexed.is_empty() {
+            alt_indexed.push(' ');
         }
-        name_indexed.push_str(canonical_alt.trim());
-        append_translit(&mut name_indexed, alt);
+        alt_indexed.push_str(canonical_alt.trim());
+        append_translit(&mut alt_indexed, alt);
     }
+    // Strip any token that's already in the primary name field — keeps
+    // alt_name strictly additive ("Sydney" appears N times across the
+    // German/French/Italian/etc. name:xx tags but doesn't need to appear
+    // in alt_name at all). Then dedup remaining tokens for the same
+    // length-normalization reason as the primary field.
+    if !alt_indexed.is_empty() {
+        let mut already: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for tok in name_indexed.split_whitespace() {
+            already.insert(ascii_fold(tok).to_ascii_lowercase());
+        }
+        let mut filtered = String::with_capacity(alt_indexed.len());
+        for tok in alt_indexed.split_whitespace() {
+            let key = ascii_fold(tok).to_ascii_lowercase();
+            if key.is_empty() || already.contains(&key) {
+                continue;
+            }
+            already.insert(key);
+            if !filtered.is_empty() {
+                filtered.push(' ');
+            }
+            filtered.push_str(tok);
+        }
+        alt_indexed = filtered;
+    }
+
     let suburb_indexed = suburb.map(canonicalise_phrase).unwrap_or_default();
     let state_indexed = state.map(canonicalise_phrase).unwrap_or_default();
 
     doc!(
         s.name => name_indexed,
+        s.alt_name => alt_indexed,
         s.name_raw => name,
         s.suburb => suburb_indexed,
         s.state => state_indexed,
         s.country_code => cc,
         s.kind => kind,
+        s.category => category,
         s.rank => rank,
         s.lat => lat,
         s.lng => lng,
@@ -852,11 +1281,13 @@ impl Forward {
         };
         let schema = ForwardSchema {
             name: field("name")?,
+            alt_name: field("alt_name")?,
             name_raw: field("name_raw")?,
             suburb: field("suburb")?,
             state: field("state")?,
             country_code: field("country_code")?,
             kind: field("kind")?,
+            category: field("category")?,
             rank: field("rank")?,
             lat: field("lat")?,
             lng: field("lng")?,
@@ -1226,6 +1657,11 @@ impl Forward {
                 // factor: streets named X should clearly beat streets in
                 // suburb X when X appears in the query.
                 const NAME_BOOST: f32 = 3.0;
+                // Multilingual aliases ride at a lower boost than the
+                // canonical name — they're additive coverage (Cyrillic /
+                // CJK queries, exonyms) but should not outrank a doc
+                // whose canonical OSM name contains the query term.
+                const ALT_NAME_BOOST: f32 = 2.0;
                 let name_q: Box<dyn Query> = Box::new(BoostQuery::new(
                     Box::new(TermQuery::new(
                         Term::from_field_text(s.name, tok),
@@ -1233,12 +1669,22 @@ impl Forward {
                     )),
                     NAME_BOOST,
                 ));
+                let alt_name_q: Box<dyn Query> = Box::new(BoostQuery::new(
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(s.alt_name, tok),
+                        IndexRecordOption::WithFreqs,
+                    )),
+                    ALT_NAME_BOOST,
+                ));
                 let suburb_q: Box<dyn Query> = Box::new(TermQuery::new(
                     Term::from_field_text(s.suburb, tok),
                     IndexRecordOption::WithFreqs,
                 ));
-                let tok_clauses: Vec<(Occur, Box<dyn Query>)> =
-                    vec![(Occur::Should, name_q), (Occur::Should, suburb_q)];
+                let tok_clauses: Vec<(Occur, Box<dyn Query>)> = vec![
+                    (Occur::Should, name_q),
+                    (Occur::Should, alt_name_q),
+                    (Occur::Should, suburb_q),
+                ];
                 let token_q = BooleanQuery::new(tok_clauses);
                 clauses.push((Occur::Must, Box::new(token_q)));
             }
@@ -1492,7 +1938,16 @@ pub fn tokenize_user_input(s: &str) -> Vec<String> {
     let raw_tokens: Vec<String> = folded
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
-        .map(|t| canonicalise_token(&t.to_ascii_lowercase()).to_owned())
+        .map(|t| {
+            // Unicode-aware lowercase to mirror tantivy's `LowerCaser`
+            // analyzer step. `to_ascii_lowercase` is a no-op on non-Latin
+            // scripts so a query like `Сидней` (capital С = U+0421) would
+            // never match the indexed `сидней` (lowercase Cyrillic) — a
+            // silent recall failure for every Cyrillic / Greek / Cherokee
+            // / Armenian etc. query that wasn't already lowercase.
+            let lower: String = t.chars().flat_map(char::to_lowercase).collect();
+            canonicalise_token(&lower).to_owned()
+        })
         .collect();
     apply_place_abbreviation_fold(raw_tokens)
 }

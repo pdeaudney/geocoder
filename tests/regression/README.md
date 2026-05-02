@@ -32,12 +32,10 @@ One file per corpus under `corpora/`:
 {
   "name": "au-regression",
   "description": "...",
-  "defaults": { "auth_key": "REGRESSION_TEST_TOKEN" },
   "cases": [
     {
       "id": "search-sydney-city",
       "tags": ["search", "place"],
-      "auth": true,
       "request": {
         "method": "GET",
         "path": "/search",
@@ -78,13 +76,6 @@ One file per corpus under `corpora/`:
 
 Dot-notation over JSON. Numeric segments index arrays; strings index
 objects. `results.0.address.city` → `root["results"][0]["address"]["city"]`.
-
-### Auth
-
-The server is unauthenticated. The `auth_key` / `"auth": false` corpus
-knobs are ignored by the current server (any `?key=` trailing on a
-request is silently accepted); existing corpora still load unchanged.
-No token seeding step runs at the start of the regression script.
 
 ## Adding cases
 

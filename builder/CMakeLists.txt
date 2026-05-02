@@ -41,6 +41,26 @@ find_path(LIBDEFLATE_INCLUDE_DIR libdeflate.h
 
 add_executable(build-index src/build_index.cpp)
 
+# Git provenance — refreshed at every build via a custom_target that
+# regenerates `git_version.h` before build-index compiles. Capturing
+# at configure time (the previous approach) shipped a stale SHA when
+# operators ran `make builder` after a new commit without re-running
+# cmake; that defeated the manifest's whole purpose. The CMake script
+# at cmake/UpdateGitVersion.cmake only rewrites the header when the
+# values actually changed, so steady-state recompiles are unaffected.
+set(GIT_VERSION_HEADER "${CMAKE_CURRENT_BINARY_DIR}/git_version.h")
+add_custom_target(update_git_version ALL
+    BYPRODUCTS "${GIT_VERSION_HEADER}"
+    COMMAND ${CMAKE_COMMAND}
+        -DOUTPUT=${GIT_VERSION_HEADER}
+        -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/UpdateGitVersion.cmake
+    COMMENT "Updating git_version.h"
+    VERBATIM
+)
+add_dependencies(build-index update_git_version)
+target_include_directories(build-index PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+
 # Vendored ankerl::unordered_dense (single-header, MIT-licensed) at
 # third_party/ankerl/. Replaces std::unordered_map across the
 # builder's ingestion path: dense flat storage, separate-payload

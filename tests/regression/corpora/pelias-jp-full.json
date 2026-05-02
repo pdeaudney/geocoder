@@ -1,9 +1,6 @@
 {
   "name": "pelias-jp-full",
   "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "expect": {
@@ -47,12 +44,12 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.city",
-            "value": "八王子市"
+            "value": "\u516b\u738b\u5b50\u5e02"
           },
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "東京"
+            "value": "\u6771\u4eac"
           }
         ],
         "status": 200
@@ -64,7 +61,7 @@
         "path": "/search",
         "query": {
           "country_code": "jp",
-          "q": "９丁目, Japan"
+          "q": "\uff19\u4e01\u76ee, Japan"
         }
       },
       "tags": [

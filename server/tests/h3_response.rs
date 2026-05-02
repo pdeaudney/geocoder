@@ -16,6 +16,7 @@ fn empty_address() -> Address<'static> {
         address: AddressDetails::default(),
         confidence: None,
         h3: None,
+        poi: None,
     }
 }
 

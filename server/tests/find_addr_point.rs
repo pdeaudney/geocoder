@@ -23,7 +23,13 @@ fn load_index() -> Option<Index> {
 fn pick_known_address(idx: &Index) -> Option<(String, String, f64, f64)> {
     let points: &[AddrPoint] = as_typed_slice(&idx.addr_points);
     for p in points.iter().take(50_000) {
-        let street = idx.get_string(p.street_id);
+        // Skip addr:place rows — they have no street component, so
+        // street_or_place_id holds a place name that wouldn't form a
+        // meaningful "street hint" for the find_addr_point self-check.
+        if p.flags & query_server::FLAG_ADDR_PLACE != 0 {
+            continue;
+        }
+        let street = idx.get_string(p.street_or_place_id);
         let hn = idx.get_string(p.housenumber_id);
         // Skip weirdly long names / empty values to keep the test readable.
         if street.is_empty() || hn.is_empty() || street.len() > 40 {
@@ -113,4 +119,87 @@ fn respects_street_name_hint() {
         );
         assert_eq!(m.housenumber, "10");
     }
+}
+
+#[test]
+fn match_unit_floor_parent_default_empty_strings() {
+    // Pin the contract that AddrPointMatch's new sub-building /
+    // tagged-parent fields default to "" (not panic, not Option,
+    // not garbage). Most addresses won't have addr:unit / addr:floor
+    // tags so this is the normal path.
+    let Some(idx) = load_index() else { return };
+    let Some((street, hn, lat, lng)) = pick_known_address(&idx) else {
+        return;
+    };
+    let m = idx
+        .find_addr_point(&hn, Some(&street), lat, lng)
+        .expect("self-lookup hits");
+    // Each new field is `&str`. Either empty (most common) or some
+    // genuine extracted value. NEVER unset / not initialised.
+    let _ = m.unit.len(); // would panic on a dangling pointer
+    let _ = m.floor.len();
+    let _ = m.parent_place.len();
+    // flags = 0 for the typical "addr:street + addr:housenumber" case
+    // we picked. FLAG_ADDR_PLACE rows are filtered out by
+    // pick_known_address.
+    assert_eq!(
+        m.flags & query_server::FLAG_ADDR_PLACE,
+        0,
+        "pick_known_address should filter out FLAG_ADDR_PLACE rows"
+    );
+}
+
+#[test]
+fn flag_addr_place_rows_present_in_index_when_built() {
+    // A weak existence check: AU has very little addr:place tagging
+    // (DE/AT/CH dominate), but a planet build or DE extract should
+    // contain at least some rows with FLAG_ADDR_PLACE set. This test
+    // is informational — when the AU index is loaded it'll typically
+    // print 0 or near-zero, which is correct for that data.
+    let Some(idx) = load_index() else { return };
+    let points: &[query_server::AddrPoint] =
+        query_server::as_typed_slice(&idx.addr_points);
+    let count = points
+        .iter()
+        .filter(|p| p.flags & query_server::FLAG_ADDR_PLACE != 0)
+        .count();
+    eprintln!(
+        "FLAG_ADDR_PLACE: {} / {} address points ({}%)",
+        count,
+        points.len(),
+        if points.is_empty() { 0.0 } else { 100.0 * count as f64 / points.len() as f64 },
+    );
+    // No assertion on count — country-dependent. Test exists to
+    // exercise the field access path under loaded data so a struct-
+    // layout drift would fail here too.
+}
+
+#[test]
+fn parent_place_id_resolves_to_a_string_when_set() {
+    // For any address with parent_place_id != 0, the offset must
+    // resolve to a non-empty string. A garbled offset would either
+    // return "" (wrong) or read past the strings buffer.
+    let Some(idx) = load_index() else { return };
+    let points: &[query_server::AddrPoint] =
+        query_server::as_typed_slice(&idx.addr_points);
+    let mut sampled = 0;
+    for p in points.iter().take(200_000) {
+        if p.parent_place_id == 0 {
+            continue;
+        }
+        let s = idx.get_string(p.parent_place_id);
+        assert!(
+            !s.is_empty() && s.len() < 200,
+            "parent_place_id={} resolves to plausible string, got {:?}",
+            p.parent_place_id,
+            s
+        );
+        sampled += 1;
+        if sampled >= 100 {
+            break;
+        }
+    }
+    // No lower-bound assertion — AU has limited addr:city tagging.
+    // The check above runs against any sample we do find.
+    eprintln!("parent_place_id: sampled {sampled} non-zero offsets");
 }

@@ -47,11 +47,12 @@ use std::path::Path;
 /// window for any reasonable `limit`.
 const FST_WALK_CAP: usize = 10_000;
 
-/// Kinds — matches `forward::KIND_PLACE` / `forward::KIND_STREET`
-/// numerically, duplicated here so the autocomplete module compiles
-/// without the forward feature.
+/// Kinds — matches `forward::KIND_PLACE` / `forward::KIND_STREET` /
+/// `forward::KIND_POI` numerically, duplicated here so the
+/// autocomplete module compiles without the forward feature.
 pub const KIND_PLACE: u8 = 1;
 pub const KIND_STREET: u8 = 2;
+pub const KIND_POI: u8 = 3;
 
 /// Fixed-size record stored in `fst_<cc>.bin`. Mirrors the tantivy
 /// schema fields clients actually need for a typeahead hit.

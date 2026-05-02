@@ -25,12 +25,13 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use fst::MapBuilder;
-use query_server::autocomplete::{AutocompleteEntry, KIND_PLACE, KIND_STREET};
+use query_server::autocomplete::{AutocompleteEntry, KIND_PLACE, KIND_POI, KIND_STREET};
 use query_server::i18n::ENTITY_PLACE;
 use query_server::{
-    as_typed_slice, Index, NodeCoord, PlacePoint, WayHeader, DEFAULT_ADMIN_CELL_LEVEL,
+    as_typed_slice, manifest, Index, NodeCoord, PlacePoint, WayHeader, DEFAULT_ADMIN_CELL_LEVEL,
     DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL,
 };
+use serde_json::json;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
@@ -97,10 +98,36 @@ fn main() {
         }
     };
 
-    if let Err(e) = run(&dir, country_filter.as_ref(), layout) {
-        eprintln!("build failed: {e}");
-        std::process::exit(1);
+    let t0 = Instant::now();
+    match run(&dir, country_filter.as_ref(), layout) {
+        Err(e) => {
+            eprintln!("build failed: {e}");
+            std::process::exit(1);
+        }
+        Ok(stats) => {
+            let extra = json!({
+                "layout": match layout {
+                    Layout::PerCountry => "per-country",
+                    Layout::Unified => "unified",
+                    Layout::Both => "both",
+                },
+                "country_count": stats.country_count,
+                "total_entries": stats.total_entries,
+                "total_keys": stats.total_keys,
+                "build_seconds": t0.elapsed().as_secs_f64(),
+            });
+            if let Err(e) = manifest::write(&dir, "autocomplete", extra) {
+                eprintln!("warning: failed to write manifest_autocomplete.json: {e}");
+            }
+        }
     }
+}
+
+#[derive(Default)]
+struct RunStats {
+    country_count: usize,
+    total_entries: u64,
+    total_keys: u64,
 }
 
 /// Per-country staging state. Lives at module scope so `emit_unified`
@@ -140,7 +167,7 @@ fn run(
     dir: &PathBuf,
     country_filter: Option<&HashSet<[u8; 2]>>,
     layout: Layout,
-) -> Result<(), String> {
+) -> Result<RunStats, String> {
     let dir_str = dir
         .to_str()
         .ok_or_else(|| format!("non-utf8 path: {}", dir.display()))?;
@@ -316,7 +343,7 @@ fn run(
                     .as_ref()
                     .map(|i| {
                         i.alternates_for(ENTITY_PLACE, place_id as u32)
-                            .map(|(_, name_id)| idx.get_string(name_id))
+                            .map(|(_, _, name_id)| idx.get_string(name_id))
                             .filter(|alt| !alt.is_empty() && *alt != name)
                             .collect()
                     })
@@ -374,11 +401,68 @@ fn run(
             })
         })
         .collect();
+
+    // POIs (commit 5). Gated on rank ≤ 10 — only wikipedia/wikidata-
+    // backed POIs make it into the FST so the file size stays small
+    // enough to mmap without paging. Every named cafe / fence / bench
+    // would otherwise blow up the FST size with low-value entries
+    // ("McDonald's" appearing thousands of times across a country).
+    let poi_candidates: Vec<Candidate<'_>> = match idx.poi_points.as_ref() {
+        Some(pp) => {
+            let pois: &[query_server::PoiPoint] = as_typed_slice(pp);
+            pois.par_iter()
+                .enumerate()
+                .filter_map(|(poi_id, poi)| {
+                    if poi.rank > 10 {
+                        return None;
+                    }
+                    let name = idx.get_string(poi.name_id);
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let admin = idx.find_admin(poi.lat as f64, poi.lng as f64);
+                    let cc = admin.country_code.filter(|c| c[0] != 0 && c[1] != 0)?;
+                    if !in_filter(cc) {
+                        return None;
+                    }
+                    let aliases: Vec<&str> = idx
+                        .i18n_names
+                        .as_ref()
+                        .map(|i| {
+                            i.alternates_for(query_server::i18n::ENTITY_POI, poi_id as u32)
+                                .map(|(_, _, name_id)| idx.get_string(name_id))
+                                .filter(|alt| !alt.is_empty() && *alt != name)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let suburb = if poi.parent_place_id != 0 {
+                        Some(idx.get_string(poi.parent_place_id))
+                    } else {
+                        admin.city
+                    };
+                    Some(Candidate {
+                        cc: [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()],
+                        name,
+                        aliases,
+                        kind: KIND_POI,
+                        rank: poi.rank as u8,
+                        lat: poi.lat,
+                        lng: poi.lng,
+                        suburb,
+                        name_id: poi.name_id,
+                    })
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+
     eprintln!(
-        "[stage] autocomplete_classify: {:.3}s ({} place + {} street candidates)",
+        "[stage] autocomplete_classify: {:.3}s ({} place + {} street + {} poi candidates)",
         phase1a.elapsed().as_secs_f64(),
         place_candidates.len(),
         street_candidates.len(),
+        poi_candidates.len(),
     );
 
     // Phase 1b: sequential bucket-by-country with street dedup. Cheap
@@ -387,6 +471,13 @@ fn run(
     let phase1b = Instant::now();
     let mut by_country_cands: HashMap<[u8; 2], Vec<Candidate<'_>>> = HashMap::new();
     for cand in place_candidates {
+        by_country_cands.entry(cand.cc).or_default().push(cand);
+    }
+    for cand in poi_candidates {
+        // POIs aren't deduped: identical names in the same suburb are
+        // legitimately distinct (two cafes with the same name on
+        // different blocks). Rank-10 gating already keeps the volume
+        // bounded.
         by_country_cands.entry(cand.cc).or_default().push(cand);
     }
     let mut seen: HashSet<(u32, String, [u8; 2])> = HashSet::new();
@@ -460,7 +551,12 @@ fn run(
         );
     }
 
-    Ok(())
+    let mut stats = RunStats { country_count: ccs.len(), ..Default::default() };
+    for pc in by_country.values() {
+        stats.total_entries += pc.entries.len() as u64;
+        stats.total_keys += pc.keys.len() as u64;
+    }
+    Ok(stats)
 }
 
 fn emit_per_country(

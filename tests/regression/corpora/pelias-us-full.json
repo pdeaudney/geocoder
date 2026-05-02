@@ -1,9 +1,6 @@
 {
   "name": "pelias-us-full",
   "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "expect": {
@@ -686,7 +683,7 @@
         "path": "/search",
         "query": {
           "country_code": "us",
-          "q": "1220 calle de lago Сокорро Nouveau-Mexique"
+          "q": "1220 calle de lago \u0421\u043e\u043a\u043e\u0440\u0440\u043e Nouveau-Mexique"
         }
       },
       "tags": [

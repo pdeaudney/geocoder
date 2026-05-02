@@ -1,9 +1,6 @@
 {
   "name": "pelias-pl-full",
   "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "expect": {
@@ -16,7 +13,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.city",
-            "value": "Poznań"
+            "value": "Pozna\u0144"
           }
         ],
         "status": 200
@@ -28,7 +25,7 @@
         "path": "/search",
         "query": {
           "country_code": "pl",
-          "q": "Poznań, poland"
+          "q": "Pozna\u0144, poland"
         }
       },
       "tags": [
@@ -59,7 +56,7 @@
         "path": "/search",
         "query": {
           "country_code": "pl",
-          "q": "KoÅobrzeski, Poland"
+          "q": "Ko\u00c5obrzeski, Poland"
         }
       },
       "tags": [

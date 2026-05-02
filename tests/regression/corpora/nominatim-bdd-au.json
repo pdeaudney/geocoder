@@ -1,7 +1,6 @@
 {
   "name": "nominatim-bdd-au",
   "description": "Comprehensive hand-translation of Nominatim's BDD scenarios (test/bdd/features/) into our API schema. Each case preserves the scenario shape (what behaviour is asserted) and swaps Liechtenstein/Vaduz inputs for AU data we actually index. Scenarios that test Nominatim-specific features (response formats XML/geojson/geocodejson, unsupported params layer/viewbox/exclude_place_ids, endpoints we don't have /details /lookup, TIGER data, POI class-type [amenity=...] syntax) are intentionally skipped — see docs/research/nominatim-bdd-coverage-2026-04-24.md for the full mapping and skip rationale.",
-  "defaults": { "auth_key": "REGRESSION_TEST_TOKEN" },
   "cases": [
     {
       "id": "nominatim-search-queries-natural-object",
@@ -302,7 +301,6 @@
       "id": "nominatim-status-alive",
       "tags": ["nominatim-bdd", "status", "health"],
       "notes": "Source: api/status/simple.feature 'Status as text' (v1/status → 'OK'). Our equivalent is /healthz returning {\"status\":\"ok\"}.",
-      "auth": false,
       "request": { "path": "/healthz" },
       "expect": { "status": 200, "checks": [
         { "kind": "json_path_equals", "path": "status", "value": "ok" }
@@ -426,7 +424,6 @@
       "id": "nominatim-healthz-indexes-schema",
       "tags": ["nominatim-bdd", "health", "indexes"],
       "notes": "Not a direct translation — covers our /healthz/indexes endpoint which reports per-country coverage. Analogous to Nominatim's /status json variant.",
-      "auth": false,
       "request": { "path": "/healthz/indexes" },
       "expect": { "status": 200, "checks": [
         { "kind": "json_path_equals", "path": "status", "value": "ok" },

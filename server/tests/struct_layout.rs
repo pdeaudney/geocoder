@@ -8,7 +8,7 @@
 
 use std::mem::{align_of, size_of};
 
-use query_server::{AddrPoint, AdminPolygon, InterpWay, NodeCoord, PlacePoint, WayHeader};
+use query_server::{AddrPoint, AdminPolygon, InterpWay, NodeCoord, PlacePoint, PoiPoint, WayHeader};
 
 #[test]
 fn way_header_size() {
@@ -19,8 +19,10 @@ fn way_header_size() {
 
 #[test]
 fn addr_point_size() {
-    // f32 + f32 + u32 + u32 = 16
-    assert_eq!(size_of::<AddrPoint>(), 16);
+    // f32 + f32 + u32 + u32 + u32 + u32 + u32 + u8 + (3 pad) = 32
+    // (housenumber_id, street_or_place_id, unit_id, floor_id,
+    // parent_place_id, flags + pad)
+    assert_eq!(size_of::<AddrPoint>(), 32);
     assert_eq!(align_of::<AddrPoint>(), 4);
 }
 
@@ -49,4 +51,31 @@ fn place_point_size() {
     // f32 + f32 + u32 + u8 + 3B pad = 16
     assert_eq!(size_of::<PlacePoint>(), 16);
     assert_eq!(align_of::<PlacePoint>(), 4);
+}
+
+#[test]
+fn poi_point_size() {
+    // f32 + f32 + u32 + u32 + u8 + (3 pad) + u32 = 24
+    assert_eq!(size_of::<PoiPoint>(), 24);
+    assert_eq!(align_of::<PoiPoint>(), 4);
+}
+
+#[test]
+fn kind_constants_agree_across_modules() {
+    // forward::KIND_* and autocomplete::KIND_* are duplicated so the
+    // autocomplete module compiles without depending on forward (and
+    // vice-versa). Their numeric values MUST agree — the FST
+    // payload's `kind` byte is read by code that imports either
+    // module's constants. A drift would silently misclassify hits.
+    use query_server::{
+        autocomplete::{KIND_PLACE as A_PLACE, KIND_POI as A_POI, KIND_STREET as A_STREET},
+        forward::{KIND_PLACE as F_PLACE, KIND_POI as F_POI, KIND_STREET as F_STREET},
+    };
+    assert_eq!(A_PLACE as u64, F_PLACE);
+    assert_eq!(A_STREET as u64, F_STREET);
+    assert_eq!(A_POI as u64, F_POI);
+    // Sanity: all three values distinct from each other.
+    assert_ne!(A_PLACE, A_STREET);
+    assert_ne!(A_STREET, A_POI);
+    assert_ne!(A_PLACE, A_POI);
 }

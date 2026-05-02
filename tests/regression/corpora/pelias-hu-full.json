@@ -1,9 +1,6 @@
 {
   "name": "pelias-hu-full",
   "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "expect": {
@@ -28,7 +25,7 @@
         "path": "/search",
         "query": {
           "country_code": "hu",
-          "q": "Eszék utca 14a budapest hungary"
+          "q": "Esz\u00e9k utca 14a budapest hungary"
         }
       },
       "tags": [
@@ -59,7 +56,7 @@
         "path": "/search",
         "query": {
           "country_code": "hu",
-          "q": "14a Eszék utca budapest hungary"
+          "q": "14a Esz\u00e9k utca budapest hungary"
         }
       },
       "tags": [
@@ -85,7 +82,7 @@
         "path": "/search",
         "query": {
           "country_code": "hu",
-          "q": "Észak-Alföld"
+          "q": "\u00c9szak-Alf\u00f6ld"
         }
       },
       "tags": [
@@ -111,7 +108,7 @@
         "path": "/search",
         "query": {
           "country_code": "hu",
-          "q": "Dél-Dunántúl, HU"
+          "q": "D\u00e9l-Dun\u00e1nt\u00fal, HU"
         }
       },
       "tags": [
@@ -137,7 +134,7 @@
         "path": "/search",
         "query": {
           "country_code": "hu",
-          "q": "Közép-Magyarország, Hungary"
+          "q": "K\u00f6z\u00e9p-Magyarorsz\u00e1g, Hungary"
         }
       },
       "tags": [

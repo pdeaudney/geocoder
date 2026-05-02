@@ -1,9 +1,6 @@
 {
   "name": "pelias-kr-full",
   "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "expect": {
@@ -16,7 +13,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "서울특별시"
+            "value": "\uc11c\uc6b8\ud2b9\ubcc4\uc2dc"
           }
         ],
         "status": 200
@@ -28,7 +25,7 @@
         "path": "/search",
         "query": {
           "country_code": "kr",
-          "q": "독서당로39길 22"
+          "q": "\ub3c5\uc11c\ub2f9\ub85c39\uae38 22"
         }
       },
       "tags": [
@@ -47,7 +44,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "서울특별시"
+            "value": "\uc11c\uc6b8\ud2b9\ubcc4\uc2dc"
           }
         ],
         "status": 200
@@ -59,7 +56,7 @@
         "path": "/search",
         "query": {
           "country_code": "kr",
-          "q": "용산구"
+          "q": "\uc6a9\uc0b0\uad6c"
         }
       },
       "tags": [
@@ -78,7 +75,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "경기도"
+            "value": "\uacbd\uae30\ub3c4"
           }
         ],
         "status": 200
@@ -90,7 +87,7 @@
         "path": "/search",
         "query": {
           "country_code": "kr",
-          "q": "광명성애병원"
+          "q": "\uad11\uba85\uc131\uc560\ubcd1\uc6d0"
         }
       },
       "tags": [
@@ -116,7 +113,7 @@
         "path": "/search",
         "query": {
           "country_code": "kr",
-          "q": "영풍문고"
+          "q": "\uc601\ud48d\ubb38\uace0"
         }
       },
       "tags": [
@@ -142,7 +139,7 @@
         "path": "/search",
         "query": {
           "country_code": "kr",
-          "q": "봉화로167번길 35-7"
+          "q": "\ubd09\ud654\ub85c167\ubc88\uae38 35-7"
         }
       },
       "tags": [
@@ -168,7 +165,7 @@
         "path": "/search",
         "query": {
           "country_code": "kr",
-          "q": "봉화로167번길 35"
+          "q": "\ubd09\ud654\ub85c167\ubc88\uae38 35"
         }
       },
       "tags": [

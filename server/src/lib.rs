@@ -23,6 +23,7 @@ pub mod i18n;
 pub mod ip_geo;
 pub mod h3_cell;
 pub mod limits;
+pub mod manifest;
 pub mod metrics;
 pub mod openaddresses;
 pub mod postcode;
@@ -36,7 +37,7 @@ pub mod wof_countries;
 pub mod grpc_service;
 use admin_config::{AdminConfig, AdminField};
 use gnaf::Gnaf;
-use i18n::{pack_lang_code, I18nNames, ENTITY_ADMIN};
+use i18n::{pack_lang_code, I18nNames, ALIAS_PRIMARY, ENTITY_ADMIN};
 use openaddresses::OpenAddresses;
 use postcode::PostcodeLookup;
 use std::path::Path;
@@ -72,13 +73,32 @@ pub struct WayHeader {
     pub name_id: u32,
 }
 
+/// AddrPoint flag bits stored in `AddrPoint.flags`. These let one
+/// 32-byte record represent both `addr:street` and `addr:place`
+/// addresses without forking the on-disk format. Mirrors `FLAG_*`
+/// constants in `builder/src/build_index.cpp`.
+pub const FLAG_ADDR_PLACE: u8 = 0x01;
+pub const FLAG_IS_HOUSENAME: u8 = 0x02;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AddrPoint {
     pub lat: f32,
     pub lng: f32,
     pub housenumber_id: u32,
-    pub street_id: u32,
+    /// Street name (default), or place name when `flags & FLAG_ADDR_PLACE`.
+    /// Resolves through `Index::get_string`.
+    pub street_or_place_id: u32,
+    /// `addr:unit` / `addr:flat` / `addr:door`, 0 if absent.
+    pub unit_id: u32,
+    /// `addr:floor` / `addr:level`, 0 if absent.
+    pub floor_id: u32,
+    /// Tagged parent locality from `addr:city|suburb|locality|state`,
+    /// 0 if absent. Forward indexer prefers this over geometric
+    /// `find_admin()` enrichment when non-zero.
+    pub parent_place_id: u32,
+    pub flags: u8,
+    pub _pad: [u8; 3],
 }
 
 #[repr(C)]
@@ -126,6 +146,31 @@ pub struct PlacePoint {
     _pad: [u8; 3],
 }
 
+/// A POI (amenity/shop/tourism/aeroway/historic/leisure/office/
+/// healthcare/military/man_made/railway-non-track/natural-subset/
+/// waterway-subset). Indexed at the same S2 cell level as addresses
+/// and streets so /reverse can do a 9-cell neighbour lookup.
+///
+/// `rank` mirrors the Nominatim importance scale loosely: 10 means
+/// the POI is wikidata- or wikipedia-backed (almost always the right
+/// answer for autocomplete), 15 is everything else. The autocomplete
+/// FST builder gates on rank ≤ 10 to keep the FST size bounded.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PoiPoint {
+    pub lat: f32,
+    pub lng: f32,
+    pub name_id: u32,
+    /// Interned `<key>:<value>` string (e.g. `"amenity:cafe"`).
+    pub category_id: u32,
+    pub rank: u8,
+    _pad: [u8; 3],
+    /// Tagged parent locality from `addr:city|suburb|locality`, 0 if
+    /// absent. When zero, forward indexer falls back to geometric
+    /// `find_admin()` enrichment.
+    pub parent_place_id: u32,
+}
+
 // --- Index data ---
 
 pub struct Index {
@@ -147,6 +192,13 @@ pub struct Index {
     pub place_cells: Option<Mmap>,
     pub place_entries: Option<Mmap>,
     pub place_points: Option<Mmap>,
+    // `poi_*` files are optional in the same sense — indexes built
+    // before commit 4 don't have them and `find_poi` returns None
+    // accordingly. /reverse responses simply omit the `poi` field on
+    // those deployments.
+    pub poi_cells: Option<Mmap>,
+    pub poi_entries: Option<Mmap>,
+    pub poi_points: Option<Mmap>,
     pub strings: Mmap,
     pub street_cell_level: u64,
     pub admin_cell_level: u64,
@@ -344,6 +396,18 @@ impl Index {
         };
         let place_cells = mmap_file_optional(&format!("{}/place_cells.bin", dir));
         let place_entries = mmap_file_optional(&format!("{}/place_entries.bin", dir));
+        // POI files are optional. The mmap call validates record-size
+        // alignment when the file exists; missing/empty file just means
+        // /reverse omits the `poi` field and forward search has no
+        // POI documents.
+        let poi_points_path = format!("{}/poi_points.bin", dir);
+        let poi_points = if Path::new(&poi_points_path).exists() {
+            Some(mmap_records(&poi_points_path, std::mem::size_of::<PoiPoint>(), "PoiPoint")?)
+        } else {
+            None
+        };
+        let poi_cells = mmap_file_optional(&format!("{}/poi_cells.bin", dir));
+        let poi_entries = mmap_file_optional(&format!("{}/poi_entries.bin", dir));
         let strings = mmap_nonempty(&format!("{}/strings.bin", dir), "string pool")?;
 
         Ok(Index {
@@ -363,6 +427,9 @@ impl Index {
             place_cells,
             place_entries,
             place_points,
+            poi_cells,
+            poi_entries,
+            poi_points,
             strings,
             street_cell_level,
             admin_cell_level,
@@ -782,6 +849,71 @@ impl Index {
         })
     }
 
+    /// Nearest-neighbour POI lookup at street-cell resolution. Used by
+    /// /reverse to surface the closest amenity/shop/tourism/etc. as a
+    /// sibling field on the response, never replacing the address.
+    ///
+    /// Capped at `max_distance_m` (~30 m by default — POIs are point
+    /// features and a 100 m POI is rarely the user's intent). Within
+    /// the threshold, picks lowest rank first (wikipedia/wikidata
+    /// POIs win over generic ones), then closest distance.
+    pub fn find_poi(&self, lat: f64, lng: f64, max_distance_m: f64) -> Option<PoiMatch<'_>> {
+        let points_mmap = self.poi_points.as_ref()?;
+        let cells_mmap = self.poi_cells.as_ref()?;
+        let entries_mmap = self.poi_entries.as_ref()?;
+
+        let all_pois: &[PoiPoint] = as_typed_slice(points_mmap);
+        if all_pois.is_empty() {
+            return None;
+        }
+
+        let max_rad = max_distance_m / 111_320.0;
+        let max_dist_sq = max_rad * max_rad;
+
+        let cell = cell_id_at_level(lat, lng, self.street_cell_level);
+        let neighbors = cell_neighbors_at_level(cell, self.street_cell_level);
+        let cos_lat = lat.to_radians().cos();
+
+        let mut best: Option<(u8, f64, &PoiPoint)> = None;
+        for c in std::iter::once(cell).chain(neighbors.into_iter()) {
+            // poi_cells uses the same single-offset-per-cell layout
+            // as admin/place cells (12-byte records keyed on u64
+            // cell id, written by write_cell_index in the C++
+            // builder). lookup_admin_cell does the binary search.
+            let off = Self::lookup_admin_cell(cells_mmap, c);
+            Self::for_each_entry(entries_mmap, off, |id| {
+                let p = &all_pois[id as usize];
+                let dlat = (p.lat as f64 - lat).to_radians();
+                let dlng = (p.lng as f64 - lng).to_radians();
+                let dist = dist_sq(dlat, dlng, cos_lat);
+                if dist > max_dist_sq {
+                    return;
+                }
+                let take = match best {
+                    None => true,
+                    Some((best_rank, best_dist, _)) => {
+                        p.rank < best_rank || (p.rank == best_rank && dist < best_dist)
+                    }
+                };
+                if take {
+                    best = Some((p.rank, dist, p));
+                }
+            });
+        }
+
+        best.map(|(_, dist_sq_val, p)| {
+            // Convert dist_sq (radians^2) back to metres for the
+            // response. sqrt + the 111_320 m/rad approximation that
+            // matches dist_sq's input scaling.
+            let dist_m = dist_sq_val.sqrt() * 111_320.0;
+            PoiMatch {
+                name: self.get_string(p.name_id),
+                category: self.get_string(p.category_id),
+                distance_m: dist_m,
+            }
+        })
+    }
+
     /// Find the closest `addr_point` with a matching house number (and,
     /// optionally, a street-name substring match) within a one-cell
     /// neighbourhood of `(near_lat, near_lng)` at `street_cell_level`.
@@ -844,11 +976,18 @@ impl Index {
                     self.street_cell_level,
                 ) {
                     span.record("geocoder.address.source", "gnaf");
+                    // G-NAF / OpenAddresses ladders don't carry
+                    // sub-building or tagged-parent details — those
+                    // fields belong to the OSM AddrPoint format only.
                     return Some(AddrPointMatch {
                         lat: m.lat,
                         lng: m.lng,
                         housenumber: m.housenumber,
                         street: m.street,
+                        unit: "",
+                        floor: "",
+                        parent_place: "",
+                        flags: 0,
                     });
                 }
             }
@@ -876,6 +1015,10 @@ impl Index {
                     lng: m.lng,
                     housenumber: m.housenumber,
                     street: m.street,
+                    unit: "",
+                    floor: "",
+                    parent_place: "",
+                    flags: 0,
                 });
             }
         }
@@ -912,7 +1055,12 @@ impl Index {
                     return;
                 }
                 if let Some(hint) = street_hint {
-                    let p_street = self.get_string(p.street_id);
+                    // street_or_place_id holds the place name when
+                    // FLAG_ADDR_PLACE is set, or the street name
+                    // otherwise. Either way the street-name hint
+                    // matches against it as the most-specific locality
+                    // string we have for the address.
+                    let p_street = self.get_string(p.street_or_place_id);
                     if !contains_ignore_ascii_case(p_street, hint) {
                         return;
                     }
@@ -930,11 +1078,30 @@ impl Index {
             });
         }
 
-        let result = best.map(|(_, p)| AddrPointMatch {
-            lat: p.lat as f64,
-            lng: p.lng as f64,
-            housenumber: self.get_string(p.housenumber_id),
-            street: self.get_string(p.street_id),
+        let result = best.map(|(_, p)| {
+            // When FLAG_ADDR_PLACE is set, street_or_place_id holds
+            // the place name (e.g. `addr:place=Kleindorf`); the address
+            // has no street component, so leave `street` empty and
+            // surface the place name via parent_place. Callers render
+            // this as the city/locality slot in the response.
+            let is_place = p.flags & FLAG_ADDR_PLACE != 0;
+            let primary = self.get_string(p.street_or_place_id);
+            AddrPointMatch {
+                lat: p.lat as f64,
+                lng: p.lng as f64,
+                housenumber: self.get_string(p.housenumber_id),
+                street: if is_place { "" } else { primary },
+                unit: if p.unit_id != 0 { self.get_string(p.unit_id) } else { "" },
+                floor: if p.floor_id != 0 { self.get_string(p.floor_id) } else { "" },
+                parent_place: if is_place {
+                    primary
+                } else if p.parent_place_id != 0 {
+                    self.get_string(p.parent_place_id)
+                } else {
+                    ""
+                },
+                flags: p.flags,
+            }
         });
         tracing::Span::current().record(
             "geocoder.address.source",
@@ -956,23 +1123,28 @@ impl Index {
         // poly_id. Fields set via place=* fallback have no poly_id and
         // fall through unchanged.
         let details = &mut address.address;
+        // Each admin field localises through ALIAS_PRIMARY (the
+        // `name:<lang>` family). OFFICIAL / ALT and other alias
+        // families exist on the same entities but are surfaced only
+        // via the forward-index `alternates_for` walk, not the
+        // /reverse?lang= path.
         if let Some(pid) = admin.country_poly_id {
-            if let Some(id) = i18n.lookup(ENTITY_ADMIN, pid, code) {
+            if let Some(id) = i18n.lookup(ENTITY_ADMIN, pid, ALIAS_PRIMARY, code) {
                 details.country = Some(self.get_string(id));
             }
         }
         if let Some(pid) = admin.state_poly_id {
-            if let Some(id) = i18n.lookup(ENTITY_ADMIN, pid, code) {
+            if let Some(id) = i18n.lookup(ENTITY_ADMIN, pid, ALIAS_PRIMARY, code) {
                 details.state = Some(self.get_string(id));
             }
         }
         if let Some(pid) = admin.county_poly_id {
-            if let Some(id) = i18n.lookup(ENTITY_ADMIN, pid, code) {
+            if let Some(id) = i18n.lookup(ENTITY_ADMIN, pid, ALIAS_PRIMARY, code) {
                 details.county = Some(self.get_string(id));
             }
         }
         if let Some(pid) = admin.city_poly_id {
-            if let Some(id) = i18n.lookup(ENTITY_ADMIN, pid, code) {
+            if let Some(id) = i18n.lookup(ENTITY_ADMIN, pid, ALIAS_PRIMARY, code) {
                 details.city = Some(self.get_string(id));
             }
         }
@@ -1077,7 +1249,31 @@ impl Index {
         if let Some((dist, point)) = addr {
             if dist < max_dist {
                 house_number = Some(Cow::Borrowed(self.get_string(point.housenumber_id)));
-                road = Some(self.get_string(point.street_id));
+                // For addr:place addresses, street_or_place_id holds
+                // the place name; surface it as the city/locality
+                // (handled by the AddrPointMatch path / admin merge
+                // below) rather than as the road. For street-keyed
+                // addresses, this is the road name.
+                let is_place = point.flags & FLAG_ADDR_PLACE != 0;
+                if !is_place {
+                    road = Some(self.get_string(point.street_or_place_id));
+                }
+                // Tagged parent (addr:city/suburb/locality/state) — the
+                // C++ importer captures the verbatim tag value into
+                // parent_place_id. Prefer it over geometric find_admin()
+                // when the geographic lookup didn't produce a city,
+                // since the OSM tag is the data owner's authoritative
+                // statement about which locality the address sits in.
+                // Note: this skips the i18n localisation pass (which
+                // keys on admin polygon ids); a `?lang=de` query that
+                // hits a parent_place_id-derived city returns the
+                // verbatim tag value, not a translated form.
+                if point.parent_place_id != 0 && admin.city.is_none() {
+                    admin.city = Some(self.get_string(point.parent_place_id));
+                }
+                if is_place && admin.city.is_none() {
+                    admin.city = Some(self.get_string(point.street_or_place_id));
+                }
                 confidence_level = Some(confidence::EXACT);
             }
         }
@@ -1099,7 +1295,15 @@ impl Index {
             }
         }
 
-        if road.is_none() && admin.country.is_none() && admin.city.is_none() {
+        // POI lookup runs independently of the address ladder. Tight
+        // 30 m threshold means dense areas can return a POI even when
+        // the address resolved fine; sparse areas typically miss. The
+        // poi field is purely additive to the response — clients that
+        // don't know about it ignore it (json), clients that do can
+        // surface it alongside the address.
+        let poi = self.find_poi(lat, lng, /*max_distance_m=*/ 30.0);
+
+        if road.is_none() && admin.country.is_none() && admin.city.is_none() && poi.is_none() {
             return (Address::default(), admin);
         }
 
@@ -1129,6 +1333,7 @@ impl Index {
             // stays callable from non-HTTP contexts (tests, benches,
             // builders) without having to think about query-time param.
             h3: None,
+            poi,
         };
         (out, admin)
     }
@@ -1369,12 +1574,35 @@ pub struct PlaceMatch<'a> {
     pub rank: u8,
 }
 
-/// Result of `find_addr_point`: exact lat/lng of a house number on a street.
+/// Result of `find_poi`: a nearby POI with its name, category
+/// (`amenity:cafe`, `tourism:attraction`, ...), and distance in
+/// metres. /reverse surfaces this on the response as a sibling field
+/// to the address — POIs never replace the address fields.
+#[derive(Serialize)]
+pub struct PoiMatch<'a> {
+    pub name: &'a str,
+    pub category: &'a str,
+    pub distance_m: f64,
+}
+
+/// Result of `find_addr_point`: exact lat/lng of a house number on a
+/// street, plus any sub-building / parent-locality details we captured
+/// from OSM `addr:*` tags.
+///
+/// `street` is empty when the source address used `addr:place` instead
+/// of `addr:street` (`flags & FLAG_ADDR_PLACE`); in that case the
+/// parent place name is in `parent_place`. `unit` / `floor` / `parent_place`
+/// are empty when the corresponding `addr:unit` / `addr:floor` /
+/// `addr:city|suburb|locality|state` tag was absent.
 pub struct AddrPointMatch<'a> {
     pub lat: f64,
     pub lng: f64,
     pub housenumber: &'a str,
     pub street: &'a str,
+    pub unit: &'a str,
+    pub floor: &'a str,
+    pub parent_place: &'a str,
+    pub flags: u8,
 }
 
 #[derive(Serialize, Default)]
@@ -1414,6 +1642,12 @@ pub struct Address<'a> {
     /// `{"7": "87283082fffffff", "9": "8928308280fffff"}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub h3: Option<std::collections::BTreeMap<String, String>>,
+    /// Closest amenity / shop / tourism / etc. POI within ~30 m of
+    /// the query coord. Sibling field — never replaces the address.
+    /// Old indexes (built before commit 4) and queries that hit no POI
+    /// in range simply leave this `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poi: Option<PoiMatch<'a>>,
 }
 
 /// Canonical confidence labels used on `Address::confidence` and the

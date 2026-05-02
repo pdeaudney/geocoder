@@ -32,6 +32,12 @@
 #include <s2/s2loop.h>
 #include <s2/s2builder.h>
 
+// Generated at build time by cmake/UpdateGitVersion.cmake; defines
+// GEOCODER_GIT_SHA and GEOCODER_GIT_DIRTY string literals. The header
+// is regenerated only when the SHA or dirty flag changes, so it does
+// not invalidate ccache hits on no-op rebuilds.
+#include "git_version.h"
+
 // Vendored at builder/third_party/ankerl/unordered_dense.h (v4.8.1, MIT).
 // Replaces std::unordered_map on the build-time hot path — chained-bucket
 // libstdc++ unordered_map is "slow across the board" on insert-heavy
@@ -47,11 +53,30 @@ struct WayHeader {
     uint32_t name_id;
 };
 
+// AddrPoint flag bits stored in `AddrPoint.flags`. These let one
+// 32-byte record represent both `addr:street` and `addr:place`
+// addresses (and also `addr:full` / `addr:housename` overlays) without
+// forking the on-disk format. Mirrors `FLAG_*` constants in
+// `server/src/lib.rs`.
+constexpr uint8_t FLAG_ADDR_PLACE   = 0x01; // street_or_place_id holds a place name
+constexpr uint8_t FLAG_IS_HOUSENAME = 0x02; // housenumber_id holds a free-form housename / addr:full
+
 struct AddrPoint {
     float lat;
     float lng;
     uint32_t housenumber_id;
-    uint32_t street_id;
+    // Street name (default), or place name when (flags & FLAG_ADDR_PLACE).
+    uint32_t street_or_place_id;
+    // addr:unit / addr:flat / addr:door — 0 if absent.
+    uint32_t unit_id;
+    // addr:floor / addr:level — 0 if absent.
+    uint32_t floor_id;
+    // Tagged parent locality from addr:city|suburb|locality|state.
+    // 0 if absent. Forward indexer prefers this over geometric
+    // find_admin() enrichment when non-zero. Populated in commit 3.
+    uint32_t parent_place_id;
+    uint8_t flags;
+    uint8_t _pad[3];
 };
 
 struct InterpWay {
@@ -87,18 +112,44 @@ struct PlacePoint {
     uint8_t _pad[3];
 };
 
-// Per-entity localized name. Sorted by (entity_type, entity_id, lang_code)
-// so the runtime does a single binary search per reverse query.
+// POI feature (amenity/shop/tourism/aeroway/historic/...). Indexed
+// separately from place points and addresses because forward search
+// needs a `category` filter and /reverse surfaces POIs as a sibling
+// field to the address (never replaces it).
+//
+// rank: 10 if wikipedia/wikidata-backed, 15 otherwise. Lower wins ties
+//   on /reverse distance. Autocomplete FST inclusion gates on rank<=10
+//   to keep the FST small enough to mmap without paging (commit 5).
+struct PoiPoint {
+    float lat;
+    float lng;
+    uint32_t name_id;
+    uint32_t category_id;       // interned "<key>:<value>" e.g. "amenity:cafe"
+    uint8_t rank;
+    uint8_t _pad[3];
+    uint32_t parent_place_id;   // tagged or geometric (filled in commit 5)
+};
+
+// Per-entity localized / alternate name. Sorted by
+// (entity_type, entity_id, alias_type, lang_code) so the runtime does a
+// single binary search per reverse query and a single contiguous walk
+// per forward-index alternates pull.
 //
 // entity_type: 0 = admin polygon (entity_id = index into admin_polygons.bin)
 //              1 = place point  (entity_id = index into place_points.bin)
-// lang_code:   packed 2-char lowercase ASCII ("en" = 'e' | ('n'<<8)).
-//              OSM uses keys like name:en, name:fr. We accept anything
-//              matching `^name:[a-z]{2}$`; anything richer (name:zh-Hant,
-//              name:en-AU) is skipped for MVP — covers 95% of tagged data.
+//              (extended in later commits for streets / POIs)
+// alias_type:  ALIAS_PRIMARY=0 (variant of the primary `name` tag, i.e.
+//                              `name:<lang>`),
+//              ALIAS_OFFICIAL=1 (`official_name` / `official_name:<lang>`),
+//              ALIAS_ALT=2 (`alt_name` / `alt_name:<lang>`),
+//              additional types (short_name/old_name/loc_name/int_name/
+//              reg_name/ref/int_ref/nat_ref) added in commit 3.
+// lang_code:   packed 2-char lowercase ASCII ("en" = 'e' | ('n'<<8)),
+//              or 0 when the alias has no language tag (e.g. plain
+//              `official_name=`).
 struct I18nName {
     uint8_t entity_type;
-    uint8_t _pad0;
+    uint8_t alias_type;
     uint16_t lang_code;
     uint32_t entity_id;
     uint32_t name_id;
@@ -114,11 +165,12 @@ static const uint32_t ID_MASK = 0x7FFFFFFFu;
 // drift in a C++ `sizeof` would serve garbled records. These asserts
 // catch it at compile time on both sides of the bridge.
 static_assert(sizeof(WayHeader)    == 12, "on-disk layout drift: WayHeader");
-static_assert(sizeof(AddrPoint)    == 16, "on-disk layout drift: AddrPoint");
+static_assert(sizeof(AddrPoint)    == 32, "on-disk layout drift: AddrPoint");
 static_assert(sizeof(InterpWay)    == 24, "on-disk layout drift: InterpWay");
 static_assert(sizeof(AdminPolygon) == 24, "on-disk layout drift: AdminPolygon");
 static_assert(sizeof(NodeCoord)    == 8,  "on-disk layout drift: NodeCoord");
 static_assert(sizeof(PlacePoint)   == 16, "on-disk layout drift: PlacePoint");
+static_assert(sizeof(PoiPoint)     == 24, "on-disk layout drift: PoiPoint");
 static_assert(sizeof(I18nName)     == 16, "on-disk layout drift: I18nName");
 
 // --- uint32 offset guards ----------------------------------------------
@@ -205,6 +257,27 @@ static cell_map<std::vector<uint32_t>> cell_to_admin;
 static std::vector<PlacePoint> place_points;
 static cell_map<std::vector<uint32_t>> cell_to_places;
 static uint64_t place_count_total = 0;
+
+// POI points (amenity/shop/tourism/aeroway/historic/leisure/office/
+// healthcare/military/man_made/railway-non-track/natural-subset/
+// waterway-subset). Indexed at street_cell_level so /reverse can do
+// the same 9-cell neighbour lookup as for streets and addresses.
+static std::vector<PoiPoint> poi_points;
+static cell_map<std::vector<uint32_t>> cell_to_pois;
+static uint64_t poi_count_total = 0;
+
+// associatedStreet relation members → interned street name id.
+// Populated in the relation pre-pass before the main ingest. Looked
+// up by `process_address_tags` as the street fallback when an entity
+// has neither addr:street nor addr:place tags directly on it. We
+// intentionally store only the relation's own `name` tag (per OSM
+// convention for associatedStreet — see
+// https://wiki.openstreetmap.org/wiki/Relation:associatedStreet) and
+// don't chase way members for their `name` tag — that would need a
+// second relation+way pass and the convention is well-followed enough
+// that the simpler approach captures most of the value.
+static ankerl::unordered_dense::map<int64_t, uint32_t> node_to_assoc_street;
+static ankerl::unordered_dense::map<int64_t, uint32_t> way_to_assoc_street;
 
 // Localized names from OSM `name:<lang>` tags. Populated inline as we
 // process admin polygons and place points; written sorted.
@@ -462,56 +535,333 @@ static bool is_included_highway(const char* value) {
 // --- place=* rank mapping (compatible with Nominatim address_rank defaults) ---
 
 // Returns 0 to skip this place tag (not useful for address output).
-// --- Localized names (`name:<lang>`) ---
+// --- Localized / alternate names ---
 
-// Capture `name:xx` tags (xx = 2 ASCII letters) on the given OSM entity
-// and append them to the global i18n_names table. `entity_type` is 0 for
-// admin polygons, 1 for place points. `entity_id` must be the same index
-// the runtime uses to look up the entity (i.e. admin_polygons.size() -1
-// or place_points.size() - 1 depending on type, captured by the caller
-// before it increments).
+// Alias-type discriminator stored in I18nName.alias_type. The byte slot
+// previously held a sentinel value packed into lang_code; splitting it
+// off lets us cleanly represent alias-type × language as a 2-D key
+// (e.g. `short_name:fr`, `old_name:en`). Mirrors ALIAS_* in
+// server/src/i18n.rs.
+constexpr uint8_t ALIAS_PRIMARY  = 0; // variant of the primary `name` tag (`name:<lang>`)
+constexpr uint8_t ALIAS_OFFICIAL = 1; // `official_name` / `official_name:<lang>`
+constexpr uint8_t ALIAS_ALT      = 2; // `alt_name` / `alt_name:<lang>` (also `name:left`/`right`)
+constexpr uint8_t ALIAS_SHORT    = 3; // `short_name` / `short_name:<lang>` — e.g. "JFK"
+constexpr uint8_t ALIAS_OLD      = 4; // `old_name` / `old_name:<lang>` — e.g. "Bombay"
+constexpr uint8_t ALIAS_LOC      = 5; // `loc_name` / `loc_name:<lang>` — informal local name
+constexpr uint8_t ALIAS_INT      = 6; // `int_name` / `int_name:<lang>` — international form
+constexpr uint8_t ALIAS_REG      = 7; // `reg_name` / `reg_name:<lang>` — regional form
+constexpr uint8_t ALIAS_REF      = 8; // `ref` — typically road / route reference (e.g. "A14")
+constexpr uint8_t ALIAS_INT_REF  = 9; // `int_ref` — international ref (e.g. "E40")
+constexpr uint8_t ALIAS_NAT_REF  = 10; // `nat_ref` — national ref
+
+static void emit_alias(uint8_t entity_type, uint32_t entity_id,
+                       uint8_t alias_type, uint16_t lang_code,
+                       const char* value) {
+    if (!value || !*value) return;
+    I18nName rec{};
+    rec.entity_type = entity_type;
+    rec.alias_type = alias_type;
+    rec.lang_code = lang_code;
+    rec.entity_id = entity_id;
+    rec.name_id = strings.intern(value);
+    i18n_names.push_back(rec);
+    i18n_count_total++;
+}
+
+// One alias-family table entry. Pairs an OSM tag prefix
+// (`name`, `short_name`, ...) with the on-disk alias_type byte. The
+// shared per-tag walk then handles both the bare-prefix (`short_name=`)
+// and language-tagged (`short_name:fr=`) forms uniformly.
+struct AliasFamily {
+    const char* tag_prefix;
+    size_t prefix_len;
+    uint8_t alias_type;
+};
+
+// Order doesn't matter — we walk the whole table per tag and rely on the
+// `*rest == '\0' || *rest == ':'` guard to skip "tag starts with prefix
+// but isn't actually this family" cases (e.g. `name_typed`).
+static const AliasFamily kAliasFamilies[] = {
+    {"name",          4,  ALIAS_PRIMARY},
+    {"official_name", 13, ALIAS_OFFICIAL},
+    {"alt_name",      8,  ALIAS_ALT},
+    {"short_name",    10, ALIAS_SHORT},
+    {"old_name",      8,  ALIAS_OLD},
+    {"loc_name",      8,  ALIAS_LOC},
+    {"int_name",      8,  ALIAS_INT},
+    {"reg_name",      8,  ALIAS_REG},
+    {"ref",           3,  ALIAS_REF},
+    {"int_ref",       7,  ALIAS_INT_REF},
+    {"nat_ref",       7,  ALIAS_NAT_REF},
+};
+
+// Pack the first two letters of an OSM lang subtag into the runtime's
+// 16-bit lang_code. Returns 0 for malformed / unsupported codes
+// (3-letter ISO 639-3 like `nan`, mixed-case, etc.). For BCP47-shaped
+// tags (`zh-Hant`, `en-AU`) we keep the 2-letter primary subtag and
+// drop region/script — the runtime's pack_lang_code does the same on
+// the query side, so `?lang=en-AU` and `name:en-AU` both resolve to the
+// same packed code.
+static uint16_t pack_lang_subtag(const char* suffix) {
+    if (!suffix) return 0;
+    size_t len = std::strlen(suffix);
+    if (len < 2) return 0;
+    char a = static_cast<char>(std::tolower(static_cast<unsigned char>(suffix[0])));
+    char b = static_cast<char>(std::tolower(static_cast<unsigned char>(suffix[1])));
+    if (a < 'a' || a > 'z' || b < 'a' || b > 'z') return 0;
+    // Accept exactly 2 letters, or 2 letters + '-' + (region/script).
+    // 3-letter primary subtags can't fit in our 16-bit code without
+    // colliding with shorter codes (`nan` → `na` collides with
+    // Norwegian `name:na`), so we drop them.
+    if (len != 2 && !(len >= 5 && suffix[2] == '-')) return 0;
+    return static_cast<uint16_t>(a) | (static_cast<uint16_t>(b) << 8);
+}
+
+// Emit a possibly multi-valued alias. OSM convention is to
+// semicolon-separate alt_name (and similar) variants; split and intern
+// each non-empty piece, trimming inner whitespace.
+static void emit_alias_split(uint8_t entity_type, uint32_t entity_id,
+                             uint8_t alias_type, uint16_t lang_code,
+                             const char* value) {
+    if (!value) return;
+    std::string buf;
+    for (const char* p = value;; ++p) {
+        if (*p == ';' || *p == '\0') {
+            while (!buf.empty() && std::isspace(static_cast<unsigned char>(buf.back()))) {
+                buf.pop_back();
+            }
+            if (!buf.empty()) {
+                emit_alias(entity_type, entity_id, alias_type, lang_code, buf.c_str());
+            }
+            if (*p == '\0') break;
+            buf.clear();
+        } else {
+            if (buf.empty() && std::isspace(static_cast<unsigned char>(*p))) continue;
+            buf.push_back(*p);
+        }
+    }
+}
+
+// Capture every alias-family tag (name:xx, official_name, alt_name,
+// short_name, old_name, loc_name, int_name, reg_name, ref, int_ref,
+// nat_ref — each plus per-language variants) on the given OSM entity
+// and append them to the global i18n_names table. `entity_type` is 0
+// for admin polygons, 1 for place points. `entity_id` must be the same
+// index the runtime uses to look up the entity (i.e.
+// admin_polygons.size() - 1 or place_points.size() - 1 depending on
+// type, captured by the caller before it increments).
 template <typename Tags>
 static void collect_i18n_names(const Tags& tags, uint8_t entity_type, uint32_t entity_id) {
     for (const auto& tag : tags) {
         const char* k = tag.key();
-        if (!k || std::strncmp(k, "name:", 5) != 0) {
-            continue;
-        }
-        const char* suffix = k + 5;
-        // Accept only plain 2-letter lowercase lang codes. Anything richer
-        // (zh-Hant, en-AU, name:left:en, etc.) is skipped for MVP.
-        if (!(suffix[0] >= 'a' && suffix[0] <= 'z' &&
-              suffix[1] >= 'a' && suffix[1] <= 'z' &&
-              suffix[2] == '\0')) {
-            continue;
-        }
-        const char* value = tag.value();
-        if (!value || !*value) {
-            continue;
-        }
-        // Pack the two-letter code into a u16 with 'a' in the low byte —
-        // matches what the Rust runtime expects ("en" → 'e' | ('n'<<8)).
-        uint16_t lang_code = static_cast<uint16_t>(suffix[0])
-            | (static_cast<uint16_t>(suffix[1]) << 8);
+        const char* v = tag.value();
+        if (!k || !v || !*v) continue;
 
-        I18nName rec{};
-        rec.entity_type = entity_type;
-        rec.lang_code = lang_code;
-        rec.entity_id = entity_id;
-        rec.name_id = strings.intern(value);
-        i18n_names.push_back(rec);
-        i18n_count_total++;
+        for (const auto& fam : kAliasFamilies) {
+            if (std::strncmp(k, fam.tag_prefix, fam.prefix_len) != 0) continue;
+            const char* rest = k + fam.prefix_len;
+
+            uint16_t lang_code = 0;
+            if (*rest == '\0') {
+                // Bare `<family>=...` — language-agnostic. The bare
+                // `name=` lives on the entity itself
+                // (PlacePoint.name_id / AdminPolygon.name_id), not in
+                // i18n_names; we'd otherwise duplicate it, so skip.
+                if (fam.alias_type == ALIAS_PRIMARY) break;
+            } else if (*rest == ':') {
+                const char* suffix = rest + 1;
+                // OSM `name:left` / `name:right` are boundary
+                // side-of-road names, not languages. Index them as
+                // generic alternates so /search still finds them; only
+                // honour the special case for the `name` family.
+                if (fam.alias_type == ALIAS_PRIMARY &&
+                    (std::strcmp(suffix, "left") == 0 || std::strcmp(suffix, "right") == 0)) {
+                    emit_alias(entity_type, entity_id, ALIAS_ALT, /*lang=*/0, v);
+                    break;
+                }
+                lang_code = pack_lang_subtag(suffix);
+                if (lang_code == 0) break;
+            } else {
+                // Tag isn't actually this family (e.g. `name_typed`,
+                // `referral`); keep walking the table.
+                continue;
+            }
+
+            // alt_name and similar are conventionally semicolon-
+            // separated; split and emit each variant.
+            if (fam.alias_type == ALIAS_ALT) {
+                emit_alias_split(entity_type, entity_id, fam.alias_type, lang_code, v);
+            } else {
+                emit_alias(entity_type, entity_id, fam.alias_type, lang_code, v);
+            }
+            break;
+        }
     }
 }
 
+// Nominatim-aligned address rank. Lower = more important. The runtime's
+// `find_place` prefers lower rank then closer distance, so the values
+// chosen here decide which place tag wins when multiple cover the same
+// query coordinate. `island` slots in between country and city; the new
+// fine-grained tags (neighbourhood/quarter/locality/isolated_dwelling/
+// farm) sit at or below suburb/hamlet so they never override a closer
+// suburb result in dense urban areas.
 static uint8_t place_rank(const char* place) {
     if (!place) return 0;
     if (std::strcmp(place, "city") == 0) return 16;
     if (std::strcmp(place, "town") == 0) return 16;
     if (std::strcmp(place, "village") == 0) return 16;
+    if (std::strcmp(place, "island") == 0) return 17;
     if (std::strcmp(place, "suburb") == 0) return 19;
     if (std::strcmp(place, "hamlet") == 0) return 20;
+    if (std::strcmp(place, "locality") == 0) return 21;
+    if (std::strcmp(place, "islet") == 0) return 21;
+    if (std::strcmp(place, "neighbourhood") == 0) return 22;
+    if (std::strcmp(place, "quarter") == 0) return 22;
+    if (std::strcmp(place, "isolated_dwelling") == 0) return 25;
+    if (std::strcmp(place, "farm") == 0) return 25;
     return 0;
+}
+
+// Entity-type discriminator used in I18nName.entity_type. Mirrors the
+// `ENTITY_*` constants in `server/src/i18n.rs`. PLACE is 1 (legacy
+// value, kept for binary compat); POI is 2.
+constexpr uint8_t ENTITY_ADMIN = 0;
+constexpr uint8_t ENTITY_PLACE = 1;
+constexpr uint8_t ENTITY_POI   = 2;
+
+// --- POI extraction ---
+
+// Tag whitelist for POI ingestion. Order is preference: when a feature
+// carries multiple POI keys we use the first match from the table.
+// `railway` is special-cased below to exclude track types (rail/tram/
+// subway/light_rail/etc) which are linear features, not POIs.
+static const std::vector<std::string> kPoiKeys = {
+    "amenity", "shop", "tourism", "aeroway", "historic",
+    "leisure", "office", "healthcare", "military", "man_made",
+    "railway",
+};
+
+static bool is_excluded_railway(const char* v) {
+    if (!v) return true;
+    static const std::vector<std::string> kExcluded = {
+        "rail", "tram", "subway", "light_rail", "narrow_gauge",
+        "monorail", "preserved", "construction", "abandoned",
+        "razed", "disused", "razed_rail", "yard",
+    };
+    for (const auto& e : kExcluded) {
+        if (e == v) return true;
+    }
+    return false;
+}
+
+static const std::vector<std::string> kNaturalPoi = {
+    "peak", "water", "bay", "cape", "volcano", "glacier",
+    "cave_entrance", "spring",
+};
+static const std::vector<std::string> kWaterwayPoi = {
+    "waterfall", "dock", "canal_lock",
+};
+static bool in_set(const char* v, const std::vector<std::string>& set) {
+    if (!v) return false;
+    for (const auto& s : set) if (s == v) return true;
+    return false;
+}
+
+// Returns true when the entity is a POI worth indexing. On true, fills
+// `category_out` (interned "<key>:<value>"), `rank_out`, and
+// `parent_place_id_out`. Caller must already have a non-empty `name`
+// because we drop unnamed POIs unconditionally.
+template <typename Tags>
+static bool extract_poi(const Tags& tags,
+                        uint32_t& category_id_out,
+                        uint8_t& rank_out,
+                        uint32_t& parent_place_id_out) {
+    const char* matched_key = nullptr;
+    const char* matched_val = nullptr;
+
+    for (const auto& k : kPoiKeys) {
+        const char* v = tags[k.c_str()];
+        if (!v || !*v) continue;
+        if (k == "railway" && is_excluded_railway(v)) continue;
+        matched_key = k.c_str();
+        matched_val = v;
+        break;
+    }
+    if (!matched_key) {
+        const char* nat = tags["natural"];
+        if (in_set(nat, kNaturalPoi)) {
+            matched_key = "natural";
+            matched_val = nat;
+        }
+    }
+    if (!matched_key) {
+        const char* ww = tags["waterway"];
+        if (in_set(ww, kWaterwayPoi)) {
+            matched_key = "waterway";
+            matched_val = ww;
+        }
+    }
+    if (!matched_key) return false;
+
+    std::string category;
+    category.reserve(std::strlen(matched_key) + 1 + std::strlen(matched_val));
+    category.append(matched_key).push_back(':');
+    category.append(matched_val);
+    category_id_out = strings.intern(category);
+
+    bool has_wiki = (tags["wikidata"] != nullptr) ||
+                    (tags["wikipedia"] != nullptr);
+    rank_out = has_wiki ? 10 : 15;
+
+    const char* parent = tags["addr:city"];
+    if (!parent) parent = tags["addr:suburb"];
+    if (!parent) parent = tags["addr:locality"];
+    if (!parent) parent = tags["is_in:city"];
+    parent_place_id_out = (parent && *parent) ? strings.intern(parent) : 0;
+    return true;
+}
+
+static uint32_t add_poi_point(double lat, double lng,
+                              const char* name,
+                              uint32_t category_id, uint8_t rank,
+                              uint32_t parent_place_id) {
+    if (!name || !*name) return UINT32_MAX;
+    uint32_t poi_id = checked_u32(poi_points.size(), "poi_points id");
+    PoiPoint pt{};
+    pt.lat = static_cast<float>(lat);
+    pt.lng = static_cast<float>(lng);
+    pt.name_id = strings.intern(name);
+    pt.category_id = category_id;
+    pt.rank = rank;
+    pt.parent_place_id = parent_place_id;
+    poi_points.push_back(pt);
+
+    S2CellId cell = point_to_cell(lat, lng);
+    cell_to_pois[cell.id()].push_back(poi_id);
+    poi_count_total++;
+    if (poi_count_total % 100000 == 0) {
+        std::cerr << "Collected " << poi_count_total / 1000 << "K POIs..." << std::endl;
+    }
+    return poi_id;
+}
+
+// Try to extract+emit a POI for the given OSM entity at (lat, lng).
+// Returns true when a POI was emitted (also captures i18n alternates
+// for the entity in that case).
+template <typename Tags>
+static bool try_emit_poi(double lat, double lng, const Tags& tags) {
+    const char* name = tags["name"];
+    if (!name || !*name) return false;
+    uint32_t cat_id = 0, parent_id = 0;
+    uint8_t rank = 0;
+    if (!extract_poi(tags, cat_id, rank, parent_id)) return false;
+    uint32_t poi_id = add_poi_point(lat, lng, name, cat_id, rank, parent_id);
+    if (poi_id != UINT32_MAX) {
+        collect_i18n_names(tags, ENTITY_POI, poi_id);
+        return true;
+    }
+    return false;
 }
 
 // Returns the `place_id` the point was assigned to, or UINT32_MAX when
@@ -542,6 +892,10 @@ static uint32_t add_place_point(double lat, double lng, uint8_t rank, const char
 
 // --- Parse house number (leading digits) ---
 
+// Used by interpolation endpoint extraction (start/end house numbers
+// must be integers, by definition of `addr:interpolation`). For the
+// AddrPoint housenumber field — which stores a free-form display
+// string — see `normalise_housenumber` below.
 static uint32_t parse_house_number(const char* s) {
     if (!s) return 0;
     uint32_t n = 0;
@@ -552,18 +906,126 @@ static uint32_t parse_house_number(const char* s) {
     return n;
 }
 
+// --- Housenumber normalisation ---
+
+// Recognised unit-prefix words. Lowercase; we case-fold the input.
+// Covers EN (Apt/Apartment/Flat/Unit/Suite/Ste/Room/Rm/App), DE
+// (Wohnung/WHG, Top), AT (Top), ES/PT (Apto/Lokal), FR (Appartement),
+// IT (Interno/Int).
+static const std::vector<std::string> kUnitPrefixWords = {
+    "apt", "apt.", "apartment", "apartments",
+    "flat", "unit", "suite", "ste", "ste.",
+    "room", "rm", "rm.",
+    "app", "apto", "appt", "appartement",
+    "wohnung", "whg", "top", "lokal",
+    "interno", "int", "int.",
+};
+
+// Returns true if `s`'s first whitespace-separated token (alpha chars
+// + optional trailing '.') is a recognised unit prefix.
+static bool starts_with_unit_prefix(const std::string& s) {
+    std::string word;
+    word.reserve(8);
+    for (char c : s) {
+        if (std::isalpha(static_cast<unsigned char>(c))) {
+            word.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        } else if (c == '.' && !word.empty()) {
+            word.push_back('.');
+            break;
+        } else {
+            break;
+        }
+    }
+    if (word.empty()) return false;
+    for (const auto& p : kUnitPrefixWords) {
+        if (word == p) return true;
+    }
+    return false;
+}
+
+// Trim leading/trailing whitespace in place.
+static void trim(std::string& s) {
+    auto not_ws = [](unsigned char c) { return !std::isspace(c); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_ws));
+    s.erase(std::find_if(s.rbegin(), s.rend(), not_ws).base(), s.end());
+}
+
+// Normalise a free-form `addr:housenumber` string.
+//
+// Splits apartment-prefix forms `"Apt 4 / 12"` → housenumber="12",
+// unit="Apt 4"; `"Flat 3, 22"` → housenumber="22", unit="Flat 3";
+// `"Unit 5/12"` → housenumber="12", unit="Unit 5". Preserves `"12A"`,
+// `"12-14"` (ranges), `"12/14"` (no unit prefix → treat slash as part
+// of the housenumber rather than a unit boundary). Empty / unparseable
+// inputs leave both outputs empty — caller's responsibility to detect
+// and skip.
+//
+// Tantivy's existing ASCII-fold + lowercase tokenizer takes care of
+// case-insensitive matching ("12A" matches "12a"), so we don't store a
+// separate normalised form — the raw display string is what
+// /reverse returns AND what tantivy indexes.
+static void normalise_housenumber(const char* raw,
+                                  std::string& housenumber_out,
+                                  std::string& unit_out) {
+    housenumber_out.clear();
+    unit_out.clear();
+    if (!raw) return;
+    std::string s(raw);
+    trim(s);
+    if (s.empty()) return;
+
+    // Look for a separator (`/`, `,`, `;`) that splits a unit-prefix
+    // word from a digit-led housenumber. Walk left-to-right and keep
+    // the FIRST split that satisfies both sides — apartment prefixes
+    // are conventionally on the left.
+    for (size_t i = 0; i < s.size(); i++) {
+        char c = s[i];
+        if (c != '/' && c != ',' && c != ';') continue;
+        std::string lhs = s.substr(0, i);
+        std::string rhs = s.substr(i + 1);
+        trim(lhs);
+        trim(rhs);
+        if (lhs.empty() || rhs.empty()) continue;
+        // RHS must start with a digit to be a housenumber.
+        if (!std::isdigit(static_cast<unsigned char>(rhs[0]))) continue;
+        // LHS must begin with a recognised unit-prefix word; if the
+        // prefix word isn't there, the separator is most likely part
+        // of a range / fraction housenumber (`12-14`, `12/14`) and we
+        // shouldn't split.
+        if (!starts_with_unit_prefix(lhs)) continue;
+        unit_out = std::move(lhs);
+        housenumber_out = std::move(rhs);
+        return;
+    }
+
+    // No split — passthrough.
+    housenumber_out = std::move(s);
+}
+
 // --- Add an address point ---
 
 static uint64_t addr_count_total = 0;
 
-static void add_addr_point(double lat, double lng, const char* housenumber, const char* street) {
+// Low-level emitter. Callers are expected to have done all tag
+// resolution / normalisation; this just interns and indexes.
+static void add_addr_point_full(double lat, double lng,
+                                const char* housenumber,
+                                const char* street_or_place,
+                                const char* unit,
+                                const char* floor,
+                                const char* parent,
+                                uint8_t flags) {
     uint32_t addr_id = checked_u32(addr_points.size(), "addr_points id");
-    addr_points.push_back({
-        static_cast<float>(lat),
-        static_cast<float>(lng),
-        strings.intern(housenumber),
-        strings.intern(street)
-    });
+    AddrPoint pt{};
+    pt.lat = static_cast<float>(lat);
+    pt.lng = static_cast<float>(lng);
+    pt.housenumber_id = strings.intern(housenumber);
+    pt.street_or_place_id = strings.intern(street_or_place);
+    pt.unit_id   = (unit   && *unit)   ? strings.intern(unit)   : 0;
+    pt.floor_id  = (floor  && *floor)  ? strings.intern(floor)  : 0;
+    pt.parent_place_id = (parent && *parent) ? strings.intern(parent) : 0;
+    pt.flags = flags;
+    addr_points.push_back(pt);
 
     S2CellId cell = point_to_cell(lat, lng);
     cell_to_addrs[cell.id()].push_back(addr_id);
@@ -572,6 +1034,126 @@ static void add_addr_point(double lat, double lng, const char* housenumber, cons
     if (addr_count_total % 1000000 == 0) {
         std::cerr << "Collected " << addr_count_total / 1000000 << "M addresses..." << std::endl;
     }
+}
+
+// Pull every relevant `addr:*` tag from an OSM entity and emit at most
+// one AddrPoint. Returns true when a point was emitted (caller can
+// increment its building/address counter), false when the entity had
+// no usable address signal.
+//
+// Recognised tags (with priority/fallback rules):
+//
+//   housenumber slot:
+//     1. `addr:housenumber` — raw string, runs through
+//        normalise_housenumber to peel any apartment prefix.
+//     2. CZ/SK fallback: `addr:conscriptionnumber` + `addr:streetnumber`
+//        combined with '/' (the local convention).
+//     3. `addr:full` overlay — set FLAG_IS_HOUSENAME so forward search
+//        skips numeric matching for this row.
+//     4. `addr:housename` overlay — same flag.
+//
+//   street/place slot:
+//     1. `addr:street` (default; FLAG_ADDR_PLACE clear).
+//     2. `addr:place` (FLAG_ADDR_PLACE set; e.g. DE/AT/CH villages
+//        whose convention is "12 / Kleindorf" rather than a street).
+//     If neither is present we cannot emit (associatedStreet
+//     propagation is wired in commit 5).
+//
+//   unit slot: `addr:unit` || `addr:flat` || `addr:door`. Otherwise
+//     filled from any apartment prefix peeled out of the housenumber.
+//
+//   floor slot: `addr:floor` || `addr:level`.
+//
+//   parent_place slot: `addr:city` || `addr:suburb` ||
+//     `addr:locality` || `addr:state`. Forward indexer prefers this
+//     interned name over a geometric find_admin() lookup when set.
+template <typename Tags>
+static bool process_address_tags(double lat, double lng, const Tags& tags,
+                                  const char* assoc_street_fallback = nullptr) {
+    const char* hn_raw    = tags["addr:housenumber"];
+    const char* full_tag  = tags["addr:full"];
+    const char* housename = tags["addr:housename"];
+    const char* street    = tags["addr:street"];
+    const char* place     = tags["addr:place"];
+    const char* unit      = tags["addr:unit"];
+    if (!unit) unit       = tags["addr:flat"];
+    if (!unit) unit       = tags["addr:door"];
+    const char* floor_tag = tags["addr:floor"];
+    if (!floor_tag) floor_tag = tags["addr:level"];
+    const char* parent    = tags["addr:city"];
+    if (!parent) parent   = tags["addr:suburb"];
+    if (!parent) parent   = tags["addr:locality"];
+    if (!parent) parent   = tags["addr:state"];
+
+    // CZ/SK conscription/street number compose. The local convention
+    // writes the conscription number first, then a slash, then the
+    // street number — so a building shows `123/45` even though the
+    // house faces 45 on the street. Reproduce the convention here so
+    // /reverse renders something a Czech reader would recognise.
+    std::string composed_hn;
+    if (!hn_raw || !*hn_raw) {
+        const char* consc = tags["addr:conscriptionnumber"];
+        const char* sn    = tags["addr:streetnumber"];
+        if (consc && *consc && sn && *sn) {
+            composed_hn = std::string(consc) + "/" + sn;
+            hn_raw = composed_hn.c_str();
+        } else if (consc && *consc) {
+            hn_raw = consc;
+        } else if (sn && *sn) {
+            hn_raw = sn;
+        }
+    }
+
+    // Resolve the primary attached entity.
+    uint8_t flags = 0;
+    const char* primary = nullptr;
+    if (street && *street) {
+        primary = street;
+    } else if (place && *place) {
+        primary = place;
+        flags |= FLAG_ADDR_PLACE;
+    } else if (assoc_street_fallback && *assoc_street_fallback) {
+        // associatedStreet relation supplies the street name when the
+        // entity itself doesn't carry an addr:street tag (common in
+        // DE/AT/CH; the relation's `name` is the canonical street
+        // name per OSM convention).
+        primary = assoc_street_fallback;
+    } else {
+        // Without a street or place attachment we have no meaningful
+        // way to disambiguate the address from other addresses sharing
+        // the same housenumber within the same admin polygon. Skip.
+        return false;
+    }
+
+    // Resolve the housenumber slot. Numeric `addr:housenumber` wins,
+    // then `addr:full`, then `addr:housename` — the latter two carry
+    // FLAG_IS_HOUSENAME so the forward path skips numeric matching.
+    std::string hn_norm, unit_from_hn;
+    if (hn_raw && *hn_raw) {
+        normalise_housenumber(hn_raw, hn_norm, unit_from_hn);
+        if (hn_norm.empty()) return false;
+    } else if (full_tag && *full_tag) {
+        hn_norm = full_tag;
+        flags |= FLAG_IS_HOUSENAME;
+    } else if (housename && *housename) {
+        hn_norm = housename;
+        flags |= FLAG_IS_HOUSENAME;
+    } else {
+        return false;
+    }
+
+    // Tagged unit takes precedence over the prefix peeled out of the
+    // housenumber — the OSM data model says addr:unit is authoritative
+    // when present.
+    const char* unit_final = (unit && *unit)
+        ? unit
+        : (!unit_from_hn.empty() ? unit_from_hn.c_str() : nullptr);
+
+    add_addr_point_full(lat, lng,
+                        hn_norm.c_str(), primary,
+                        unit_final, floor_tag, parent,
+                        flags);
+    return true;
 }
 
 // --- Add an admin polygon ---
@@ -620,6 +1202,8 @@ class BuildHandler : public osmium::handler::Handler {
 public:
     void node(const osmium::Node& node) {
         if (!node.location().valid()) return;
+        const double lat = node.location().lat();
+        const double lng = node.location().lon();
 
         // place=* locality features (skip if no name — unnameable places are useless)
         const char* place = node.tags()["place"];
@@ -627,20 +1211,40 @@ public:
             uint8_t rank = place_rank(place);
             if (rank > 0) {
                 const char* name = node.tags()["name"];
-                uint32_t place_id = add_place_point(
-                    node.location().lat(), node.location().lon(), rank, name);
+                uint32_t place_id = add_place_point(lat, lng, rank, name);
                 if (place_id != UINT32_MAX) {
-                    collect_i18n_names(node.tags(), /*type=*/1, place_id);
+                    collect_i18n_names(node.tags(), ENTITY_PLACE, place_id);
                 }
             }
         }
 
-        const char* housenumber = node.tags()["addr:housenumber"];
-        if (!housenumber) return;
-        const char* street = node.tags()["addr:street"];
-        if (!street) return;
+        // POI emission. Independent of address/place — a single node
+        // can legitimately be all three (e.g. amenity=cafe + name= +
+        // addr:housenumber). try_emit_poi gates on `name` and the
+        // amenity/shop/etc whitelist; returns silently for non-POIs.
+        try_emit_poi(lat, lng, node.tags());
 
-        add_addr_point(node.location().lat(), node.location().lon(), housenumber, street);
+        // process_address_tags handles every accepted addr:* shape
+        // (street, place, full, housename, plus unit/floor/parent
+        // capture and CZ/SK conscription/street number compose) and
+        // returns false when the entity has no usable address signal.
+        // The associatedStreet fallback is consulted when the entity
+        // itself carries no addr:street/addr:place — populated in
+        // the pre-pass before pass 2 runs.
+        //
+        // Copy the interned string into a stack-owned std::string
+        // before passing the pointer down: process_address_tags
+        // reaches add_addr_point_full which calls strings.intern() on
+        // unrelated strings, and any of those calls may grow the
+        // strings.data() vector and invalidate a raw pointer into it.
+        std::string assoc_buf;
+        const char* assoc = nullptr;
+        auto it = node_to_assoc_street.find(static_cast<int64_t>(node.id()));
+        if (it != node_to_assoc_street.end()) {
+            assoc_buf = strings.data().data() + it->second;
+            assoc = assoc_buf.c_str();
+        }
+        process_address_tags(lat, lng, node.tags(), assoc);
     }
 
     void way(const osmium::Way& way) {
@@ -651,40 +1255,56 @@ public:
             return;
         }
 
-        // Building addresses
-        const char* housenumber = way.tags()["addr:housenumber"];
-        if (housenumber) {
-            const char* street = way.tags()["addr:street"];
-            if (street) {
-                process_building_address(way, housenumber, street);
-            }
+        // Building addresses — accept any address-shaped tag set, not
+        // just (housenumber + street). process_address_tags decides
+        // what to emit (or to skip) and what to set on flags.
+        if (way.tags()["addr:housenumber"] || way.tags()["addr:full"] ||
+            way.tags()["addr:housename"] || way.tags()["addr:conscriptionnumber"] ||
+            way.tags()["addr:streetnumber"]) {
+            process_building_address(way);
         }
 
         // place=* on a closed way (suburb/town polygon) — use centroid as
         // the representative point. Non-closed ways are unusual for
         // place tags but we handle them the same way.
+        // POIs on linear ways (e.g. an `aeroway=runway` with a name)
+        // also emit here at the centroid; closed-way POIs go through
+        // the area() handler instead.
         const char* place = way.tags()["place"];
-        if (place) {
-            uint8_t rank = place_rank(place);
-            if (rank > 0) {
-                const char* name = way.tags()["name"];
-                if (name && *name) {
-                    const auto& wnodes = way.nodes();
-                    double sum_lat = 0, sum_lng = 0;
-                    int valid = 0;
-                    for (const auto& nr : wnodes) {
-                        if (!nr.location().valid()) continue;
-                        sum_lat += nr.location().lat();
-                        sum_lng += nr.location().lon();
-                        valid++;
-                    }
-                    if (valid > 0) {
-                        uint32_t place_id = add_place_point(
-                            sum_lat / valid, sum_lng / valid, rank, name);
+        const char* way_name = way.tags()["name"];
+        if ((place && place_rank(place) > 0 && way_name && *way_name) || way_name) {
+            const auto& wnodes = way.nodes();
+            double sum_lat = 0, sum_lng = 0;
+            int valid = 0;
+            for (const auto& nr : wnodes) {
+                if (!nr.location().valid()) continue;
+                sum_lat += nr.location().lat();
+                sum_lng += nr.location().lon();
+                valid++;
+            }
+            if (valid > 0) {
+                double clat = sum_lat / valid;
+                double clng = sum_lng / valid;
+                if (place && way_name && *way_name) {
+                    uint8_t rank = place_rank(place);
+                    if (rank > 0) {
+                        uint32_t place_id = add_place_point(clat, clng, rank, way_name);
                         if (place_id != UINT32_MAX) {
-                            collect_i18n_names(way.tags(), /*type=*/1, place_id);
+                            collect_i18n_names(way.tags(), ENTITY_PLACE, place_id);
                         }
                     }
+                }
+                // POI emission for ways. The MultipolygonManager only
+                // routes relations of type=multipolygon/boundary
+                // through area() — closed ways are NOT auto-converted.
+                // So a closed-way `amenity=cafe` (the common shape
+                // for buildings tagged as amenities) only ever fires
+                // way(); skipping closed ways here would drop the
+                // bulk of POIs. The rare double-emit case (a way
+                // that's both tagged with a POI key AND is a member
+                // of a multipolygon relation) is acceptable.
+                if (way_name && *way_name) {
+                    try_emit_poi(clat, clng, way.tags());
                 }
             }
         }
@@ -701,10 +1321,88 @@ public:
 
     void area(const osmium::Area& area) {
         const char* boundary = area.tags()["boundary"];
-        if (!boundary) return;
+        const char* place_tag = area.tags()["place"];
 
-        bool is_admin = (std::strcmp(boundary, "administrative") == 0);
-        bool is_postal = (std::strcmp(boundary, "postal_code") == 0);
+        bool is_admin = boundary && std::strcmp(boundary, "administrative") == 0;
+        bool is_postal = boundary && std::strcmp(boundary, "postal_code") == 0;
+
+        // Areas tagged `place=*` (typically on admin relations for
+        // major cities — Aurora IL, Cornwall ON, Münster DE,
+        // Saint-Eustache QC, Griffith NSW) need to land in
+        // place_points.bin so /search can find them by name. They
+        // also legitimately land in admin_polygons.bin when they
+        // also carry boundary=administrative — both are correct,
+        // they answer different questions (reverse vs forward).
+        // Without this, large cities tagged on relations rather
+        // than as separate place=city nodes are missing from
+        // forward search entirely.
+        bool has_useful_place = place_tag && place_rank(place_tag) > 0;
+
+        // POI tag detection on the area itself. Areas tagged with
+        // amenity=university, leisure=park, tourism=zoo, etc. are
+        // legitimate POIs even when they carry no boundary tag — we
+        // emit them at the polygon centroid so /search and /reverse
+        // can find them. Computed lazily below to avoid the centroid
+        // walk for the common case of plain admin polygons.
+        bool needs_centroid = has_useful_place;
+        // Pre-compute the centroid once if we'll need it for either
+        // place or POI emission.
+        double cent_lat = 0.0, cent_lng = 0.0;
+        bool centroid_valid = false;
+        auto compute_centroid = [&]() {
+            if (centroid_valid) return;
+            double sum_lat = 0.0, sum_lng = 0.0;
+            int valid = 0;
+            for (const auto& outer_ring : area.outer_rings()) {
+                for (const auto& nr : outer_ring) {
+                    if (nr.location().valid()) {
+                        sum_lat += nr.location().lat();
+                        sum_lng += nr.location().lon();
+                        valid++;
+                    }
+                }
+            }
+            if (valid > 0) {
+                cent_lat = sum_lat / valid;
+                cent_lng = sum_lng / valid;
+                centroid_valid = true;
+            }
+        };
+
+        // Area-as-POI: any of the POI keys present (subject to the
+        // same name-required + railway-track-excluded gates as for
+        // node POIs).
+        const char* area_name = area.tags()["name"];
+        bool maybe_poi = area_name && *area_name;
+        if (maybe_poi) {
+            compute_centroid();
+            if (centroid_valid) {
+                try_emit_poi(cent_lat, cent_lng, area.tags());
+            }
+        }
+
+        if (!is_admin && !is_postal && !has_useful_place) return;
+
+        // Place-point emission for areas with a place=* tag. Done
+        // FIRST so we always emit even if downstream admin-polygon
+        // checks bail (e.g., admin_level out of range).
+        if (has_useful_place) {
+            const char* pname = area.tags()["name"];
+            if (pname && *pname) {
+                if (needs_centroid) compute_centroid();
+                if (centroid_valid) {
+                    uint8_t prank = place_rank(place_tag);
+                    uint32_t place_id = add_place_point(
+                        cent_lat, cent_lng, prank, pname);
+                    if (place_id != UINT32_MAX) {
+                        collect_i18n_names(area.tags(), ENTITY_PLACE, place_id);
+                    }
+                }
+            }
+        }
+
+        // Admin / postal polygon emission only fires if the area
+        // has the appropriate boundary tag.
         if (!is_admin && !is_postal) return;
 
         uint8_t admin_level = 0;
@@ -765,7 +1463,7 @@ public:
                 uint32_t poly_id = add_admin_polygon(
                     vertices, name_str.c_str(), admin_level, country_code);
                 if (poly_id != UINT32_MAX) {
-                    collect_i18n_names(area.tags(), /*type=*/0, poly_id);
+                    collect_i18n_names(area.tags(), ENTITY_ADMIN, poly_id);
                 }
             }
             for (const auto& inner_ring : area.inner_rings(outer_ring)) {
@@ -793,7 +1491,7 @@ private:
     uint64_t admin_count_ = 0;
     uint64_t inner_ring_count_ = 0;
 
-    void process_building_address(const osmium::Way& way, const char* housenumber, const char* street) {
+    void process_building_address(const osmium::Way& way) {
         const auto& wnodes = way.nodes();
         if (wnodes.empty()) return;
 
@@ -807,8 +1505,20 @@ private:
         }
         if (valid == 0) return;
 
-        add_addr_point(sum_lat / valid, sum_lng / valid, housenumber, street);
-        building_addr_count_++;
+        // See node() for the rationale on copying into a std::string
+        // before passing the pointer — strings.intern() inside
+        // add_addr_point_full can invalidate a raw pointer into
+        // strings.data().
+        std::string assoc_buf;
+        const char* assoc = nullptr;
+        auto it = way_to_assoc_street.find(static_cast<int64_t>(way.id()));
+        if (it != way_to_assoc_street.end()) {
+            assoc_buf = strings.data().data() + it->second;
+            assoc = assoc_buf.c_str();
+        }
+        if (process_address_tags(sum_lat / valid, sum_lng / valid, way.tags(), assoc)) {
+            building_addr_count_++;
+        }
     }
 
     void process_interpolation_way(const osmium::Way& way, const char* interpolation) {
@@ -1240,29 +1950,52 @@ static void write_index(const std::string& output_dir) {
         f.write(reinterpret_cast<const char*>(place_points.data()), place_points.size() * sizeof(PlacePoint));
     }
 
-    // Localized names — sorted by (entity_type, entity_id, lang_code) so
-    // the runtime does a single binary search per reverse query. Leave
-    // the file as zero bytes when no name:xx tags exist — the runtime
+    // POI files. The Rust runtime treats `poi_points.bin` as optional
+    // — older indexes built before commit 4 simply don't have it and
+    // /reverse degrades to the address-only response shape.
+    write_cell_index(iw, "poi_cells.bin", "poi_entries.bin", cell_to_pois);
+    std::cerr << "poi index: " << cell_to_pois.size() << " cells, " << poi_points.size() << " points" << std::endl;
+    {
+        std::ofstream f = open_tmp_out(iw, "poi_points.bin");
+        f.write(reinterpret_cast<const char*>(poi_points.data()),
+                poi_points.size() * sizeof(PoiPoint));
+    }
+
+    // Localized / alternate names — sorted by
+    // (entity_type, entity_id, alias_type, lang_code) so the runtime
+    // does a single binary search per reverse query and a single
+    // contiguous walk per forward-index alternates pull. Leave the
+    // file as zero bytes when no aliases were collected — the runtime
     // treats missing/empty as "no i18n available".
     {
         std::sort(i18n_names.begin(), i18n_names.end(), [](const I18nName& a, const I18nName& b) {
             if (a.entity_type != b.entity_type) return a.entity_type < b.entity_type;
             if (a.entity_id != b.entity_id) return a.entity_id < b.entity_id;
-            return a.lang_code < b.lang_code;
+            if (a.alias_type != b.alias_type) return a.alias_type < b.alias_type;
+            if (a.lang_code != b.lang_code) return a.lang_code < b.lang_code;
+            return a.name_id < b.name_id;
         });
-        // Collapse duplicate (type, id, lang) triples — OSM occasionally
-        // repeats tags (e.g. name:en on both an area and its relation);
-        // keep the first which is stable under our order.
+        // Collapse only fully-duplicate records (same type, id,
+        // alias_type, lang AND name_id). The name_id check is required
+        // because alt_name is multi-valued (split on ';') so a single
+        // entity legitimately emits N records all with
+        // alias_type=ALIAS_ALT, lang_code=0 but distinct values;
+        // dropping name_id from the key would silently keep only one
+        // variant. alias_type is part of the key so e.g. a
+        // `short_name:en` and a `name:en` for the same entity don't
+        // collapse.
         i18n_names.erase(std::unique(i18n_names.begin(), i18n_names.end(),
             [](const I18nName& a, const I18nName& b) {
                 return a.entity_type == b.entity_type
                     && a.entity_id == b.entity_id
-                    && a.lang_code == b.lang_code;
+                    && a.alias_type == b.alias_type
+                    && a.lang_code == b.lang_code
+                    && a.name_id == b.name_id;
             }), i18n_names.end());
         std::ofstream f = open_tmp_out(iw, "i18n_names.bin");
         f.write(reinterpret_cast<const char*>(i18n_names.data()),
                 i18n_names.size() * sizeof(I18nName));
-        std::cerr << "i18n names: " << i18n_names.size() << " (name:xx entries)" << std::endl;
+        std::cerr << "i18n names: " << i18n_names.size() << " (alias entries)" << std::endl;
     }
 
     {
@@ -1302,6 +2035,48 @@ static void write_index(const std::string& output_dir) {
     // Every .tmp has been written successfully; atomically swap them
     // into the live names. Destructor would remove them if this throws.
     iw.commit_all();
+
+    // manifest_reverse.json — written *after* commit_all so a partial
+    // build never publishes a manifest claiming success. Mirrors the
+    // Rust-side `manifest::write` helper. Operators read these files
+    // before / after a rebuild to verify the new binary actually
+    // changed the data instead of burning a multi-hour rebuild on a
+    // binary that has the same code as the previous one. The macros
+    // are defined in git_version.h, regenerated at every build.
+    {
+        const std::string manifest_path = output_dir + "/manifest_reverse.json";
+        std::ofstream f(manifest_path);
+        const auto unix_now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const std::string dirty_raw = GEOCODER_GIT_DIRTY;
+        const char* dirty_json = (dirty_raw == "true") ? "true" : "false";
+        const char* dirty_known = (dirty_raw == "unknown") ? "false" : "true";
+        f << "{\n"
+          << "  \"tool\": \"reverse\",\n"
+          << "  \"git_sha\": \"" << GEOCODER_GIT_SHA << "\",\n"
+          << "  \"git_dirty\": " << dirty_json << ",\n"
+          << "  \"git_dirty_known\": " << dirty_known << ",\n"
+          << "  \"built_at_unix\": " << unix_now << ",\n"
+          << "  \"counts\": {\n"
+          << "    \"place_points\": " << place_points.size() << ",\n"
+          << "    \"poi_points\": " << poi_points.size() << ",\n"
+          << "    \"street_ways\": " << ways.size() << ",\n"
+          << "    \"addr_points\": " << addr_points.size() << ",\n"
+          << "    \"interp_ways\": " << interp_ways.size() << ",\n"
+          << "    \"admin_polygons\": " << admin_polygons.size() << ",\n"
+          << "    \"i18n_names\": " << i18n_names.size() << ",\n"
+          << "    \"geo_cells\": " << sorted_geo_cells.size() << ",\n"
+          << "    \"admin_cells\": " << cell_to_admin.size() << ",\n"
+          << "    \"place_cells\": " << cell_to_places.size() << ",\n"
+          << "    \"poi_cells\": " << cell_to_pois.size() << "\n"
+          << "  }\n"
+          << "}\n";
+        if (!f) {
+            std::cerr << "warning: failed to write " << manifest_path << std::endl;
+        } else {
+            std::cerr << "wrote " << manifest_path << std::endl;
+        }
+    }
 }
 
 // --- Main ---
@@ -1364,18 +2139,48 @@ static int run_build(int argc, char* argv[]) {
     for (const auto& input_file : input_files) {
         std::cerr << "Processing " << input_file << "..." << std::endl;
 
-        // --- Pass 1: collect relation members for multipolygon assembly ---
+        // --- Pass 1: collect relation members for multipolygon assembly,
+        // and capture associatedStreet relation memberships in the same
+        // sweep (cheaper than a separate read).
         std::cerr << "  Pass 1: scanning relations..." << std::endl;
 
         osmium::area::Assembler::config_type assembler_config;
         osmium::area::MultipolygonManager<osmium::area::Assembler> mp_manager{assembler_config};
 
+        // Inline handler for associatedStreet relations. Records
+        // (member node/way id) → interned street name id in the
+        // shared `node_to_assoc_street` / `way_to_assoc_street` maps.
+        struct AssocStreetCollector : public osmium::handler::Handler {
+            uint64_t relations_seen = 0;
+            void relation(const osmium::Relation& rel) {
+                const char* type = rel.tags()["type"];
+                if (!type || std::strcmp(type, "associatedStreet") != 0) return;
+                const char* street_name = rel.tags()["name"];
+                if (!street_name || !*street_name) return;
+                uint32_t name_id = strings.intern(street_name);
+                relations_seen++;
+                for (const auto& member : rel.members()) {
+                    const char* role = member.role();
+                    if (!role || std::strcmp(role, "house") != 0) continue;
+                    if (member.type() == osmium::item_type::node) {
+                        node_to_assoc_street.emplace(static_cast<int64_t>(member.ref()), name_id);
+                    } else if (member.type() == osmium::item_type::way) {
+                        way_to_assoc_street.emplace(static_cast<int64_t>(member.ref()), name_id);
+                    }
+                }
+            }
+        } assoc_collector;
+
         {
             Stage _s{"pass1_relations"};
             osmium::io::Reader reader1{input_file, osmium::osm_entity_bits::relation};
-            osmium::apply(reader1, mp_manager);
+            osmium::apply(reader1, assoc_collector, mp_manager);
             reader1.close();
             mp_manager.prepare_for_lookup();
+            std::cerr << "  associatedStreet: " << assoc_collector.relations_seen
+                      << " relations, " << node_to_assoc_street.size()
+                      << " node members, " << way_to_assoc_street.size()
+                      << " way members" << std::endl;
         }
 
         // --- Pass 2: process all data ---
@@ -1431,6 +2236,7 @@ static int run_build(int argc, char* argv[]) {
                   << " limitation" << std::endl;
     }
     std::cerr << "  " << place_count_total << " place=* points" << std::endl;
+    std::cerr << "  " << poi_count_total << " POIs" << std::endl;
 
     std::cerr << "Resolving interpolation endpoints..." << std::endl;
     {
