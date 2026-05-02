@@ -1,4 +1,4 @@
-.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-worldwide bench-accuracy bench-fixtures pelias-refresh pelias-full-refresh bench inspect-dump wof-import test builder builder-clean clean
+.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-bias-disambiguation regression-worldwide bench-accuracy bench-fixtures pelias-refresh pelias-full-refresh bench inspect-dump wof-import test builder builder-clean clean
 
 help:
 	@echo "Build:"
@@ -18,6 +18,7 @@ help:
 	@echo "  regression-pelias-au  Run the Pelias AU corpus (partial failures expected today)"
 	@echo "  regression-roundtrip-au  Ground-truth coord round-trips (reverse + housenumber)"
 	@echo "  regression-nominatim-au  Hand-translated Nominatim BDD scenarios"
+	@echo "  regression-bias-disambiguation  Same-name disambiguation under proximity bias (~30 cases, planet index)"
 	@echo "  regression-worldwide  Run full Pelias suite (AU+NZ+GB+CA+US) against data/index-worldwide"
 	@echo "  pelias-refresh        Re-fetch pelias/acceptance-tests and regenerate the AU subset"
 	@echo "  pelias-full-refresh   Regenerate per-country Pelias corpora (au, nz, gb, us, ca)"
@@ -72,6 +73,14 @@ regression-roundtrip-au:
 
 regression-nominatim-au:
 	./scripts/run-regression.sh --corpus ./tests/regression/corpora/nominatim-bdd-au.json
+
+# Same-name disambiguation under proximity bias. ~30 ambiguous toponyms
+# (Cambridge, Aurora, Arlington, Springfield, Newcastle, Cornwall,
+# Frankfurt, ...) with the bias hint placed near the EXPECTED candidate.
+# coord_within_m verifies the ranker picked the right same-name member.
+# Requires a planet (or at least US+GB+CA+AU+DE+FR+ES) index.
+regression-bias-disambiguation:
+	./scripts/run-regression.sh --corpus ./tests/regression/corpora/bias-disambiguation.json
 
 # Full worldwide Pelias suite — assumes ./data/index-worldwide exists
 # (combined AU+NZ+GB+CA+US build) and the per-country pelias-*-full.json
