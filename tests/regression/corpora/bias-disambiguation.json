@@ -1,0 +1,816 @@
+{
+  "name": "bias-disambiguation",
+  "description": "Same-name place disambiguation under proximity bias. Each ambiguous toponym (Cambridge, Aurora, Arlington, Springfield, Portland, Salem, Newcastle, Cornwall, Frankfurt, ...) has 2-4 cases — one per major candidate. The bias hint is placed near the EXPECTED candidate; if the bias-aware ranker picks the wrong sibling, the coord_within_m check fails. Surfaces regressions in the boosted_score curve (piecewise distance penalty) and the importance bonus.\n\nTolerance is 10 km — loose enough to absorb place_point centroid vs admin polygon centroid drift, tight enough to catch wrong-candidate selection (ambiguous siblings are typically 100s of km apart).\n\nOriginal source: bench-accuracy failures (Arlington VA, Aurora US, Cornwall CA, Münster DE, Greensboro US, Vic ES, Figtree AU) plus standard same-name targets known from Pelias/Nominatim documentation.",
+  "cases": [
+    {
+      "id": "bias-disamb-cambridge-ma",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Cambridge",
+          "country_code": "us",
+          "bias_lat": "42.36",
+          "bias_lng": "-71.06"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 42.37,
+            "expected_lng": -71.11,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-cambridge-oh",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Cambridge",
+          "country_code": "us",
+          "bias_lat": "39.96",
+          "bias_lng": "-82.99"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 40.03,
+            "expected_lng": -81.59,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-cambridge-uk",
+      "tags": ["search", "bias", "disambiguation", "cross-country"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Cambridge",
+          "country_code": "gb",
+          "bias_lat": "51.51",
+          "bias_lng": "-0.13"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 52.21,
+            "expected_lng": 0.12,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-aurora-co",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Aurora",
+          "country_code": "us",
+          "bias_lat": "39.74",
+          "bias_lng": "-104.99"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 39.73,
+            "expected_lng": -104.83,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-aurora-il",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Aurora",
+          "country_code": "us",
+          "bias_lat": "41.88",
+          "bias_lng": "-87.63"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 41.76,
+            "expected_lng": -88.32,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-aurora-on",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Aurora",
+          "country_code": "ca",
+          "bias_lat": "43.65",
+          "bias_lng": "-79.38"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 44.00,
+            "expected_lng": -79.47,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-arlington-va",
+      "tags": ["search", "bias", "disambiguation", "regression"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Arlington",
+          "country_code": "us",
+          "bias_lat": "38.88",
+          "bias_lng": "-77.10"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 38.88,
+            "expected_lng": -77.10,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-arlington-tx",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Arlington",
+          "country_code": "us",
+          "bias_lat": "32.78",
+          "bias_lng": "-96.80"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 32.74,
+            "expected_lng": -97.11,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-arlington-ma",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Arlington",
+          "country_code": "us",
+          "bias_lat": "42.36",
+          "bias_lng": "-71.06"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 42.42,
+            "expected_lng": -71.16,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-springfield-ma",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Springfield",
+          "country_code": "us",
+          "bias_lat": "41.76",
+          "bias_lng": "-72.67"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 42.10,
+            "expected_lng": -72.59,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-springfield-il",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Springfield",
+          "country_code": "us",
+          "bias_lat": "40.48",
+          "bias_lng": "-88.99"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 39.78,
+            "expected_lng": -89.65,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-springfield-mo",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Springfield",
+          "country_code": "us",
+          "bias_lat": "37.08",
+          "bias_lng": "-94.51"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 37.21,
+            "expected_lng": -93.29,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-portland-or",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Portland",
+          "country_code": "us",
+          "bias_lat": "44.94",
+          "bias_lng": "-123.04"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 45.52,
+            "expected_lng": -122.68,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-portland-me",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Portland",
+          "country_code": "us",
+          "bias_lat": "42.36",
+          "bias_lng": "-71.06"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 43.66,
+            "expected_lng": -70.26,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-salem-or",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Salem",
+          "country_code": "us",
+          "bias_lat": "45.52",
+          "bias_lng": "-122.68"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 44.94,
+            "expected_lng": -123.04,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-salem-ma",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Salem",
+          "country_code": "us",
+          "bias_lat": "42.36",
+          "bias_lng": "-71.06"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 42.52,
+            "expected_lng": -70.90,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-montgomery-al",
+      "tags": ["search", "bias", "disambiguation", "regression"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Montgomery",
+          "country_code": "us",
+          "bias_lat": "33.52",
+          "bias_lng": "-86.81"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 32.37,
+            "expected_lng": -86.30,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-greensboro-nc",
+      "tags": ["search", "bias", "disambiguation", "regression"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Greensboro",
+          "country_code": "us",
+          "bias_lat": "35.78",
+          "bias_lng": "-78.64"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 36.07,
+            "expected_lng": -79.79,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-newcastle-tyne",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Newcastle",
+          "country_code": "gb",
+          "bias_lat": "54.91",
+          "bias_lng": "-1.38"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 54.98,
+            "expected_lng": -1.62,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-newcastle-lyme",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Newcastle",
+          "country_code": "gb",
+          "bias_lat": "53.01",
+          "bias_lng": "-2.18"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 53.00,
+            "expected_lng": -2.24,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-newcastle-nsw",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Newcastle",
+          "country_code": "au",
+          "bias_lat": "-33.87",
+          "bias_lng": "151.21"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": -32.93,
+            "expected_lng": 151.78,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-cornwall-on",
+      "tags": ["search", "bias", "disambiguation", "regression"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Cornwall",
+          "country_code": "ca",
+          "bias_lat": "45.42",
+          "bias_lng": "-75.70"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 45.02,
+            "expected_lng": -74.73,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-cornwall-pei",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Cornwall",
+          "country_code": "ca",
+          "bias_lat": "46.24",
+          "bias_lng": "-63.13"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 46.23,
+            "expected_lng": -63.21,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-london-on",
+      "tags": ["search", "bias", "disambiguation", "cross-country-confusable"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "London",
+          "country_code": "ca",
+          "bias_lat": "42.31",
+          "bias_lng": "-83.04"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 42.98,
+            "expected_lng": -81.25,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-frankfurt-main",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Frankfurt",
+          "country_code": "de",
+          "bias_lat": "49.99",
+          "bias_lng": "8.27"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 50.11,
+            "expected_lng": 8.68,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-frankfurt-oder",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Frankfurt",
+          "country_code": "de",
+          "bias_lat": "52.52",
+          "bias_lng": "13.40"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 52.35,
+            "expected_lng": 14.55,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-saint-quentin-aisne",
+      "tags": ["search", "bias", "disambiguation"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Saint-Quentin",
+          "country_code": "fr",
+          "bias_lat": "50.63",
+          "bias_lng": "3.06"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 49.85,
+            "expected_lng": 3.29,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-vic-catalonia",
+      "tags": ["search", "bias", "disambiguation", "regression"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Vic",
+          "country_code": "es",
+          "bias_lat": "41.39",
+          "bias_lng": "2.17"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 41.93,
+            "expected_lng": 2.25,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-saint-eustache-qc",
+      "tags": ["search", "bias", "disambiguation", "regression"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Saint-Eustache",
+          "country_code": "ca",
+          "bias_lat": "45.50",
+          "bias_lng": "-73.57"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 45.56,
+            "expected_lng": -73.91,
+            "max_m": 10000
+          }
+        ]
+      }
+    },
+    {
+      "id": "bias-disamb-munster-de",
+      "tags": ["search", "bias", "disambiguation", "regression"],
+      "request": {
+        "path": "/search",
+        "query": {
+          "q": "Münster",
+          "country_code": "de",
+          "bias_lat": "51.45",
+          "bias_lng": "7.01"
+        }
+      },
+      "expect": {
+        "status": 200,
+        "checks": [
+          { "kind": "json_path_min_count", "path": "results", "min": 1 },
+          {
+            "kind": "coord_within_m",
+            "lat_path": "results.0.lat",
+            "lng_path": "results.0.lon",
+            "expected_lat": 51.96,
+            "expected_lng": 7.63,
+            "max_m": 10000
+          }
+        ]
+      }
+    }
+  ]
+}
