@@ -55,17 +55,6 @@ places within 50 km of this coord" (find-my-nearest-X use cases).
   nearest-N-X-within-Y-km. A new endpoint (`/nearby?lat=&lng=&kind=`)
   is a cleaner home for it than overloading `/search`.
 
-### Border-precision reverse failures (~1 % at planet scale)
-
-Reverse queries within ~5 km of national borders can pick the
-neighbour country. Caused by admin polygon vertex density: OSM
-borders are simplified at varying detail by region.
-
-- **Why it's deferred:** structural. Densifying every country
-  boundary is large, ongoing data work.
-- **Re-evaluate when:** a customer specifically needs sub-km
-  border-side accuracy in a region where OSM is sparse.
-
 ### CJK word segmentation via `icu_segmenter`
 
 Compound CJK queries like `渋谷駅` (Shibuya Station), `東京タワー`
