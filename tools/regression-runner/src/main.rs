@@ -33,17 +33,7 @@ struct Corpus {
     #[allow(dead_code)]
     #[serde(default)]
     description: String,
-    #[serde(default)]
-    defaults: Defaults,
     cases: Vec<Case>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct Defaults {
-    /// Applied to `?key=` of every request when the case doesn't set
-    /// `auth: false`. Saves writing the token into every case.
-    #[serde(default)]
-    auth_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,14 +43,6 @@ struct Case {
     tags: Vec<String>,
     request: Request,
     expect: Expect,
-    /// When `false`, do not append the default auth_key — used for the
-    /// health endpoints and any future unauthenticated routes.
-    #[serde(default = "default_true")]
-    auth: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,7 +246,7 @@ fn main() -> ExitCode {
                 continue;
             }
         }
-        let (report, ok) = run_case(&agent, &args.base_url, &corpus.defaults, case);
+        let (report, ok) = run_case(&agent, &args.base_url, case);
         if ok {
             passed += 1;
             if !args.quiet {
@@ -326,7 +308,6 @@ fn main() -> ExitCode {
 fn run_case(
     agent: &ureq::Agent,
     base_url: &str,
-    defaults: &Defaults,
     case: &Case,
 ) -> (CaseReport, bool) {
     let t0 = Instant::now();
@@ -351,13 +332,6 @@ fn run_case(
 
     for (k, v) in &case.request.query {
         req = req.query(k, v);
-    }
-    if case.auth {
-        if let Some(key) = defaults.auth_key.as_ref() {
-            if !case.request.query.contains_key("key") {
-                req = req.query("key", key);
-            }
-        }
     }
 
     let (status, body_json) = match req.call() {

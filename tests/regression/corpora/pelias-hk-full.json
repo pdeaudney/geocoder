@@ -1,9 +1,6 @@
 {
   "name": "pelias-hk-full",
   "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "expect": {
@@ -23,7 +20,7 @@
         "path": "/search",
         "query": {
           "country_code": "hk",
-          "q": "灣仔, 香港"
+          "q": "\u7063\u4ed4, \u9999\u6e2f"
         }
       },
       "tags": [

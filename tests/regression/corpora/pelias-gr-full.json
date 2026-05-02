@@ -1,9 +1,6 @@
 {
   "name": "pelias-gr-full",
   "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "expect": {
@@ -23,7 +20,7 @@
         "path": "/search",
         "query": {
           "country_code": "gr",
-          "q": "Διονυσίου Αρεοπαγίτου, Αθήνα"
+          "q": "\u0394\u03b9\u03bf\u03bd\u03c5\u03c3\u03af\u03bf\u03c5 \u0391\u03c1\u03b5\u03bf\u03c0\u03b1\u03b3\u03af\u03c4\u03bf\u03c5, \u0391\u03b8\u03ae\u03bd\u03b1"
         }
       },
       "tags": [

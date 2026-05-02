@@ -1,9 +1,6 @@
 {
   "name": "pelias-ca-full",
   "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "expect": {
@@ -59,7 +56,7 @@
         "path": "/search",
         "query": {
           "country_code": "ca",
-          "q": "280 Bloor Street West টরোন্টো オンタリオ州 کانادا"
+          "q": "280 Bloor Street West \u099f\u09b0\u09cb\u09a8\u09cd\u099f\u09cb \u30aa\u30f3\u30bf\u30ea\u30aa\u5dde \u06a9\u0627\u0646\u0627\u062f\u0627"
         }
       },
       "tags": [

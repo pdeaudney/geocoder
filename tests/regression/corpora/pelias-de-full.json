@@ -1,9 +1,6 @@
 {
   "name": "pelias-de-full",
   "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "expect": {
@@ -230,7 +227,7 @@
         "path": "/search",
         "query": {
           "country_code": "de",
-          "q": "grolmanstraße 51, berlin"
+          "q": "grolmanstra\u00dfe 51, berlin"
         }
       },
       "tags": [
@@ -261,7 +258,7 @@
         "path": "/search",
         "query": {
           "country_code": "de",
-          "q": "grolmanstraße, berlin"
+          "q": "grolmanstra\u00dfe, berlin"
         }
       },
       "tags": [
@@ -354,7 +351,7 @@
         "path": "/search",
         "query": {
           "country_code": "de",
-          "q": "grolmanstraße 51, berlin, de"
+          "q": "grolmanstra\u00dfe 51, berlin, de"
         }
       },
       "tags": [
@@ -530,7 +527,7 @@
         "path": "/search",
         "query": {
           "country_code": "de",
-          "q": "grolmanstraße, berlin, germany"
+          "q": "grolmanstra\u00dfe, berlin, germany"
         }
       },
       "tags": [
@@ -581,13 +578,13 @@
         "status": 200
       },
       "id": "pelias-pelias-combined-wof_localities-10",
-      "notes": "chosen for diacriticals + Münster Rebellion... YOLO!",
+      "notes": "chosen for diacriticals + M\u00fcnster Rebellion... YOLO!",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
           "country_code": "de",
-          "q": "Münster, DE"
+          "q": "M\u00fcnster, DE"
         }
       },
       "tags": [

@@ -1,9 +1,6 @@
 {
   "name": "pelias-br-full",
   "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "expect": {
@@ -16,7 +13,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.city",
-            "value": "São Paulo"
+            "value": "S\u00e3o Paulo"
           }
         ],
         "status": 200
@@ -28,7 +25,7 @@
         "path": "/search",
         "query": {
           "country_code": "br",
-          "q": "Rua Henri Dunant 500 04709-110 São Paulo"
+          "q": "Rua Henri Dunant 500 04709-110 S\u00e3o Paulo"
         }
       },
       "tags": [
@@ -59,7 +56,7 @@
         "path": "/search",
         "query": {
           "country_code": "br",
-          "q": "Rua Gonçalves Maia 163 – Boa Vista 50070-060 Recife"
+          "q": "Rua Gon\u00e7alves Maia 163 \u2013 Boa Vista 50070-060 Recife"
         }
       },
       "tags": [

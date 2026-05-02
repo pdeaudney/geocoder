@@ -1,9 +1,6 @@
 {
   "name": "pelias-global-full",
   "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "expect": {
@@ -282,7 +279,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Friedrich Richter Straße 51"
+          "q": "Friedrich Richter Stra\u00dfe 51"
         }
       },
       "tags": [
@@ -566,7 +563,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.city",
-            "value": "リヨン"
+            "value": "\u30ea\u30e8\u30f3"
           }
         ],
         "status": 200
@@ -577,7 +574,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "37 Rue Des Remparts d’Ainay, Lyon"
+          "q": "37 Rue Des Remparts d\u2019Ainay, Lyon"
         }
       },
       "tags": [
@@ -596,7 +593,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.city",
-            "value": "蒙特利尔"
+            "value": "\u8499\u7279\u5229\u5c14"
           }
         ],
         "status": 200
@@ -607,7 +604,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "3632 Rue Notre-Dame Ouest モントリオール"
+          "q": "3632 Rue Notre-Dame Ouest \u30e2\u30f3\u30c8\u30ea\u30aa\u30fc\u30eb"
         }
       },
       "tags": [
@@ -632,7 +629,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Я́сная Поля́на, Russia"
+          "q": "\u042f\u0301\u0441\u043d\u0430\u044f \u041f\u043e\u043b\u044f\u0301\u043d\u0430, Russia"
         }
       },
       "tags": [
@@ -651,7 +648,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.city",
-            "value": "Città del Capo"
+            "value": "Citt\u00e0 del Capo"
           },
           {
             "kind": "json_path_contains_ci",
@@ -692,7 +689,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Österreic"
+          "q": "\u00d6sterreic"
         }
       },
       "tags": [
@@ -771,7 +768,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "Тексас"
+            "value": "\u0422\u0435\u043a\u0441\u0430\u0441"
           }
         ],
         "status": 200
@@ -801,7 +798,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "Огайо"
+            "value": "\u041e\u0433\u0430\u0439\u043e"
           }
         ],
         "status": 200
@@ -831,7 +828,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "تينيسي"
+            "value": "\u062a\u064a\u0646\u064a\u0633\u064a"
           }
         ],
         "status": 200
@@ -867,7 +864,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Αγία Πετρούπολη"
+          "q": "\u0391\u03b3\u03af\u03b1 \u03a0\u03b5\u03c4\u03c1\u03bf\u03cd\u03c0\u03bf\u03bb\u03b7"
         }
       },
       "tags": [
@@ -886,7 +883,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "Орегон"
+            "value": "\u041e\u0440\u0435\u0433\u043e\u043d"
           }
         ],
         "status": 200
@@ -916,7 +913,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "Мэн"
+            "value": "\u041c\u044d\u043d"
           }
         ],
         "status": 200
@@ -1622,7 +1619,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Hagåtña guam"
+          "q": "Hag\u00e5t\u00f1a guam"
         }
       },
       "tags": [
@@ -1927,7 +1924,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Domkloster 4 Köln"
+          "q": "Domkloster 4 K\u00f6ln"
         }
       },
       "tags": [
@@ -2586,7 +2583,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "吉薩省"
+            "value": "\u5409\u85a9\u7701"
           }
         ],
         "status": 200
@@ -2597,7 +2594,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "孟菲斯及其"
+          "q": "\u5b5f\u83f2\u65af\u53ca\u5176"
         }
       },
       "tags": [
@@ -2677,7 +2674,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Muzeu i Kosovës"
+          "q": "Muzeu i Kosov\u00ebs"
         }
       },
       "tags": [
@@ -2696,7 +2693,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.city",
-            "value": "Priština"
+            "value": "Pri\u0161tina"
           }
         ],
         "status": 200
@@ -2726,7 +2723,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.road",
-            "value": "марта"
+            "value": "\u043c\u0430\u0440\u0442\u0430"
           }
         ],
         "status": 200
@@ -2737,7 +2734,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "8 марта"
+          "q": "8 \u043c\u0430\u0440\u0442\u0430"
         }
       },
       "tags": [
@@ -3572,7 +3569,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Hämeenkatu 1, Tampere"
+          "q": "H\u00e4meenkatu 1, Tampere"
         }
       },
       "tags": [
@@ -4027,7 +4024,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Ackermannstraße"
+          "q": "Ackermannstra\u00dfe"
         }
       },
       "tags": [
@@ -4152,7 +4149,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Ackermann Straße"
+          "q": "Ackermann Stra\u00dfe"
         }
       },
       "tags": [
@@ -4177,7 +4174,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Ackermannstraße"
+          "q": "Ackermannstra\u00dfe"
         }
       },
       "tags": [
@@ -4302,7 +4299,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Ackermann Straße"
+          "q": "Ackermann Stra\u00dfe"
         }
       },
       "tags": [
@@ -4371,7 +4368,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "Ciudad de México"
+            "value": "Ciudad de M\u00e9xico"
           }
         ],
         "status": 200
@@ -4401,7 +4398,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "Pärnu"
+            "value": "P\u00e4rnu"
           }
         ],
         "status": 200
@@ -4412,7 +4409,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "pärnu, estonia"
+          "q": "p\u00e4rnu, estonia"
         }
       },
       "tags": [
@@ -4431,7 +4428,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.city",
-            "value": "Chambéry"
+            "value": "Chamb\u00e9ry"
           }
         ],
         "status": 200
@@ -4442,7 +4439,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Chambéry"
+          "q": "Chamb\u00e9ry"
         }
       },
       "tags": [
@@ -4717,7 +4714,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Av. Juárez, Guadalajara, México"
+          "q": "Av. Ju\u00e1rez, Guadalajara, M\u00e9xico"
         }
       },
       "tags": [
@@ -4942,7 +4939,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "1 Grolmanstraße, Berlin, Germany"
+          "q": "1 Grolmanstra\u00dfe, Berlin, Germany"
         }
       },
       "tags": [
@@ -5142,7 +5139,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Tórshavn faroe islands"
+          "q": "T\u00f3rshavn faroe islands"
         }
       },
       "tags": [
@@ -5342,7 +5339,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Bichlachweg 83, 6370 Kitzbühel, Austria"
+          "q": "Bichlachweg 83, 6370 Kitzb\u00fchel, Austria"
         }
       },
       "tags": [
@@ -5612,7 +5609,7 @@
         "status": 200
       },
       "id": "pelias-pelias-combined-placeholder_general-16",
-      "notes": "ß should be treated as 'ss'. poor deduplication",
+      "notes": "\u00df should be treated as 'ss'. poor deduplication",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -5642,7 +5639,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Schöneberg, DE"
+          "q": "Sch\u00f6neberg, DE"
         }
       },
       "tags": [
@@ -5667,7 +5664,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Łódź"
+          "q": "\u0141\u00f3d\u017a"
         }
       },
       "tags": [
@@ -6342,7 +6339,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Andalucía"
+          "q": "Andaluc\u00eda"
         }
       },
       "tags": [
@@ -6892,7 +6889,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "pärnu, estonia"
+          "q": "p\u00e4rnu, estonia"
         }
       },
       "tags": [
@@ -7382,7 +7379,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "7 Simon-Dach-Straße"
+          "q": "7 Simon-Dach-Stra\u00dfe"
         }
       },
       "tags": [
@@ -7407,7 +7404,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Simon-Dach-Straße 7"
+          "q": "Simon-Dach-Stra\u00dfe 7"
         }
       },
       "tags": [
@@ -7632,7 +7629,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Av. Juárez, Guadalajara, México"
+          "q": "Av. Ju\u00e1rez, Guadalajara, M\u00e9xico"
         }
       },
       "tags": [
@@ -7657,7 +7654,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Avenida Juárez, Guadalajara, México"
+          "q": "Avenida Ju\u00e1rez, Guadalajara, M\u00e9xico"
         }
       },
       "tags": [
@@ -7762,7 +7759,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "15А Камсамольская вуліца minsk belarus"
+          "q": "15\u0410 \u041a\u0430\u043c\u0441\u0430\u043c\u043e\u043b\u044c\u0441\u043a\u0430\u044f \u0432\u0443\u043b\u0456\u0446\u0430 minsk belarus"
         }
       },
       "tags": [
@@ -7792,7 +7789,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Камсамольская вуліца 15А minsk belarus"
+          "q": "\u041a\u0430\u043c\u0441\u0430\u043c\u043e\u043b\u044c\u0441\u043a\u0430\u044f \u0432\u0443\u043b\u0456\u0446\u0430 15\u0410 minsk belarus"
         }
       },
       "tags": [
@@ -7817,7 +7814,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Hagåtña guam"
+          "q": "Hag\u00e5t\u00f1a guam"
         }
       },
       "tags": [
@@ -8827,7 +8824,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Санкт-Петербургский Государственный Университет"
+          "q": "\u0421\u0430\u043d\u043a\u0442-\u041f\u0435\u0442\u0435\u0440\u0431\u0443\u0440\u0433\u0441\u043a\u0438\u0439 \u0413\u043e\u0441\u0443\u0434\u0430\u0440\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0439 \u0423\u043d\u0438\u0432\u0435\u0440\u0441\u0438\u0442\u0435\u0442"
         }
       },
       "tags": [
@@ -9167,7 +9164,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Città del Vaticano, Vatican"
+          "q": "Citt\u00e0 del Vaticano, Vatican"
         }
       },
       "tags": [
@@ -9252,7 +9249,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Nuevo Cristóbal, Panama"
+          "q": "Nuevo Crist\u00f3bal, Panama"
         }
       },
       "tags": [
@@ -9277,7 +9274,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Centar župa"
+          "q": "Centar \u017eupa"
         }
       },
       "tags": [
@@ -9337,7 +9334,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Xaçmaz, Azerbaijan"
+          "q": "Xa\u00e7maz, Azerbaijan"
         }
       },
       "tags": [
@@ -9356,7 +9353,7 @@
           {
             "kind": "json_path_contains_ci",
             "path": "results.0.address.state",
-            "value": "Kasaï-Occidental Province"
+            "value": "Kasa\u00ef-Occidental Province"
           }
         ],
         "status": 200
@@ -9367,7 +9364,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "q": "Kasaï-Oriental, Congo"
+          "q": "Kasa\u00ef-Oriental, Congo"
         }
       },
       "tags": [

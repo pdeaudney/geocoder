@@ -1,14 +1,10 @@
 {
   "name": "au-regression",
   "description": "Australia regression suite — hand-curated cases covering health, search, autocomplete, reverse, country filtering, and authoritative address resolution. Coords are sanity-bounded, not pixel-exact, because reverse of a place centroid vs a G-NAF point can legitimately differ by a few km within the same locality.",
-  "defaults": {
-    "auth_key": "REGRESSION_TEST_TOKEN"
-  },
   "cases": [
     {
       "id": "healthz-liveness",
       "tags": ["health", "liveness"],
-      "auth": false,
       "request": { "path": "/healthz" },
       "expect": {
         "status": 200,
@@ -20,7 +16,6 @@
     {
       "id": "healthz-indexes-reports-au",
       "tags": ["health", "indexes"],
-      "auth": false,
       "request": { "path": "/healthz/indexes" },
       "expect": {
         "status": 200,
@@ -31,20 +26,6 @@
           { "kind": "json_path_equals", "path": "indexes.autocomplete.countries.0", "value": "au" }
         ]
       }
-    },
-    {
-      "id": "search-no-key-rejects",
-      "tags": ["auth"],
-      "auth": false,
-      "request": { "path": "/search", "query": { "q": "Sydney" } },
-      "expect": { "status": 401 }
-    },
-    {
-      "id": "search-bad-key-rejects",
-      "tags": ["auth"],
-      "auth": false,
-      "request": { "path": "/search", "query": { "q": "Sydney", "key": "this-token-does-not-exist" } },
-      "expect": { "status": 401 }
     },
     {
       "id": "search-sydney-city",

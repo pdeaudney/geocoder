@@ -53,13 +53,7 @@ use std::process::ExitCode;
 struct OurCorpus {
     name: String,
     description: String,
-    defaults: OurDefaults,
     cases: Vec<Value>,
-}
-
-#[derive(Debug, Serialize)]
-struct OurDefaults {
-    auth_key: String,
 }
 
 struct Args {
@@ -67,7 +61,6 @@ struct Args {
     filter_country: Option<String>,
     endpoint: String,
     corpus_name: Option<String>,
-    auth_key: String,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -77,7 +70,6 @@ fn parse_args() -> Result<Args, String> {
         filter_country: None,
         endpoint: "search".to_string(),
         corpus_name: None,
-        auth_key: "REGRESSION_TEST_TOKEN".to_string(),
     };
     let mut i = 0;
     while i < raw.len() {
@@ -92,10 +84,6 @@ fn parse_args() -> Result<Args, String> {
             }
             "--name" => {
                 args.corpus_name = Some(raw.get(i + 1).ok_or("--name needs a value")?.clone());
-                i += 2;
-            }
-            "--auth-key" => {
-                args.auth_key = raw.get(i + 1).ok_or("--auth-key needs a value")?.clone();
                 i += 2;
             }
             "-h" | "--help" => {
@@ -121,7 +109,7 @@ fn parse_args() -> Result<Args, String> {
 
 fn print_help() {
     println!(
-        "pelias-to-ours <input.json> [--country au] [--endpoint search|autocomplete] [--name NAME] [--auth-key TOKEN]"
+        "pelias-to-ours <input.json> [--country au] [--endpoint search|autocomplete] [--name NAME]"
     );
 }
 
@@ -304,7 +292,6 @@ fn main() -> ExitCode {
     let out = OurCorpus {
         name,
         description,
-        defaults: OurDefaults { auth_key: args.auth_key.clone() },
         cases: our_cases,
     };
 
