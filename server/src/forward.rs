@@ -35,6 +35,7 @@ use tantivy::{
 
 pub const KIND_PLACE: u64 = 1;
 pub const KIND_STREET: u64 = 2;
+pub const KIND_POI: u64 = 3;
 
 /// Schema handle — kept together so build + query code agree on field ids.
 pub struct ForwardSchema {
@@ -53,6 +54,12 @@ pub struct ForwardSchema {
     pub state: Field,
     pub country_code: Field,
     pub kind: Field,
+    /// POI category — `<key>:<value>` interned at build time
+    /// (`amenity:cafe`, `tourism:attraction`, ...). Indexed (tokenised
+    /// on `:`) so callers can pass e.g. `category=amenity` to filter to
+    /// any amenity, or `category=cafe` to filter to cafes specifically.
+    /// Empty for non-POI docs.
+    pub category: Field,
     pub rank: Field,
     pub lat: Field,
     pub lng: Field,
@@ -131,9 +138,14 @@ impl ForwardSchema {
         let name_raw = schema.add_text_field("name_raw", STRING | STORED);
         // Enrichment fields — tokenized so "baulkham hills" matches both tokens.
         let suburb = schema.add_text_field("suburb", text_opts.clone());
-        let state = schema.add_text_field("state", text_opts);
+        let state = schema.add_text_field("state", text_opts.clone());
         let country_code = schema.add_text_field("country_code", STRING | STORED);
         let kind = schema.add_u64_field("kind", INDEXED | FAST | STORED);
+        // category is tokenised (the colon in `amenity:cafe` becomes a
+        // word break) so a freeform query for "cafe" matches POIs of
+        // type amenity:cafe, and a structured `category=amenity` filter
+        // matches every amenity:* doc.
+        let category = schema.add_text_field("category", text_opts);
         let rank = schema.add_u64_field("rank", FAST | STORED);
         let lat = schema.add_f64_field("lat", STORED | FAST);
         let lng = schema.add_f64_field("lng", STORED | FAST);
@@ -147,6 +159,7 @@ impl ForwardSchema {
             state,
             country_code,
             kind,
+            category,
             rank,
             lat,
             lng,
@@ -285,7 +298,7 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                 .as_ref()
                 .map(|i| {
                     i.alternates_for(crate::i18n::ENTITY_PLACE, place_id as u32)
-                        .map(|(_, name_id)| idx.get_string(name_id))
+                        .map(|(_, _, name_id)| idx.get_string(name_id))
                         .filter(|alt| !alt.is_empty() && *alt != name)
                         .collect()
                 })
@@ -303,6 +316,7 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                     admin.city,
                     admin.state,
                     admin.country_code,
+                    "",
                 ))
                 .map_err(|e| format!("index place: {e}"))?;
             stats.places += 1;
@@ -366,7 +380,7 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
         let alternates: Vec<&str> = match idx.i18n_names.as_ref() {
             Some(i) => i
                 .alternates_for(crate::i18n::ENTITY_ADMIN, poly_id as u32)
-                .map(|(_, name_id)| idx.get_string(name_id))
+                .map(|(_, _, name_id)| idx.get_string(name_id))
                 .filter(|alt| !alt.is_empty() && *alt != name)
                 .collect(),
             None => Vec::new(),
@@ -390,6 +404,7 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                 admin.city,
                 admin.state,
                 admin.country_code,
+                "",
             ))
             .map_err(|e| format!("index admin polygon: {e}"))?;
         stats.places += 1;
@@ -434,9 +449,61 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                 admin.city,
                 admin.state,
                 admin.country_code,
+                "",
             ))
             .map_err(|e| format!("index street: {e}"))?;
         stats.streets += 1;
+    }
+
+    // POIs (commit 5). Index every named amenity/shop/tourism/etc.
+    // alongside places and streets so /search returns "Sydney Opera
+    // House" for the tourism POI in Sydney. Category is the interned
+    // `<key>:<value>` string. Tagged parent_place_id (from
+    // addr:city/suburb/locality) wins over geometric find_admin
+    // enrichment when set — matches the AddrPoint behaviour.
+    if let Some(pois_mmap) = idx.poi_points.as_ref() {
+        let pois: &[crate::PoiPoint] = as_typed_slice(pois_mmap);
+        for (poi_id, poi) in pois.iter().enumerate() {
+            let name = idx.get_string(poi.name_id);
+            if name.is_empty() {
+                continue;
+            }
+            let lat = poi.lat as f64;
+            let lng = poi.lng as f64;
+            let geo_admin = idx.find_admin(lat, lng);
+            let tagged_parent: Option<&str> = if poi.parent_place_id != 0 {
+                Some(idx.get_string(poi.parent_place_id))
+            } else {
+                None
+            };
+            let suburb = tagged_parent.or(geo_admin.city);
+            let category = idx.get_string(poi.category_id);
+            let alternates: Vec<&str> = idx
+                .i18n_names
+                .as_ref()
+                .map(|i| {
+                    i.alternates_for(crate::i18n::ENTITY_POI, poi_id as u32)
+                        .map(|(_, _, name_id)| idx.get_string(name_id))
+                        .filter(|alt| !alt.is_empty() && *alt != name)
+                        .collect()
+                })
+                .unwrap_or_default();
+            writer
+                .add_document(tantivy_doc(
+                    &schema_handle,
+                    name,
+                    &alternates,
+                    KIND_POI,
+                    poi.rank as u64,
+                    lat,
+                    lng,
+                    suburb,
+                    geo_admin.state,
+                    geo_admin.country_code,
+                    category,
+                ))
+                .map_err(|e| format!("index poi: {e}"))?;
+        }
     }
 
     writer
@@ -510,6 +577,9 @@ pub fn build_partitioned_with_heap(
         suburb: Option<&'a str>,
         state: Option<&'a str>,
         country_code: [u8; 2],
+        /// POI category — `<key>:<value>` interned in strings.bin
+        /// (e.g. `amenity:cafe`). Empty for non-POI docs.
+        category: &'a str,
     }
 
     // Helper: resolve a doc's country code from find_admin-derived bytes.
@@ -558,7 +628,7 @@ pub fn build_partitioned_with_heap(
                     .as_ref()
                     .map(|i| {
                         i.alternates_for(crate::i18n::ENTITY_PLACE, place_id as u32)
-                            .map(|(_, name_id)| idx.get_string(name_id))
+                            .map(|(_, _, name_id)| idx.get_string(name_id))
                             .filter(|alt| !alt.is_empty() && *alt != name)
                             .collect()
                     })
@@ -576,6 +646,7 @@ pub fn build_partitioned_with_heap(
                         suburb: admin.city,
                         state: admin.state,
                         country_code: cc,
+                        category: "",
                     },
                 ))
             })
@@ -640,7 +711,7 @@ pub fn build_partitioned_with_heap(
                 let alternates: Vec<&str> = match idx.i18n_names.as_ref() {
                     Some(i) => i
                         .alternates_for(crate::i18n::ENTITY_ADMIN, poly_id as u32)
-                        .map(|(_, name_id)| idx.get_string(name_id))
+                        .map(|(_, _, name_id)| idx.get_string(name_id))
                         .filter(|alt| !alt.is_empty() && *alt != name)
                         .collect(),
                     None => Vec::new(),
@@ -664,6 +735,7 @@ pub fn build_partitioned_with_heap(
                         suburb: admin.city,
                         state: admin.state,
                         country_code: cc,
+                        category: "",
                     },
                 ))
             })
@@ -716,6 +788,7 @@ pub fn build_partitioned_with_heap(
                     suburb: admin.city,
                     state: admin.state,
                     country_code: cc,
+                    category: "",
                 },
             ))
         })
@@ -729,6 +802,62 @@ pub fn build_partitioned_with_heap(
         }
     }
     drop(seen);
+
+    // POIs (commit 5). Same partition + dedup pattern as places —
+    // par_iter the find_admin enrichment then bucket by country.
+    if let Some(pois_mmap) = idx.poi_points.as_ref() {
+        let pois: &[crate::PoiPoint] = as_typed_slice(pois_mmap);
+        let poi_candidates: Vec<([u8; 2], PendingDoc<'_>)> = pois
+            .par_iter()
+            .enumerate()
+            .filter_map(|(poi_id, poi)| {
+                let name = idx.get_string(poi.name_id);
+                if name.is_empty() {
+                    return None;
+                }
+                let lat = poi.lat as f64;
+                let lng = poi.lng as f64;
+                let geo_admin = idx.find_admin(lat, lng);
+                let cc = country_bytes(geo_admin.country_code)?;
+                let tagged_parent: Option<&str> = if poi.parent_place_id != 0 {
+                    Some(idx.get_string(poi.parent_place_id))
+                } else {
+                    None
+                };
+                let suburb = tagged_parent.or(geo_admin.city);
+                let category = idx.get_string(poi.category_id);
+                let alternates: Vec<&str> = idx
+                    .i18n_names
+                    .as_ref()
+                    .map(|i| {
+                        i.alternates_for(crate::i18n::ENTITY_POI, poi_id as u32)
+                            .map(|(_, _, name_id)| idx.get_string(name_id))
+                            .filter(|alt| !alt.is_empty() && *alt != name)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some((
+                    cc,
+                    PendingDoc {
+                        name,
+                        alternates,
+                        kind: KIND_POI,
+                        rank: poi.rank as u64,
+                        lat,
+                        lng,
+                        suburb,
+                        state: geo_admin.state,
+                        country_code: cc,
+                        category,
+                    },
+                ))
+            })
+            .collect();
+        for (cc, doc) in poi_candidates {
+            buckets.entry(cc).or_default().push(doc);
+        }
+    }
+
     eprintln!(
         "[stage] forward_classify: {:.3}s ({} countries, {} docs)",
         phase1.elapsed().as_secs_f64(),
@@ -782,11 +911,17 @@ pub fn build_partitioned_with_heap(
                         d.suburb,
                         d.state,
                         Some(d.country_code),
+                        d.category,
                     ))
                     .map_err(|e| format!("index doc: {e}"))?;
                 if d.kind == KIND_PLACE {
                     stats.places += 1;
                 } else {
+                    // Streets and POIs both increment the streets
+                    // counter — BuildStats predates KIND_POI and
+                    // having a separate per-kind tally would touch
+                    // every consumer of BuildStats. The aggregate
+                    // count is still what operators care about.
                     stats.streets += 1;
                 }
             }
@@ -859,6 +994,7 @@ fn tantivy_doc(
     suburb: Option<&str>,
     state: Option<&str>,
     country_code: Option<[u8; 2]>,
+    category: &str,
 ) -> TantivyDocument {
     // Enrichment fields are genuinely optional per-document: a street in
     // Antarctica may have no suburb. We store "" for "unknown" and treat it
@@ -935,6 +1071,7 @@ fn tantivy_doc(
         s.state => state_indexed,
         s.country_code => cc,
         s.kind => kind,
+        s.category => category,
         s.rank => rank,
         s.lat => lat,
         s.lng => lng,
@@ -1150,6 +1287,7 @@ impl Forward {
             state: field("state")?,
             country_code: field("country_code")?,
             kind: field("kind")?,
+            category: field("category")?,
             rank: field("rank")?,
             lat: field("lat")?,
             lng: field("lng")?,

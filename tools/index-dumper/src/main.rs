@@ -234,23 +234,36 @@ fn dump_admin_polygons(idx: &Index, path: &Path) -> Result<usize, String> {
 
 fn dump_addr_points(idx: &Index, path: &Path) -> Result<usize, String> {
     let addrs: &[AddrPoint] = as_typed_slice(&idx.addr_points);
-    let ways: &[WayHeader] = as_typed_slice(&idx.street_ways);
 
     let mut f = new_csv(path)?;
-    writeln!(f, "id,housenumber,street_id,street_name,lat,lng").map_err(io_err)?;
+    // street_or_place_id is the interned name string (street name, or
+    // place name when flags & FLAG_ADDR_PLACE) — it is NOT a way index.
+    writeln!(
+        f,
+        "id,housenumber,street_or_place,is_addr_place,is_housename,unit,floor,parent_place,lat,lng"
+    )
+    .map_err(io_err)?;
 
     for (id, a) in addrs.iter().enumerate() {
         let hn = idx.get_string(a.housenumber_id);
-        let street_name = ways
-            .get(a.street_id as usize)
-            .map(|w| idx.get_string(w.name_id))
-            .unwrap_or("");
+        let primary = idx.get_string(a.street_or_place_id);
+        let unit = if a.unit_id != 0 { idx.get_string(a.unit_id) } else { "" };
+        let floor = if a.floor_id != 0 { idx.get_string(a.floor_id) } else { "" };
+        let parent = if a.parent_place_id != 0 {
+            idx.get_string(a.parent_place_id)
+        } else {
+            ""
+        };
+        let is_place = a.flags & query_server::FLAG_ADDR_PLACE != 0;
+        let is_housename = a.flags & query_server::FLAG_IS_HOUSENAME != 0;
         writeln!(
             f,
-            "{id},{hn},{street_id},{street_name},{lat:.6},{lng:.6}",
+            "{id},{hn},{primary},{is_place},{is_housename},{unit},{floor},{parent},{lat:.6},{lng:.6}",
             hn = csv_escape(hn),
-            street_id = a.street_id,
-            street_name = csv_escape(street_name),
+            primary = csv_escape(primary),
+            unit = csv_escape(unit),
+            floor = csv_escape(floor),
+            parent = csv_escape(parent),
             lat = a.lat,
             lng = a.lng,
         )

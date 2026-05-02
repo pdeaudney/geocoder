@@ -58,7 +58,7 @@ arithmetic operation over pre-sorted arrays indexed by S2 cell.
 
 | File | Record | Bytes / record | Purpose |
 |---|---|---:|---|
-| `addr_points.bin` | `AddrPoint{f32 lat, f32 lng, u32 housenumber_id, u32 street_id}` | 16 | OSM addr:housenumber points |
+| `addr_points.bin` | `AddrPoint{lat, lng, housenumber_id, street_or_place_id, unit_id, floor_id, parent_place_id, flags}` | 32 | OSM addr:housenumber points (incl. addr:place addresses, addr:unit, addr:floor, tagged parent locality) |
 | `addr_entries.bin` | `u16 count, u32 ids...` | variable | Per-cell list of addr_point IDs |
 | `street_ways.bin` | `WayHeader{u32 node_offset, u8 node_count, u32 name_id}` | 12 | OSM highways with names |
 | `street_nodes.bin` | `NodeCoord{f32 lat, f32 lng}` | 8 | Street polyline nodes |
@@ -67,10 +67,14 @@ arithmetic operation over pre-sorted arrays indexed by S2 cell.
 | `admin_polygons.bin` | `AdminPolygon{vertex_offset, vertex_count, name_id, admin_level, area, country_code}` | 24 | `boundary=administrative`/`postal_code` polygons |
 | `admin_vertices.bin` | `NodeCoord` | 8 | Polygon vertex pool (Douglas-Peucker simplified, max 500 verts) |
 | `admin_cells.bin`, `admin_entries.bin` | S2 index | variable | Admin polygon cell lookup with INTERIOR_FLAG short-circuit |
-| `place_points.bin` | `PlacePoint{lat, lng, name_id, rank}` | 16 | `place=city/town/village/suburb/hamlet` points |
+| `place_points.bin` | `PlacePoint{lat, lng, name_id, rank}` | 16 | `place=city/town/village/suburb/hamlet/neighbourhood/quarter/locality/island/islet/isolated_dwelling/farm` points |
 | `place_cells.bin`, `place_entries.bin` | S2 index | variable | Place point cell lookup |
+| `poi_points.bin` | `PoiPoint{lat, lng, name_id, category_id, rank, parent_place_id}` | 24 | Named amenity/shop/tourism/aeroway/historic/leisure/office/healthcare/military/man_made/railway-non-track/natural-subset/waterway-subset POIs |
+| `poi_cells.bin`, `poi_entries.bin` | S2 index | variable | POI cell lookup |
 | `interp_ways.bin`, `interp_nodes.bin`, `interp_entries.bin` | Interpolation | variable | `addr:interpolation` ways |
 | `strings.bin` | NUL-terminated UTF-8 | variable | Deduplicated string pool for every `*_id` above |
+
+**`AddrPoint.flags`**: bit 0 = `FLAG_ADDR_PLACE` (street_or_place_id holds a place name from `addr:place`, not a street); bit 1 = `FLAG_IS_HOUSENAME` (housenumber_id holds a free-form `addr:full`/`addr:housename` string, not a numeric housenumber).
 
 ### Files produced by Rust builders
 
@@ -81,7 +85,7 @@ arithmetic operation over pre-sorted arrays indexed by S2 cell.
 | `gnaf_points.bin`, `gnaf_cells.bin`, `gnaf_entries.bin`, `gnaf_strings.bin` | `build-gnaf-index` | G-NAF-derived AU address points (16.4M records) |
 | `oa_<cc>_*.bin` | `build-openaddresses-index` | Per-country OpenAddresses address points |
 | `postcode_lookup.bin`, `postcode_lookup_strings.bin` | `build-postcode-lookup` | Suburb-modal postcode lookup (AU G-NAF) |
-| `i18n_names.bin` | emitted by `build-index` from `name:<lang>` OSM tags | Localised admin names keyed on (entity_type, entity_id, lang_code); used when `/reverse?lang=...` is set |
+| `i18n_names.bin` | emitted by `build-index` from alias-family OSM tags (`name:<lang>`, `official_name`, `alt_name`, `short_name`, `old_name`, `loc_name`, `int_name`, `reg_name`, `ref`, `int_ref`, `nat_ref`, plus per-language variants) | Localised / alternate names keyed on `(entity_type, entity_id, alias_type, lang_code)`; used by `/reverse?lang=...` and forward-index alternates expansion |
 | `wof_countries.bin`, `wof_countries_vertices.bin`, `wof_countries_strings.bin` | `wof-importer` (tools/) | Who's on First country polygons. Fallback for `find_admin` when an extract lacks the OSM `admin_level=2` relation (common on per-country Geofabrik extracts). |
 
 **Not on disk**: H3 cell IDs are computed at query time from the response
