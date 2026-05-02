@@ -14,7 +14,7 @@
 //!
 //! Outputs (all CSV, with header rows):
 //!   streets.csv           id, osm_way_id, name, node_count, midpoint_lat, midpoint_lng
-//!   place_points.csv      id, name, kind_rank, lat, lng
+//!   place_points.csv      id, name, rank, importance, lat, lng
 //!   admin_polygons.csv    id, name, admin_level, country_code, vertex_count, area_sq_deg
 //!   addr_points.csv       id, housenumber, street_id, street_name, lat, lng
 //!   interp_ways.csv       id, street_id, street_name, start_number, end_number, interpolation, node_count
@@ -170,7 +170,7 @@ fn dump_streets(idx: &Index, path: &Path) -> Result<usize, String> {
 
 fn dump_place_points(idx: &Index, path: &Path) -> Result<usize, String> {
     let mut f = new_csv(path)?;
-    writeln!(f, "id,name,rank,lat,lng").map_err(io_err)?;
+    writeln!(f, "id,name,rank,importance,lat,lng").map_err(io_err)?;
 
     let Some(pp) = idx.place_points.as_ref() else {
         f.flush().map_err(io_err)?;
@@ -182,9 +182,10 @@ fn dump_place_points(idx: &Index, path: &Path) -> Result<usize, String> {
         let name = idx.get_string(p.name_id);
         writeln!(
             f,
-            "{id},{name},{rank},{lat:.6},{lng:.6}",
+            "{id},{name},{rank},{importance},{lat:.6},{lng:.6}",
             name = csv_escape(name),
             rank = p.rank,
+            importance = p.importance,
             lat = p.lat,
             lng = p.lng,
         )
