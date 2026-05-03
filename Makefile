@@ -1,4 +1,4 @@
-.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-bias-disambiguation regression-worldwide bench-accuracy bench-fixtures pelias-refresh pelias-full-refresh bench inspect-dump wof-import test builder builder-clean clean
+.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-bias-disambiguation regression-worldwide bench-accuracy bench-fixtures pelias-refresh pelias-full-refresh bench inspect-dump wof-import prerebuild-rehearsal test builder builder-clean clean
 
 help:
 	@echo "Build:"
@@ -20,6 +20,7 @@ help:
 	@echo "  regression-nominatim-au  Hand-translated Nominatim BDD scenarios"
 	@echo "  regression-bias-disambiguation  Same-name disambiguation under proximity bias (~30 cases, planet index)"
 	@echo "  regression-worldwide  Run full Pelias suite (AU+NZ+GB+CA+US) against data/index-worldwide"
+	@echo "  prerebuild-rehearsal  Build C++ + forward index against PBF=path/to/small.pbf and spot-check the new fields (5-15 min)"
 	@echo "  pelias-refresh        Re-fetch pelias/acceptance-tests and regenerate the AU subset"
 	@echo "  pelias-full-refresh   Regenerate per-country Pelias corpora (au, nz, gb, us, ca)"
 	@echo ""
@@ -81,6 +82,19 @@ regression-nominatim-au:
 # Requires a planet (or at least US+GB+CA+AU+DE+FR+ES) index.
 regression-bias-disambiguation:
 	./scripts/run-regression.sh --corpus ./tests/regression/corpora/bias-disambiguation.json
+
+# Pre-rebuild rehearsal — build the C++ + forward index against a
+# small PBF in a scratch directory, then spot-check the new fields
+# (importance, exonyms). Catches format/wiring bugs that survive
+# unit tests but would only surface after the 13h planet rebuild.
+# Set PBF=path/to/small.pbf — recommended a single small region
+# (NSW, Catalonia, NRW) so the rehearsal runs in 5-15 minutes.
+prerebuild-rehearsal:
+	@if [ -z "$(PBF)" ]; then \
+		echo "Usage: make prerebuild-rehearsal PBF=path/to/small.pbf" >&2; \
+		exit 3; \
+	fi
+	./scripts/prerebuild-rehearsal.sh $(PBF)
 
 # Full worldwide Pelias suite — assumes ./data/index-worldwide exists
 # (combined AU+NZ+GB+CA+US build) and the per-country pelias-*-full.json
