@@ -119,6 +119,13 @@ pub struct AdminPolygon {
     pub vertex_count: u16,
     pub name_id: u32,
     pub admin_level: u8,
+    /// Prominence score (0..255) derived at index time from the same
+    /// `population` / `wikidata` / `wikipedia` signals as
+    /// `PlacePoint.importance`. Used by the forward-search ranker to
+    /// disambiguate same-name admins (e.g. Arlington County VA over
+    /// Arlington VT). Sits in one byte of the existing padding slot
+    /// after `admin_level`; the on-disk struct stays 24 bytes.
+    pub importance: u8,
     pub area: f32,
     pub country_code: u16,
 }
