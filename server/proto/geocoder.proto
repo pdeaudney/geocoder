@@ -9,6 +9,10 @@ package geocoder.v1;
 service Geocoder {
   rpc Reverse(ReverseRequest) returns (AddressResponse);
   rpc Search(SearchRequest) returns (SearchResponse);
+  // Hard-radius "what's near me". Distinct from Search: lat/lng/
+  // radius_km are required, results are sorted by distance ascending,
+  // and anything outside the radius is dropped (not soft-penalised).
+  rpc Nearby(NearbyRequest) returns (NearbyResponse);
   rpc Validate(ValidateRequest) returns (ValidateResponse);
   rpc Autocomplete(AutocompleteRequest) returns (AutocompleteResponse);
   rpc IpGeocode(IpGeocodeRequest) returns (IpGeocodeResponse);
@@ -105,6 +109,52 @@ message SearchHit {
 
 message SearchResponse {
   repeated SearchHit results = 1;
+}
+
+// --- /nearby ---
+
+message NearbyRequest {
+  // Centre point. Required. lat ∈ [-90, 90], lng ∈ [-180, 180].
+  double lat = 1;
+  double lng = 2;
+  // Hard radius. Required. Must be > 0 and ≤ 100. Anything outside
+  // is dropped from the response.
+  double radius_km = 3;
+  // Optional freeform text filter. When set, only hits whose text
+  // matches (BM25 against name) AND fall inside the radius are
+  // returned. Empty/absent ⇒ all hits in the radius (filtered by
+  // kind / country_code).
+  string q = 4;
+  // Optional kind filter: "place", "street", or "poi".
+  string kind = 5;
+  // Optional country_code restriction (single ISO 3166-1 alpha-2,
+  // case-insensitive).
+  string country_code = 6;
+  // 1..=50, defaults to 10 if 0.
+  uint32 limit = 7;
+  // Optional H3 resolutions (0–15) stamped on every hit. Max 4.
+  repeated uint32 h3_res = 8;
+}
+
+message NearbyHit {
+  string name = 1;
+  uint32 kind = 2;
+  uint32 rank = 3;
+  double lat = 4;
+  double lon = 5;
+  // Distance from the request centre in metres. Pre-computed by the
+  // server so callers don't need to re-do haversine.
+  double distance_m = 6;
+  string display_name = 7;
+  AddressDetails address = 8;
+  // H3 cell IDs keyed by resolution; populated when the request
+  // supplied `h3_res`.
+  map<uint32, string> h3 = 9;
+}
+
+message NearbyResponse {
+  // Sorted by `distance_m` ascending.
+  repeated NearbyHit results = 1;
 }
 
 // --- /validate ---

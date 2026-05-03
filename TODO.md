@@ -41,20 +41,6 @@ weights matches by inverse rank, smoothing the binary "FST returns
   rank inversions (e.g. a `Cambridge Lane` outranking `Cambridge`
   city in BM25 alone).
 
-### Optional `bias_radius_km` hard filter
-
-The current bias is a soft re-rank — `Tokyo` from a London bias
-still finds Tokyo. Some callers want the opposite: "only return
-places within 50 km of this coord" (find-my-nearest-X use cases).
-
-- **Why it's deferred:** the `/search` shape is freeform-text-
-  first; a radius filter belongs on a separate "nearby search"
-  endpoint with a different semantic contract. Adding it as a
-  parameter to `/search` would muddle the contract.
-- **Re-evaluate when:** a customer specifically asks for
-  nearest-N-X-within-Y-km. A new endpoint (`/nearby?lat=&lng=&kind=`)
-  is a cleaner home for it than overloading `/search`.
-
 ### CJK word segmentation via `icu_segmenter`
 
 Compound CJK queries like `渋谷駅` (Shibuya Station), `東京タワー`

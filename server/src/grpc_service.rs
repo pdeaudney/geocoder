@@ -23,8 +23,9 @@ pub use proto::geocoder_server::{Geocoder, GeocoderServer};
 use proto::{
     Address as PbAddress, AddressDetails as PbAddressDetails, AddressResponse,
     AutocompleteHit as PbAutocompleteHit, AutocompleteRequest, AutocompleteResponse, H3Request,
-    H3Response, IpGeocodeRequest, IpGeocodeResponse, ReverseRequest, SearchHit as PbSearchHit,
-    SearchRequest, SearchResponse, ValidateRequest, ValidateResponse,
+    H3Response, IpGeocodeRequest, IpGeocodeResponse, NearbyHit as PbNearbyHit, NearbyRequest,
+    NearbyResponse, ReverseRequest, SearchHit as PbSearchHit, SearchRequest, SearchResponse,
+    ValidateRequest, ValidateResponse,
 };
 
 /// Shared handler state. Mirrors what the REST handlers have access to,
@@ -197,6 +198,107 @@ impl Geocoder for GeocoderService {
     ) -> Result<Response<SearchResponse>, Status> {
         Err(Status::unimplemented(
             "build with the `forward` feature to enable Search",
+        ))
+    }
+
+    #[cfg(feature = "forward")]
+    #[tracing::instrument(
+        name = "grpc.nearby",
+        skip_all,
+        fields(
+            geocoder.lat = tracing::field::Empty,
+            geocoder.lng = tracing::field::Empty,
+            geocoder.radius_km = tracing::field::Empty,
+            geocoder.match_count = tracing::field::Empty,
+        )
+    )]
+    async fn nearby(
+        &self,
+        req: Request<NearbyRequest>,
+    ) -> Result<Response<NearbyResponse>, Status> {
+        let r = req.into_inner();
+        check_text("q", &r.q, crate::limits::SEARCH_Q)?;
+        check_text("country_code", &r.country_code, crate::limits::COUNTRY_CODE_LIST)?;
+        let span = tracing::Span::current();
+        span.record("geocoder.lat", r.lat);
+        span.record("geocoder.lng", r.lng);
+        span.record("geocoder.radius_km", r.radius_km);
+
+        let h3_res = validate_h3_res(&r.h3_res)?;
+        let Some(fwd) = self.forward.as_ref() else {
+            return Err(Status::unimplemented("forward index not built"));
+        };
+
+        let kind_filter = match r.kind.as_str() {
+            "place" => Some(fwd::KIND_PLACE),
+            "street" => Some(fwd::KIND_STREET),
+            "poi" => Some(fwd::KIND_POI),
+            "" => None,
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "invalid kind {other:?}; expected 'place', 'street', or 'poi'"
+                )))
+            }
+        };
+
+        let limit = match r.limit {
+            0 => 10,
+            n => n.min(50) as usize,
+        };
+
+        let nearby_q = fwd::NearbyQuery {
+            lat: r.lat,
+            lng: r.lng,
+            radius_km: r.radius_km,
+            q: empty_to_none(&r.q),
+            country_code: empty_to_none(&r.country_code),
+            kind: kind_filter,
+            limit,
+        };
+        if let Err(field) = nearby_q.validate() {
+            let detail = match field {
+                "lat" => "lat: out of range (must be finite, in [-90, 90])",
+                "lng" => "lng: out of range (must be finite, in [-180, 180])",
+                "radius_km" => "radius_km: must be finite, > 0, ≤ 100",
+                other => other,
+            };
+            return Err(Status::invalid_argument(detail));
+        }
+
+        let hits = fwd
+            .search_nearby(nearby_q)
+            .map_err(|e| Status::internal(format!("nearby: {e}")))?;
+        span.record("geocoder.match_count", hits.len());
+
+        let snap = self.index.load();
+        let mut out = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let enriched = snap.query(hit.lat, hit.lng);
+            let details = into_pb_details(&enriched.address, None);
+            let h3 = build_h3_proto(hit.lat, hit.lng, &h3_res);
+            let distance_m = crate::geo::haversine_m(hit.lat, hit.lng, r.lat, r.lng);
+            out.push(PbNearbyHit {
+                name: hit.name,
+                kind: hit.kind as u32,
+                rank: hit.rank as u32,
+                lat: hit.lat,
+                lon: hit.lng,
+                distance_m,
+                display_name: enriched.display_name.unwrap_or_default(),
+                address: Some(details),
+                h3,
+            });
+        }
+        Ok(Response::new(NearbyResponse { results: out }))
+    }
+
+    #[cfg(not(feature = "forward"))]
+    async fn nearby(
+        &self,
+        _req: Request<NearbyRequest>,
+    ) -> Result<Response<NearbyResponse>, Status> {
+        Err(Status::unimplemented(
+            "build with the `forward` feature to enable Nearby",
         ))
     }
 

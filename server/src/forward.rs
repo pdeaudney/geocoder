@@ -24,7 +24,7 @@ use crate::{
 };
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, Value, FAST, INDEXED, STORED, STRING,
 };
@@ -1201,6 +1201,55 @@ impl BiasCoord {
     }
 }
 
+/// Hard-radius "what's near me" query. Distinct from `StructuredQuery`
+/// because the contract is fundamentally different:
+///   - `/search` is freeform-text-first; bias is a soft re-rank.
+///   - `/nearby` is geography-first; the radius is a hard filter and
+///     results are sorted by distance ascending. Text (`q`) and `kind`
+///     are optional MUST clauses on top of the geographic constraint.
+///
+/// MVP implementation post-filters Tantivy results by haversine — fine
+/// for q-driven cases ("coffee within 5 km") and tight radii. A pure
+/// "all POIs within 5 km" with no `q` is still O(N_country) at query
+/// time; if that becomes a hot path, swap to a cell-walk over
+/// `poi_cells.bin` / `place_points.bin` indexed by S2 neighbours.
+#[derive(Debug, Clone)]
+pub struct NearbyQuery<'a> {
+    pub lat: f64,
+    pub lng: f64,
+    pub radius_km: f64,
+    pub q: Option<&'a str>,
+    pub country_code: Option<&'a str>,
+    pub kind: Option<u64>,
+    pub limit: usize,
+}
+
+impl NearbyQuery<'_> {
+    /// Hard cap on radius. 100 km is the practical "neighbourhood /
+    /// city" range; anything larger is conceptually `/search` with
+    /// bias rather than `/nearby`. Cap exists to bound the post-filter
+    /// cost — at planet scale, "within 1000 km" would oversample
+    /// pathologically.
+    pub const MAX_RADIUS_KM: f64 = 100.0;
+
+    /// Validate. Returns the offending field name on failure.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.lat.is_finite() || !(-90.0..=90.0).contains(&self.lat) {
+            return Err("lat");
+        }
+        if !self.lng.is_finite() || !(-180.0..=180.0).contains(&self.lng) {
+            return Err("lng");
+        }
+        if !self.radius_km.is_finite() || self.radius_km <= 0.0 {
+            return Err("radius_km");
+        }
+        if self.radius_km > Self::MAX_RADIUS_KM {
+            return Err("radius_km");
+        }
+        Ok(())
+    }
+}
+
 impl Forward {
     /// Open whatever tantivy indexes are present at `dir`.
     ///
@@ -1808,6 +1857,116 @@ impl Forward {
             .or_else(|| self.per_country.values().next())
             .map(|f| &f.index)
     }
+
+    /// Hard-radius geographic search. Returns hits within `radius_km`
+    /// of (`lat`, `lng`), sorted by distance ascending. Optional `q`
+    /// and `kind` clauses narrow the geographic candidates.
+    ///
+    /// Implementation: builds a Tantivy BooleanQuery from any q+kind+
+    /// country_code clauses (or `AllQuery` when none), oversamples
+    /// from the index, then post-filters by haversine. Oversample is
+    /// generous (limit × 50, capped at 2000) because a tight radius
+    /// can rule out most BM25-top hits — without enough headroom we'd
+    /// return short.
+    #[tracing::instrument(
+        name = "forward.search_nearby",
+        skip_all,
+        fields(
+            geocoder.lat = q.lat,
+            geocoder.lng = q.lng,
+            geocoder.radius_km = q.radius_km,
+            geocoder.q = q.q.unwrap_or(""),
+            geocoder.country_code = q.country_code.unwrap_or(""),
+            geocoder.kind = q.kind.unwrap_or(0),
+            geocoder.limit = q.limit,
+            geocoder.match_count = tracing::field::Empty,
+        )
+    )]
+    pub fn search_nearby(&self, q: NearbyQuery<'_>) -> Result<Vec<Hit>, String> {
+        let Some((active, _)) = self.pick(q.country_code) else {
+            return Ok(Vec::new());
+        };
+        let s = &active.schema;
+        let searcher = active.reader.searcher();
+
+        let limit = q.limit.max(1).min(50);
+
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+        if let Some(q_text) = q.q.filter(|s| !s.trim().is_empty()) {
+            let parsed = parse_freeform_query(q_text);
+            for tok in &parsed.rest {
+                let term_q: Box<dyn Query> = Box::new(TermQuery::new(
+                    Term::from_field_text(s.name, tok),
+                    IndexRecordOption::WithFreqs,
+                ));
+                clauses.push((Occur::Should, term_q));
+            }
+            // SHOULD with min_should_match=1 isn't directly supported
+            // by BooleanQuery; coerce by wrapping in a sub-query that
+            // requires at least one match. Easiest: re-emit each token
+            // as MUST when we have any tokens at all. Empirical hit
+            // for nearby+text is "any match in the radius is fine"
+            // rather than "every token must match" — keep SHOULD,
+            // BooleanQuery with all-SHOULD requires ≥1 match by
+            // tantivy's default semantics.
+        }
+
+        if let Some(cc) = q.country_code.filter(|s| !s.trim().is_empty()) {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(s.country_code, &cc.to_ascii_uppercase()),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+
+        if let Some(k) = q.kind {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(s.kind, k),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+
+        let query: Box<dyn Query> = if clauses.is_empty() {
+            Box::new(AllQuery)
+        } else {
+            Box::new(BooleanQuery::new(clauses))
+        };
+
+        // Oversample: a 5 km radius around a busy city can need to
+        // walk 1000+ BM25-top docs before enough fall inside the
+        // radius. 50× the requested limit (cap 2000) is a balance —
+        // adds ~1 ms at planet scale, only paid on /nearby.
+        let oversample = (limit * 50).min(2_000);
+        let top = searcher
+            .search(&*query, &TopDocs::with_limit(oversample))
+            .map_err(|e| format!("nearby search: {e}"))?;
+
+        let radius_m = q.radius_km * 1_000.0;
+        let mut hits: Vec<(f64, Hit)> = Vec::with_capacity(top.len().min(limit * 2));
+        for (score, addr) in top {
+            let doc: TantivyDocument = searcher
+                .doc(addr)
+                .map_err(|e| format!("fetch doc: {e}"))?;
+            let hit = hit_from_doc(&doc, s, score)?;
+            let d = crate::geo::haversine_m(hit.lat, hit.lng, q.lat, q.lng);
+            if d <= radius_m {
+                hits.push((d, hit));
+            }
+        }
+
+        hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(limit);
+
+        let out: Vec<Hit> = hits.into_iter().map(|(_, h)| h).collect();
+        tracing::Span::current().record("geocoder.match_count", out.len());
+        Ok(out)
+    }
 }
 
 /// Log a structured manifest line for a tantivy directory we just opened.
@@ -1883,7 +2042,20 @@ fn boosted_score(hit: &Hit, bias: Option<&BiasCoord>) -> f32 {
             const BASELINE: f32 = 26.0;
             let delta = (BASELINE - hit.rank as f32) / 10.0;
             let boost = (1.0 + delta.max(0.0) * 0.4).clamp(1.0, 2.0);
-            hit.score * boost
+
+            // Importance bonus from index-time signals (population log
+            // + wikidata + wikipedia). Same scale as the bias path so
+            // a Wikipedia-backed major city can outrank an obscure
+            // same-name village in unbiased queries too: `q=Cambridge`
+            // returns Cambridge UK above Cambridge OH because UK has
+            // higher importance, even though the rank-based prominence
+            // boost is identical (both city = rank 16). Capped at 1.5
+            // BM25 units so it never overpowers a clearly-better text
+            // match.
+            const IMPORTANCE_BONUS_MAX: f32 = 1.5;
+            let importance_bonus = (hit.importance as f32 / 255.0) * IMPORTANCE_BONUS_MAX;
+
+            hit.score * boost + importance_bonus
         }
         Some(b) => {
             // Proximity bias is the user's explicit intent: rank by
@@ -2252,6 +2424,47 @@ pub fn fuzzy_name(schema: &ForwardSchema, token: &str, distance: u8) -> Box<dyn 
 }
 
 #[cfg(test)]
+mod nearby_validation_tests {
+    use super::*;
+
+    fn q(lat: f64, lng: f64, radius_km: f64) -> NearbyQuery<'static> {
+        NearbyQuery {
+            lat, lng, radius_km,
+            q: None, country_code: None, kind: None, limit: 10,
+        }
+    }
+
+    #[test] fn rejects_invalid_lat() {
+        assert_eq!(q(91.0, 0.0, 5.0).validate().unwrap_err(),  "lat");
+        assert_eq!(q(-91.0, 0.0, 5.0).validate().unwrap_err(), "lat");
+        assert_eq!(q(f64::NAN, 0.0, 5.0).validate().unwrap_err(), "lat");
+        assert_eq!(q(f64::INFINITY, 0.0, 5.0).validate().unwrap_err(), "lat");
+    }
+
+    #[test] fn rejects_invalid_lng() {
+        assert_eq!(q(0.0, 181.0, 5.0).validate().unwrap_err(),  "lng");
+        assert_eq!(q(0.0, -181.0, 5.0).validate().unwrap_err(), "lng");
+        assert_eq!(q(0.0, f64::NAN, 5.0).validate().unwrap_err(), "lng");
+    }
+
+    #[test] fn rejects_invalid_radius() {
+        assert_eq!(q(0.0, 0.0, 0.0).validate().unwrap_err(), "radius_km");
+        assert_eq!(q(0.0, 0.0, -1.0).validate().unwrap_err(), "radius_km");
+        assert_eq!(q(0.0, 0.0, f64::NAN).validate().unwrap_err(), "radius_km");
+    }
+
+    #[test] fn rejects_radius_above_cap() {
+        assert_eq!(q(0.0, 0.0, NearbyQuery::MAX_RADIUS_KM + 0.001).validate().unwrap_err(), "radius_km");
+    }
+
+    #[test] fn accepts_valid_inputs() {
+        assert!(q(0.0, 0.0, 1.0).validate().is_ok());
+        assert!(q(90.0, 180.0, NearbyQuery::MAX_RADIUS_KM).validate().is_ok());
+        assert!(q(-90.0, -180.0, 0.001).validate().is_ok());
+    }
+}
+
+#[cfg(test)]
 mod bias_curve_tests {
     use super::*;
 
@@ -2320,6 +2533,24 @@ mod bias_curve_tests {
         let s_street = boosted_score(&street, None);
 
         assert!(s_city > s_street, "city should outscore street under prominence boost");
+    }
+
+    /// Without bias, importance is now additive: among same-rank
+    /// same-BM25 candidates, the wiki-backed one wins. Cambridge UK
+    /// (importance 200) ranks above Cambridge OH (importance 0) for
+    /// `q=Cambridge` even though both are rank 16 cities.
+    #[test]
+    fn no_bias_importance_breaks_ties() {
+        let cambridge_uk = hit_with_importance(2.0, 52.21, 0.12, 200);
+        let cambridge_oh = hit_with_importance(2.0, 40.03, -81.59, 0);
+
+        let s_uk = boosted_score(&cambridge_uk, None);
+        let s_oh = boosted_score(&cambridge_oh, None);
+
+        assert!(
+            s_uk > s_oh,
+            "Cambridge UK ({s_uk}) should outscore Cambridge OH ({s_oh}) on importance alone"
+        );
     }
 
     /// Importance bonus flips the ranking among co-located same-name

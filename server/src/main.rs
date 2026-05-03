@@ -106,6 +106,29 @@ struct H3Params {
     h3_res: String,
 }
 
+/// Hard-radius "what's near me" search. Distinct contract from
+/// `/search`: `lat`/`lng`/`radius_km` are required, results are sorted
+/// by distance ascending, and anything outside the radius is dropped
+/// (not soft-penalised). Optional `q` and `kind` narrow the candidates
+/// inside the radius.
+#[cfg(feature = "forward")]
+#[derive(Deserialize)]
+struct NearbyParams {
+    lat: f64,
+    lng: f64,
+    radius_km: f64,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    country_code: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    h3_res: Option<String>,
+}
+
 #[cfg(feature = "forward")]
 #[derive(Deserialize)]
 struct SearchParams {
@@ -1098,6 +1121,129 @@ async fn search(
     axum::Json(body).into_response()
 }
 
+/// Hard-radius geographic search. Returns hits within `radius_km` of
+/// (`lat`, `lng`), sorted by distance ascending. Optional `q`, `kind`,
+/// and `country_code` narrow the candidates inside the radius.
+#[cfg(feature = "forward")]
+#[tracing::instrument(
+    name = "http.nearby",
+    skip_all,
+    fields(
+        geocoder.lat = params.lat,
+        geocoder.lng = params.lng,
+        geocoder.radius_km = params.radius_km,
+        geocoder.q = params.q.as_deref().unwrap_or(""),
+        geocoder.kind = params.kind.as_deref().unwrap_or(""),
+        geocoder.country_code = params.country_code.as_deref().unwrap_or(""),
+        geocoder.match_count = tracing::field::Empty,
+    )
+)]
+async fn nearby(
+    Query(params): Query<NearbyParams>,
+    index: axum::extract::Extension<LiveIndex>,
+    forward_idx: axum::extract::Extension<Option<Arc<Forward>>>,
+    metrics: axum::extract::Extension<Arc<Metrics>>,
+) -> Response {
+    let started = std::time::Instant::now();
+    use query_server::limits as L;
+    if let Some(r) = [
+        check_text_opt("q", params.q.as_deref(), L::SEARCH_Q),
+        check_text_opt("country_code", params.country_code.as_deref(), L::COUNTRY_CODE_LIST),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    {
+        return r;
+    }
+
+    let h3_resolutions = match resolve_h3_res(params.h3_res.as_deref()) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    let Some(fwd) = forward_idx.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "Forward geocoding index not loaded; run `build-forward-index <data>/index` to enable /nearby",
+        )
+            .into_response();
+    };
+
+    let kind_filter = match params.kind.as_deref() {
+        Some("place") => Some(forward::KIND_PLACE),
+        Some("street") => Some(forward::KIND_STREET),
+        Some("poi") => Some(forward::KIND_POI),
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid kind {other:?}; expected 'place', 'street', or 'poi'"),
+            )
+                .into_response()
+        }
+        None => None,
+    };
+
+    let limit = params.limit.unwrap_or(10).clamp(1, 50);
+
+    let nearby_q = forward::NearbyQuery {
+        lat: params.lat,
+        lng: params.lng,
+        radius_km: params.radius_km,
+        q: params.q.as_deref(),
+        country_code: params.country_code.as_deref(),
+        kind: kind_filter,
+        limit,
+    };
+
+    if let Err(field) = nearby_q.validate() {
+        let detail = match field {
+            "lat" => "lat: out of range (must be finite, in [-90, 90])",
+            "lng" => "lng: out of range (must be finite, in [-180, 180])",
+            "radius_km" => "radius_km: must be finite, > 0, ≤ 100",
+            other => other,
+        };
+        return (StatusCode::BAD_REQUEST, detail).into_response();
+    }
+
+    let hits = match fwd.search_nearby(nearby_q) {
+        Ok(h) => h,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("nearby failed: {e}"))
+                .into_response()
+        }
+    };
+
+    tracing::Span::current().record("geocoder.match_count", hits.len());
+
+    let idx_snapshot = index.load();
+    let enriched: Vec<serde_json::Value> = hits
+        .into_iter()
+        .map(|hit| {
+            // Compute the radial distance once we know the final coord
+            // and stamp it on the response so callers can rank/render
+            // without re-doing haversine themselves.
+            let d_m = query_server::geo::haversine_m(hit.lat, hit.lng, params.lat, params.lng);
+            let mut v = enrich_hit(hit, None, &idx_snapshot, &h3_resolutions);
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("distance_m".into(), serde_json::json!(d_m.round()));
+            }
+            v
+        })
+        .collect();
+
+    let cc = enriched
+        .first()
+        .and_then(|h| h.get("address"))
+        .and_then(|a| a.get("country_code"))
+        .and_then(|v| v.as_str())
+        .or(params.country_code.as_deref());
+    metrics.record_request("nearby", cc, started.elapsed().as_secs_f64());
+
+    let body = serde_json::json!({ "results": enriched });
+    axum::Json(body).into_response()
+}
+
 /// Pull the (lat, lon, country_code, state, city, road, display_name)
 /// shape out of a `/search` enriched hit JSON value into the owned
 /// `OurSnapshot` form the shadow worker needs. Returns `None` when the
@@ -1568,6 +1714,7 @@ async fn main() {
         .route("/metrics", get(metrics_handler))
         .route("/reverse", get(reverse_geocode))
         .route("/search", get(search))
+        .route("/nearby", get(nearby))
         .route("/validate", get(validate_address))
         .route("/autocomplete", get(autocomplete))
         .route("/geocode/ip", get(ip_geocode))
