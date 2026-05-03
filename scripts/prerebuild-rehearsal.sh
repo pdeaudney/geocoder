@@ -5,30 +5,63 @@
 # the 13-hour planet rebuild.
 #
 # Usage:
-#   ./scripts/prerebuild-rehearsal.sh <small.pbf> [scratch-dir]
+#   ./scripts/prerebuild-rehearsal.sh                      # auto-download NSW
+#   ./scripts/prerebuild-rehearsal.sh <pbf> [scratch-dir]  # use existing PBF
 #
 # Defaults:
 #   scratch-dir   ./data-rehearsal
+#   PBF (when omitted)  Geofabrik NSW extract (~150 MB), cached at
+#                       ./data/pbf/new-south-wales-latest.osm.pbf
 #
-# Recommended PBF size: a single small region (NSW, Catalonia, North
-# Rhine-Westphalia) takes 5–15 minutes end-to-end on a laptop, exercises
-# every emit path, and surfaces enough places/exonyms/POIs to validate.
-# Whole continents work too but add nothing for the rehearsal.
+# Why NSW as the default: large enough to exercise every emit path
+# (Sydney has wikipedia + wikidata + population so importance > 0;
+# 30k+ POIs; full street + addr coverage) yet small enough that the
+# entire rehearsal — download + reverse + forward + dump + checks —
+# completes in 10-15 min on broadband + laptop. Operators wanting
+# exonym validation should supply their own PBF that covers a
+# German / Russian / Italian / CJK region (NRW, Bayern, Lazio,
+# Catalonia, Praha city extract, etc.); NSW alone is English-naming
+# only so the exonym table won't fire — Check B will warn, not fail.
 #
 # Exit codes:
 #   0   build clean, all spot-checks pass
 #   1   build failed
 #   2   spot-check failed (format/wiring drift detected)
-#   3   missing pre-requisite (PBF, builder binary, etc.)
+#   3   missing pre-requisite (download failed, builder binary, etc.)
 set -euo pipefail
+
+DEFAULT_PBF_URL="https://download.geofabrik.de/australia-oceania/australia/new-south-wales-latest.osm.pbf"
+DEFAULT_PBF_PATH="./data/pbf/new-south-wales-latest.osm.pbf"
 
 PBF="${1:-}"
 SCRATCH="${2:-./data-rehearsal}"
 
+# Auto-download path: no PBF arg → fetch the default extract (cached).
+# Idempotent — the second run is a no-op since the file already exists.
 if [ -z "$PBF" ]; then
-    echo "usage: $0 <small.pbf> [scratch-dir]" >&2
-    exit 3
+    if [ -f "$DEFAULT_PBF_PATH" ]; then
+        printf '\033[1;34m[rehearsal]\033[0m using cached default PBF: %s\n' "$DEFAULT_PBF_PATH"
+    else
+        printf '\033[1;34m[rehearsal]\033[0m no PBF arg supplied; downloading default (NSW, ~150 MB)\n'
+        printf '\033[1;34m[rehearsal]\033[0m   from: %s\n' "$DEFAULT_PBF_URL"
+        printf '\033[1;34m[rehearsal]\033[0m   to:   %s\n' "$DEFAULT_PBF_PATH"
+        mkdir -p "$(dirname "$DEFAULT_PBF_PATH")"
+        # Download to a temp file first so a Ctrl-C / network drop
+        # doesn't leave a half-downloaded file looking valid on disk.
+        tmp="${DEFAULT_PBF_PATH}.partial"
+        if command -v curl >/dev/null 2>&1; then
+            curl --fail --location --show-error --progress-bar --output "$tmp" "$DEFAULT_PBF_URL"
+        elif command -v wget >/dev/null 2>&1; then
+            wget --output-document="$tmp" "$DEFAULT_PBF_URL"
+        else
+            echo "error: neither curl nor wget available — install one or supply PBF=path/to/file.pbf" >&2
+            exit 3
+        fi
+        mv "$tmp" "$DEFAULT_PBF_PATH"
+    fi
+    PBF="$DEFAULT_PBF_PATH"
 fi
+
 if [ ! -f "$PBF" ]; then
     echo "error: PBF not found: $PBF" >&2
     exit 3

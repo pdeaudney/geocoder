@@ -20,7 +20,7 @@ help:
 	@echo "  regression-nominatim-au  Hand-translated Nominatim BDD scenarios"
 	@echo "  regression-bias-disambiguation  Same-name disambiguation under proximity bias (~30 cases, planet index)"
 	@echo "  regression-worldwide  Run full Pelias suite (AU+NZ+GB+CA+US) against data/index-worldwide"
-	@echo "  prerebuild-rehearsal  Build C++ + forward index against PBF=path/to/small.pbf and spot-check the new fields (5-15 min)"
+	@echo "  prerebuild-rehearsal  Build C++ + forward index against a small PBF and spot-check the new fields. Auto-downloads NSW (~150 MB) when PBF= is omitted (10-15 min)"
 	@echo "  pelias-refresh        Re-fetch pelias/acceptance-tests and regenerate the AU subset"
 	@echo "  pelias-full-refresh   Regenerate per-country Pelias corpora (au, nz, gb, us, ca)"
 	@echo ""
@@ -87,13 +87,16 @@ regression-bias-disambiguation:
 # small PBF in a scratch directory, then spot-check the new fields
 # (importance, exonyms). Catches format/wiring bugs that survive
 # unit tests but would only surface after the 13h planet rebuild.
-# Set PBF=path/to/small.pbf — recommended a single small region
-# (NSW, Catalonia, NRW) so the rehearsal runs in 5-15 minutes.
+#
+# With no PBF= arg, the script auto-downloads NSW (~150 MB,
+# cached at ./data/pbf/) — large enough to exercise every emit
+# path, small enough to finish in 10-15 min.
+#
+# To validate exonyms specifically, supply a PBF that covers a
+# German / Russian / Italian / CJK region (NRW, Bayern, Lazio,
+# Catalonia, etc.):
+#   make prerebuild-rehearsal PBF=path/to/north-rhine-westphalia.pbf
 prerebuild-rehearsal:
-	@if [ -z "$(PBF)" ]; then \
-		echo "Usage: make prerebuild-rehearsal PBF=path/to/small.pbf" >&2; \
-		exit 3; \
-	fi
 	./scripts/prerebuild-rehearsal.sh $(PBF)
 
 # Full worldwide Pelias suite — assumes ./data/index-worldwide exists
