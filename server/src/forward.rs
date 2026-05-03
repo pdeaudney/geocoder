@@ -506,7 +506,7 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
                     &alternates,
                     KIND_POI,
                     poi.rank as u64,
-                    0,
+                    poi.importance as u64,
                     lat,
                     lng,
                     suburb,
@@ -862,7 +862,7 @@ pub fn build_partitioned_with_heap(
                         alternates,
                         kind: KIND_POI,
                         rank: poi.rank as u64,
-                        importance: 0,
+                        importance: poi.importance as u64,
                         lat,
                         lng,
                         suburb,
@@ -2198,10 +2198,19 @@ pub fn parse_freeform_query(input: &str) -> ParsedQuery {
             }
         }
 
-        // AU state abbreviation / full name — only demote from `rest` if we
-        // haven't already captured a state (first-wins, handles doubled
-        // state mentions sensibly).
-        if parsed.state.is_none() {
+        // AU state abbreviation / full name — only demote from `rest` if
+        // we haven't already captured a state AND the query has more
+        // than one token. A bare single-token query like `q=Vic` or
+        // `q=NSW` is virtually always a place name in some other
+        // country (Vic, Catalonia; Cornwall in England; etc.) — and
+        // even if the user really did mean "the state of Victoria"
+        // alone, promoting that single token to a structured-state
+        // MUST clause empties `rest`, so no name search ever runs and
+        // we return zero results. The multi-token guard preserves
+        // every legitimate case ("Sydney NSW", "Melbourne VIC",
+        // "Brisbane Queensland") because those have an additional
+        // place token left over after the state demotion.
+        if parsed.state.is_none() && tokens.len() > 1 {
             if let Some(full) = canonicalise_state(tok) {
                 parsed.state = Some(full.to_owned());
                 continue;

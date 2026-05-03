@@ -172,7 +172,12 @@ pub struct PoiPoint {
     /// Interned `<key>:<value>` string (e.g. `"amenity:cafe"`).
     pub category_id: u32,
     pub rank: u8,
-    _pad: [u8; 3],
+    /// Same Nominatim-style 0..255 prominence score as `PlacePoint`,
+    /// computed at index time from population + wikidata + wikipedia
+    /// signals. Lets `q="Sydney Opera House"` deterministically pick
+    /// the wikipedia-backed UNESCO site over a same-named cafe.
+    pub importance: u8,
+    _pad: [u8; 2],
     /// Tagged parent locality from `addr:city|suburb|locality`, 0 if
     /// absent. When zero, forward indexer falls back to geometric
     /// `find_admin()` enrichment.

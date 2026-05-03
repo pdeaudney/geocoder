@@ -70,6 +70,33 @@ fn parse_freeform_handles_bare_state_abbreviations() {
 }
 
 #[test]
+fn parse_freeform_single_token_is_never_a_state() {
+    // Bench-accuracy regression: `q=Vic` against the Spanish per-country
+    // index returned zero results because "vic" was promoted to
+    // state="Victoria" and the residual `rest` was empty — no name
+    // search for "vic" ever ran. The fix keeps single-token queries
+    // entirely in `rest` regardless of state-abbreviation overlap.
+    for one in ["Vic", "NSW", "qld", "Tasmania", "WA"] {
+        let p = parse_freeform_query(one);
+        assert_eq!(p.state, None, "{one}: single-token must not become state");
+        assert_eq!(p.rest.len(), 1, "{one}: single token must stay in rest");
+    }
+}
+
+#[test]
+fn parse_freeform_multi_token_state_promotion_unchanged() {
+    // Multi-token queries with a state abbreviation still promote it;
+    // this is what keeps `Sydney NSW` and `Melbourne VIC` working.
+    let p = parse_freeform_query("Sydney NSW");
+    assert_eq!(p.state.as_deref(), Some("New South Wales"));
+    assert_eq!(p.rest, vec!["sydney"]);
+
+    let p = parse_freeform_query("melbourne vic");
+    assert_eq!(p.state.as_deref(), Some("Victoria"));
+    assert_eq!(p.rest, vec!["melbourne"]);
+}
+
+#[test]
 fn parse_freeform_trailing_short_digits_are_housenumber() {
     // Street-then-number order ("Alysse Close 10") — Nominatim's BDD
     // db/query/housenumbers.feature covers this explicitly. Without
