@@ -30,8 +30,10 @@
 //!
 //! Per cache.zip / source.geojson.gz we persist `<dest>.s3meta`:
 //!
-//!     etag="..."
-//!     length=12345
+//! ```text
+//! etag="..."
+//! length=12345
+//! ```
 //!
 //! This is the OA equivalent of the OSM path's `<dest>.etag` sidecar.
 //! Re-runs check `head_object` against the sidecar's etag to avoid

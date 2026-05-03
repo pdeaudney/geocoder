@@ -1,4 +1,4 @@
-.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-bias-disambiguation regression-worldwide bench-accuracy bench-fixtures pelias-refresh pelias-full-refresh bench inspect-dump wof-import test builder builder-clean clean
+.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-bias-disambiguation regression-worldwide bench-accuracy bench-fixtures pelias-refresh pelias-full-refresh bench inspect-dump wof-import prerebuild-rehearsal test builder builder-clean clean
 
 help:
 	@echo "Build:"
@@ -20,6 +20,7 @@ help:
 	@echo "  regression-nominatim-au  Hand-translated Nominatim BDD scenarios"
 	@echo "  regression-bias-disambiguation  Same-name disambiguation under proximity bias (~30 cases, planet index)"
 	@echo "  regression-worldwide  Run full Pelias suite (AU+NZ+GB+CA+US) against data/index-worldwide"
+	@echo "  prerebuild-rehearsal  Build C++ + forward index against a small PBF and spot-check the new fields. Auto-downloads NSW (~150 MB) when PBF= is omitted (10-15 min)"
 	@echo "  pelias-refresh        Re-fetch pelias/acceptance-tests and regenerate the AU subset"
 	@echo "  pelias-full-refresh   Regenerate per-country Pelias corpora (au, nz, gb, us, ca)"
 	@echo ""
@@ -81,6 +82,22 @@ regression-nominatim-au:
 # Requires a planet (or at least US+GB+CA+AU+DE+FR+ES) index.
 regression-bias-disambiguation:
 	./scripts/run-regression.sh --corpus ./tests/regression/corpora/bias-disambiguation.json
+
+# Pre-rebuild rehearsal — build the C++ + forward index against a
+# small PBF in a scratch directory, then spot-check the new fields
+# (importance, exonyms). Catches format/wiring bugs that survive
+# unit tests but would only surface after the 13h planet rebuild.
+#
+# With no PBF= arg, the script auto-downloads NSW (~150 MB,
+# cached at ./data/pbf/) — large enough to exercise every emit
+# path, small enough to finish in 10-15 min.
+#
+# To validate exonyms specifically, supply a PBF that covers a
+# German / Russian / Italian / CJK region (NRW, Bayern, Lazio,
+# Catalonia, etc.):
+#   make prerebuild-rehearsal PBF=path/to/north-rhine-westphalia.pbf
+prerebuild-rehearsal:
+	./scripts/prerebuild-rehearsal.sh $(PBF)
 
 # Full worldwide Pelias suite — assumes ./data/index-worldwide exists
 # (combined AU+NZ+GB+CA+US build) and the per-country pelias-*-full.json

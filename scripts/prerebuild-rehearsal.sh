@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# Pre-rebuild rehearsal — build the index against a small PBF in a
+# scratch directory, then spot-check the outputs. Catches format /
+# wiring bugs that survive unit tests but would only surface after
+# the 13-hour planet rebuild.
+#
+# Usage:
+#   ./scripts/prerebuild-rehearsal.sh                      # auto-download NSW
+#   ./scripts/prerebuild-rehearsal.sh <pbf> [scratch-dir]  # use existing PBF
+#
+# Defaults:
+#   scratch-dir   ./data-rehearsal
+#   PBF (when omitted)  Geofabrik NSW extract (~150 MB), cached at
+#                       ./data/pbf/new-south-wales-latest.osm.pbf
+#
+# Why NSW as the default: large enough to exercise every emit path
+# (Sydney has wikipedia + wikidata + population so importance > 0;
+# 30k+ POIs; full street + addr coverage) yet small enough that the
+# entire rehearsal — download + reverse + forward + dump + checks —
+# completes in 10-15 min on broadband + laptop. Operators wanting
+# exonym validation should supply their own PBF that covers a
+# German / Russian / Italian / CJK region (NRW, Bayern, Lazio,
+# Catalonia, Praha city extract, etc.); NSW alone is English-naming
+# only so the exonym table won't fire — Check B will warn, not fail.
+#
+# Exit codes:
+#   0   build clean, all spot-checks pass
+#   1   build failed
+#   2   spot-check failed (format/wiring drift detected)
+#   3   missing pre-requisite (download failed, builder binary, etc.)
+set -euo pipefail
+
+DEFAULT_PBF_URL="https://download.geofabrik.de/australia-oceania/australia/new-south-wales-latest.osm.pbf"
+DEFAULT_PBF_PATH="./data/pbf/new-south-wales-latest.osm.pbf"
+
+PBF="${1:-}"
+SCRATCH="${2:-./data-rehearsal}"
+
+# Auto-download path: no PBF arg → fetch the default extract (cached).
+# Idempotent — the second run is a no-op since the file already exists.
+if [ -z "$PBF" ]; then
+    if [ -f "$DEFAULT_PBF_PATH" ]; then
+        printf '\033[1;34m[rehearsal]\033[0m using cached default PBF: %s\n' "$DEFAULT_PBF_PATH"
+    else
+        printf '\033[1;34m[rehearsal]\033[0m no PBF arg supplied; downloading default (NSW, ~150 MB)\n'
+        printf '\033[1;34m[rehearsal]\033[0m   from: %s\n' "$DEFAULT_PBF_URL"
+        printf '\033[1;34m[rehearsal]\033[0m   to:   %s\n' "$DEFAULT_PBF_PATH"
+        mkdir -p "$(dirname "$DEFAULT_PBF_PATH")"
+        # Download to a temp file first so a Ctrl-C / network drop
+        # doesn't leave a half-downloaded file looking valid on disk.
+        tmp="${DEFAULT_PBF_PATH}.partial"
+        if command -v curl >/dev/null 2>&1; then
+            curl --fail --location --show-error --progress-bar --output "$tmp" "$DEFAULT_PBF_URL"
+        elif command -v wget >/dev/null 2>&1; then
+            wget --output-document="$tmp" "$DEFAULT_PBF_URL"
+        else
+            echo "error: neither curl nor wget available — install one or supply PBF=path/to/file.pbf" >&2
+            exit 3
+        fi
+        mv "$tmp" "$DEFAULT_PBF_PATH"
+    fi
+    PBF="$DEFAULT_PBF_PATH"
+fi
+
+if [ ! -f "$PBF" ]; then
+    echo "error: PBF not found: $PBF" >&2
+    exit 3
+fi
+
+# Use absolute paths so step output is unambiguous in logs.
+PBF=$(cd "$(dirname "$PBF")" && pwd)/$(basename "$PBF")
+SCRATCH=$(mkdir -p "$SCRATCH" && cd "$SCRATCH" && pwd)
+INDEX_DIR="$SCRATCH/index"
+
+log()  { printf '\033[1;34m[rehearsal]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[rehearsal]\033[0m WARN: %s\n' "$*" >&2; }
+err()  { printf '\033[1;31m[rehearsal]\033[0m ERROR: %s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------------------
+# Step 1: build the binaries we'll exercise.
+# ---------------------------------------------------------------------------
+
+log "Step 1/3: build C++ + Rust binaries"
+make builder >/dev/null
+cargo build --release --bin index-dumper >/dev/null
+
+if [ ! -x ./build/build-index ]; then
+    err "build/build-index missing after make builder — check the build log"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2: reverse index from the PBF.
+# ---------------------------------------------------------------------------
+
+log "Step 2/3: build reverse index from $PBF"
+mkdir -p "$INDEX_DIR"
+# build-index argv: <output-dir> <input.pbf> [input2.pbf ...] — output first.
+./build/build-index "$INDEX_DIR" "$PBF" 2>&1 | tail -3
+
+if [ ! -f "$INDEX_DIR/place_points.bin" ]; then
+    err "place_points.bin missing — reverse build did not complete"
+    exit 1
+fi
+
+# Note: we deliberately don't run build-forward-index here. Forward
+# indexing requires admin_level=2 country polygons (or WoF fallback)
+# to bucket docs by country; sub-national PBFs (NSW, Catalonia, NRW)
+# don't include the country boundary, so every place gets dropped
+# with country_code=None. The reverse index alone exercises the
+# format / importance / exonym pipeline that the rehearsal exists
+# to validate; format drift between C++ writer and Rust mirror is
+# also pinned by `tests/struct_layout.rs` field-offset round-trips.
+
+# ---------------------------------------------------------------------------
+# Step 3: dump CSVs and run spot checks.
+# ---------------------------------------------------------------------------
+
+log "Step 3/3: dump CSVs + run spot checks"
+DUMP_DIR="$INDEX_DIR/dump-csv"
+./target/release/index-dumper "$INDEX_DIR" "$DUMP_DIR" >/dev/null
+
+PLACE_CSV="$DUMP_DIR/place_points.csv"
+I18N_CSV="$DUMP_DIR/i18n_names.csv"
+
+fail=0
+
+# --- Check A: place_points.csv exists and the new `importance` column
+# is wired up. The header alone proves the dumper compiled against the
+# updated PlacePoint struct; at least one row with importance > 0
+# proves the C++ builder is actually populating the field.
+if [ ! -f "$PLACE_CSV" ]; then
+    err "place_points.csv missing — dumper failed silently?"
+    fail=1
+elif ! head -1 "$PLACE_CSV" | grep -q importance; then
+    err "place_points.csv header is missing 'importance' — dumper out of sync"
+    fail=1
+else
+    nonzero_importance=$(awk -F, 'NR>1 && $4 > 0 { c++ } END { print c+0 }' "$PLACE_CSV")
+    total_places=$(awk -F, 'NR>1 { c++ } END { print c+0 }' "$PLACE_CSV")
+    log "place_points: $total_places rows, $nonzero_importance with importance > 0"
+    if [ "$nonzero_importance" = "0" ] && [ "$total_places" != "0" ]; then
+        err "every place_point has importance=0 — population/wikidata/wikipedia signals are not being read"
+        fail=1
+    fi
+fi
+
+# --- Check B: i18n_names.csv exists and contains at least one
+# synthetic English exonym alias. If the PBF includes any city in
+# kEnglishExonyms (München, Wien, Roma, Praha, Москва, ...), the
+# build emits `name:en` aliases for them. We grep for the well-known
+# English forms; even one match proves the wiring works.
+if [ ! -f "$I18N_CSV" ]; then
+    warn "i18n_names.csv missing — exonym pipeline can't be checked"
+else
+    total_i18n=$(awk -F, 'NR>1 { c++ } END { print c+0 }' "$I18N_CSV")
+    log "i18n_names: $total_i18n rows total"
+    # Grep for well-known English exonym forms. Any match means the
+    # exonym table fired against this PBF.
+    exonym_hits=$(grep -ciE 'Munich|Cologne|Vienna|Moscow|Beijing|Tokyo|Cairo|Prague|Warsaw|Florence|Naples|Rome' "$I18N_CSV" || true)
+    log "exonym-shaped i18n rows: $exonym_hits"
+    if [ "$exonym_hits" = "0" ]; then
+        warn "no exonym-shaped names found — either the PBF doesn't cover any exonym source, or the table isn't firing"
+        warn "  (this is expected for AU/NZ/UK-only PBFs; investigate only if the input includes DE/IT/RU/CN/JP)"
+    fi
+fi
+
+# --- Check C: manifest sanity. git_dirty=true means the build
+# captured an uncommitted tree; not an error per se, but worth
+# surfacing so operators don't ship a phantom-SHA index.
+M="$INDEX_DIR/manifest_reverse.json"
+if [ -f "$M" ]; then
+    sha=$(grep -o '"git_sha":[^,}]*' "$M" | head -1)
+    dirty=$(grep -o '"git_dirty":[^,}]*' "$M" | head -1)
+    log "manifest_reverse: $sha, $dirty"
+fi
+
+if [ "$fail" != "0" ]; then
+    err "spot-checks failed — DO NOT START THE 13h REBUILD until these are resolved"
+    exit 2
+fi
+
+log "OK — all spot-checks passed; safe to proceed with the planet rebuild"

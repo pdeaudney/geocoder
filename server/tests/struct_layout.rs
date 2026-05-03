@@ -60,6 +60,86 @@ fn poi_point_size() {
     assert_eq!(align_of::<PoiPoint>(), 4);
 }
 
+// --- Field-offset round-trip tests ---
+//
+// `*_size` tests above pin only the byte size, not field offsets. A
+// silent reorder of fields between the C++ writer and the Rust mirror
+// (e.g. swapping `importance` with `_pad` when both are u8) would
+// preserve the size assertion while reading garbage at runtime. The
+// round-trip tests below hand-construct the exact byte sequence the
+// C++ builder writes, cast it via the same `repr(C)` mirror the
+// runtime uses, and assert every field reads back correctly. A drift
+// in field order surfaces in milliseconds instead of after a 13-hour
+// rebuild.
+
+/// Read a single value of T from a byte slice via unaligned pointer
+/// read — same shape `as_typed_slice` uses internally, but takes
+/// `&[u8]` so tests can hand-construct the bytes without a real Mmap.
+fn cast_one<T: Copy>(bytes: &[u8]) -> T {
+    assert_eq!(bytes.len(), size_of::<T>(), "byte length must match T");
+    // SAFETY: caller guarantees `bytes.len() == size_of::<T>()`. The
+    // unaligned read is correct regardless of `bytes`'s alignment —
+    // the same guarantee `as_typed_slice` relies on against an mmap.
+    unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const T) }
+}
+
+#[test]
+fn place_point_field_offsets_round_trip() {
+    // Layout the C++ builder writes (little-endian on every platform
+    // we ship to — x86_64 / aarch64). Field order matches
+    // builder/src/build_index.cpp `struct PlacePoint`:
+    //   f32 lat | f32 lng | u32 name_id | u8 rank | u8 importance | 2B pad
+    let mut bytes = [0u8; 16];
+    bytes[0..4].copy_from_slice(&(-33.8688_f32).to_le_bytes());  // lat
+    bytes[4..8].copy_from_slice(&151.2093_f32.to_le_bytes());    // lng
+    bytes[8..12].copy_from_slice(&0xCAFEBABE_u32.to_le_bytes()); // name_id
+    bytes[12] = 16;                                              // rank
+    bytes[13] = 200;                                             // importance
+    // bytes[14..16] = pad
+
+    let p: PlacePoint = cast_one(&bytes);
+    assert!((p.lat - -33.8688).abs() < 1e-4, "lat mismatch: {}", p.lat);
+    assert!((p.lng - 151.2093).abs() < 1e-4, "lng mismatch: {}", p.lng);
+    assert_eq!(p.name_id, 0xCAFEBABE, "name_id reads wrong field");
+    assert_eq!(p.rank, 16, "rank reads wrong byte");
+    assert_eq!(
+        p.importance, 200,
+        "importance reads wrong byte — likely swapped with pad"
+    );
+}
+
+#[test]
+fn poi_point_field_offsets_round_trip() {
+    // Layout the C++ builder writes. Field order matches
+    // builder/src/build_index.cpp `struct PoiPoint`:
+    //   f32 lat | f32 lng | u32 name_id | u32 category_id |
+    //   u8 rank | u8 importance | 2B pad | u32 parent_place_id
+    let mut bytes = [0u8; 24];
+    bytes[0..4].copy_from_slice(&(48.8566_f32).to_le_bytes());   // lat
+    bytes[4..8].copy_from_slice(&2.3522_f32.to_le_bytes());      // lng
+    bytes[8..12].copy_from_slice(&0xAAAAAAAA_u32.to_le_bytes()); // name_id
+    bytes[12..16].copy_from_slice(&0xBBBBBBBB_u32.to_le_bytes());// category_id
+    bytes[16] = 10;                                              // rank
+    bytes[17] = 180;                                             // importance
+    // bytes[18..20] = pad
+    bytes[20..24].copy_from_slice(&0xCCCCCCCC_u32.to_le_bytes());// parent_place_id
+
+    let p: PoiPoint = cast_one(&bytes);
+    assert!((p.lat - 48.8566).abs() < 1e-4, "lat mismatch: {}", p.lat);
+    assert!((p.lng - 2.3522).abs() < 1e-4, "lng mismatch: {}", p.lng);
+    assert_eq!(p.name_id, 0xAAAAAAAA, "name_id reads wrong field");
+    assert_eq!(p.category_id, 0xBBBBBBBB, "category_id reads wrong field");
+    assert_eq!(p.rank, 10, "rank reads wrong byte");
+    assert_eq!(
+        p.importance, 180,
+        "importance reads wrong byte — likely swapped with pad"
+    );
+    assert_eq!(
+        p.parent_place_id, 0xCCCCCCCC,
+        "parent_place_id at wrong offset — likely the rank/importance/pad block shifted"
+    );
+}
+
 #[test]
 fn kind_constants_agree_across_modules() {
     // forward::KIND_* and autocomplete::KIND_* are duplicated so the
