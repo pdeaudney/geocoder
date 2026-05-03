@@ -3,6 +3,8 @@ target/
 test-output/
 *.osm.pbf
 data/
+data-rehearsal/
+data-planet/
 *.lock
 
 # Packer per-env pkrvars files may contain bucket names / account IDs.

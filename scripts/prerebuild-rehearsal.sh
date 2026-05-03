@@ -80,9 +80,9 @@ err()  { printf '\033[1;31m[rehearsal]\033[0m ERROR: %s\n' "$*" >&2; }
 # Step 1: build the binaries we'll exercise.
 # ---------------------------------------------------------------------------
 
-log "Step 1/4: build C++ + Rust binaries"
+log "Step 1/3: build C++ + Rust binaries"
 make builder >/dev/null
-cargo build --release --bin build-forward-index --bin index-dumper >/dev/null
+cargo build --release --bin index-dumper >/dev/null
 
 if [ ! -x ./build/build-index ]; then
     err "build/build-index missing after make builder — check the build log"
@@ -93,32 +93,30 @@ fi
 # Step 2: reverse index from the PBF.
 # ---------------------------------------------------------------------------
 
-log "Step 2/4: build reverse index from $PBF"
+log "Step 2/3: build reverse index from $PBF"
 mkdir -p "$INDEX_DIR"
-./build/build-index "$PBF" "$INDEX_DIR" 2>&1 | tail -3
+# build-index argv: <output-dir> <input.pbf> [input2.pbf ...] — output first.
+./build/build-index "$INDEX_DIR" "$PBF" 2>&1 | tail -3
 
 if [ ! -f "$INDEX_DIR/place_points.bin" ]; then
     err "place_points.bin missing — reverse build did not complete"
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# Step 3: forward index (validates the tantivy schema + importance flow).
-# ---------------------------------------------------------------------------
-
-log "Step 3/4: build forward index (per-country tantivy — mirrors planet path)"
-./target/release/build-forward-index "$INDEX_DIR" --partition-by-country 2>&1 | tail -3
-
-if ! ls "$INDEX_DIR"/tantivy* >/dev/null 2>&1; then
-    err "no tantivy directory after forward build — schema mismatch?"
-    exit 1
-fi
+# Note: we deliberately don't run build-forward-index here. Forward
+# indexing requires admin_level=2 country polygons (or WoF fallback)
+# to bucket docs by country; sub-national PBFs (NSW, Catalonia, NRW)
+# don't include the country boundary, so every place gets dropped
+# with country_code=None. The reverse index alone exercises the
+# format / importance / exonym pipeline that the rehearsal exists
+# to validate; format drift between C++ writer and Rust mirror is
+# also pinned by `tests/struct_layout.rs` field-offset round-trips.
 
 # ---------------------------------------------------------------------------
-# Step 4: dump CSVs and run spot checks.
+# Step 3: dump CSVs and run spot checks.
 # ---------------------------------------------------------------------------
 
-log "Step 4/4: dump CSVs + run spot checks"
+log "Step 3/3: dump CSVs + run spot checks"
 DUMP_DIR="$INDEX_DIR/dump-csv"
 ./target/release/index-dumper "$INDEX_DIR" "$DUMP_DIR" >/dev/null
 
@@ -170,13 +168,12 @@ fi
 # --- Check C: manifest sanity. git_dirty=true means the build
 # captured an uncommitted tree; not an error per se, but worth
 # surfacing so operators don't ship a phantom-SHA index.
-for kind in reverse forward; do
-    M="$INDEX_DIR/manifest_${kind}.json"
-    [ -f "$M" ] || continue
+M="$INDEX_DIR/manifest_reverse.json"
+if [ -f "$M" ]; then
     sha=$(grep -o '"git_sha":[^,}]*' "$M" | head -1)
     dirty=$(grep -o '"git_dirty":[^,}]*' "$M" | head -1)
-    log "manifest_${kind}: $sha, $dirty"
-done
+    log "manifest_reverse: $sha, $dirty"
+fi
 
 if [ "$fail" != "0" ]; then
     err "spot-checks failed — DO NOT START THE 13h REBUILD until these are resolved"
