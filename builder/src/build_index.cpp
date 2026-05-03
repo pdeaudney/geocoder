@@ -130,13 +130,20 @@ struct PlacePoint {
 // rank: 10 if wikipedia/wikidata-backed, 15 otherwise. Lower wins ties
 //   on /reverse distance. Autocomplete FST inclusion gates on rank<=10
 //   to keep the FST small enough to mmap without paging (commit 5).
+// importance: same Nominatim-style 0..255 prominence score that
+//   PlacePoint carries — lets a search for "Sydney Opera House" pick
+//   the wikipedia-backed UNESCO site over an arbitrary cafe of the
+//   same name. Same formula as compute_place_importance (population
+//   log + wikidata + wikipedia bonuses); for POIs population is rare
+//   so the wiki signals dominate. Saturates at 255.
 struct PoiPoint {
     float lat;
     float lng;
     uint32_t name_id;
     uint32_t category_id;       // interned "<key>:<value>" e.g. "amenity:cafe"
     uint8_t rank;
-    uint8_t _pad[3];
+    uint8_t importance;         // 0..255, derived from population + wiki tags
+    uint8_t _pad[2];
     uint32_t parent_place_id;   // tagged or geometric (filled in commit 5)
 };
 
@@ -652,6 +659,164 @@ static void emit_alias_split(uint8_t entity_type, uint32_t entity_id,
     }
 }
 
+// Hand-curated English-exonym table. Maps an OSM `name` (in the local
+// language / script) to the well-known English form. Triggered ONLY
+// when the OSM entity doesn't already have a `name:en` tag — an
+// existing curated name:en always wins.
+//
+// Inclusion rule: an exonym belongs here if (a) it's the dominant
+// English form (encyclopaedia + travel + news), (b) it differs
+// substantially from the local form (so English-only users won't find
+// the place via the canonical name), and (c) the local string is
+// distinctive enough that a value-only lookup match rules out false
+// positives. Short common names ("Riga", "Lima", "Sofia") are skipped
+// even when they have an exonym, because the local string overlaps
+// with too many other places.
+//
+// The list intentionally stays small (~70 entries). It complements,
+// not replaces, ICU transliteration: transliteration handles the bulk
+// of Cyrillic/Arabic/CJK queries with no curation; exonyms cover the
+// specific names where transliteration produces a string nobody types
+// (`Moskva` vs `Moscow`, `al-Kharṭūm` vs `Khartoum`, `Beijing` vs the
+// Pinyin-from-`Běijīng` `Beijing` … which happens to coincide).
+static const std::unordered_map<std::string, const char*> kEnglishExonyms = {
+    // German-language
+    {"München", "Munich"},
+    {"Köln", "Cologne"},
+    {"Wien", "Vienna"},
+    {"Nürnberg", "Nuremberg"},
+    {"Hannover", "Hanover"},
+    {"Braunschweig", "Brunswick"},
+    {"Aachen", "Aachen"}, // same — but include so callers don't rely on alias absence
+
+    // Italian
+    {"Roma", "Rome"},
+    {"Milano", "Milan"},
+    {"Napoli", "Naples"},
+    {"Firenze", "Florence"},
+    {"Venezia", "Venice"},
+    {"Torino", "Turin"},
+    {"Genova", "Genoa"},
+    {"Padova", "Padua"},
+    {"Siracusa", "Syracuse"},
+    {"Livorno", "Leghorn"},
+
+    // Spanish / Portuguese / Catalan
+    {"Sevilla", "Seville"},
+    {"Lisboa", "Lisbon"},
+    {"A Coruña", "Corunna"},
+    {"Donostia / San Sebastián", "San Sebastian"},
+
+    // Polish
+    {"Warszawa", "Warsaw"},
+    {"Kraków", "Krakow"},
+    {"Wrocław", "Wroclaw"},
+    {"Gdańsk", "Gdansk"},
+    {"Łódź", "Lodz"},
+    {"Poznań", "Poznan"},
+
+    // Czech / Slovak / Hungarian
+    {"Praha", "Prague"},
+    {"Plzeň", "Pilsen"},
+
+    // Romanian / Bulgarian / Serbian / Macedonian
+    {"București", "Bucharest"},
+    {"София", "Sofia"},
+    {"Београд", "Belgrade"},
+    {"Tiranë", "Tirana"},
+
+    // Russian (Cyrillic — distinctive)
+    {"Москва", "Moscow"},
+    {"Санкт-Петербург", "Saint Petersburg"},
+    {"Екатеринбург", "Yekaterinburg"},
+    {"Нижний Новгород", "Nizhny Novgorod"},
+    {"Новосибирск", "Novosibirsk"},
+    {"Казань", "Kazan"},
+
+    // Ukrainian
+    {"Київ", "Kyiv"},
+    {"Львів", "Lviv"},
+    {"Одеса", "Odesa"},
+    {"Харків", "Kharkiv"},
+    {"Дніпро", "Dnipro"},
+
+    // Greek
+    {"Αθήνα", "Athens"},
+    {"Θεσσαλονίκη", "Thessaloniki"},
+
+    // Turkish (English drops the diacritics)
+    {"İstanbul", "Istanbul"},
+    {"İzmir", "Izmir"},
+
+    // Arabic — highly divergent from English forms
+    {"القاهرة", "Cairo"},
+    {"الإسكندرية", "Alexandria"},
+    {"الخرطوم", "Khartoum"},
+    {"دمشق", "Damascus"},
+    {"بغداد", "Baghdad"},
+    {"الرياض", "Riyadh"},
+    {"مكة المكرمة", "Mecca"},
+    {"المدينة المنورة", "Medina"},
+    {"الدوحة", "Doha"},
+    {"بيروت", "Beirut"},
+    {"عمّان", "Amman"},
+
+    // Persian
+    {"تهران", "Tehran"},
+    {"اصفهان", "Isfahan"},
+    {"شیراز", "Shiraz"},
+    {"مشهد", "Mashhad"},
+    {"تبریز", "Tabriz"},
+
+    // Japanese
+    {"東京", "Tokyo"},
+    {"京都", "Kyoto"},
+    {"大阪", "Osaka"},
+    {"横浜", "Yokohama"},
+    {"札幌", "Sapporo"},
+    {"名古屋", "Nagoya"},
+
+    // Chinese (Simplified — Beijing often present as 北京 in OSM)
+    {"北京", "Beijing"},
+    {"上海", "Shanghai"},
+    {"广州", "Guangzhou"},
+    {"深圳", "Shenzhen"},
+    {"成都", "Chengdu"},
+    {"重庆", "Chongqing"},
+    {"杭州", "Hangzhou"},
+    {"南京", "Nanjing"},
+    {"西安", "Xi'an"},
+    {"天津", "Tianjin"},
+
+    // Korean
+    {"서울", "Seoul"},
+    {"부산", "Busan"},
+    {"인천", "Incheon"},
+};
+
+// Emit a synthetic `name:en` alias for the entity when the OSM tags
+// don't already include one and the entity's `name` is a curated
+// exonym source (e.g. `Москва` → `Moscow`). Mirrors the shape of a
+// real `name:en` tag in the i18n_names table, so the runtime treats
+// it as an indistinguishable ALIAS_PRIMARY/lang=en entry.
+//
+// MUST be called AFTER `collect_i18n_names` so the OSM-curated
+// `name:en` (when present) sits ahead of any synthetic fallback —
+// the dedup-on-write sort key includes lang_code, so duplicates would
+// collapse anyway, but emitting is wasted work when OSM already has it.
+template <typename Tags>
+static void maybe_emit_english_exonym(const Tags& tags,
+                                      uint8_t entity_type,
+                                      uint32_t entity_id) {
+    if (tags["name:en"] != nullptr) return;
+    const char* name = tags["name"];
+    if (!name || !*name) return;
+    auto it = kEnglishExonyms.find(std::string(name));
+    if (it == kEnglishExonyms.end()) return;
+    const uint16_t en = pack_lang_subtag("en");
+    emit_alias(entity_type, entity_id, ALIAS_PRIMARY, en, it->second);
+}
+
 // Capture every alias-family tag (name:xx, official_name, alt_name,
 // short_name, old_name, loc_name, int_name, reg_name, ref, int_ref,
 // nat_ref — each plus per-language variants) on the given OSM entity
@@ -835,6 +1000,7 @@ static bool extract_poi(const Tags& tags,
 static uint32_t add_poi_point(double lat, double lng,
                               const char* name,
                               uint32_t category_id, uint8_t rank,
+                              uint8_t importance,
                               uint32_t parent_place_id) {
     if (!name || !*name) return UINT32_MAX;
     uint32_t poi_id = checked_u32(poi_points.size(), "poi_points id");
@@ -844,6 +1010,7 @@ static uint32_t add_poi_point(double lat, double lng,
     pt.name_id = strings.intern(name);
     pt.category_id = category_id;
     pt.rank = rank;
+    pt.importance = importance;
     pt.parent_place_id = parent_place_id;
     poi_points.push_back(pt);
 
@@ -856,24 +1023,6 @@ static uint32_t add_poi_point(double lat, double lng,
     return poi_id;
 }
 
-// Try to extract+emit a POI for the given OSM entity at (lat, lng).
-// Returns true when a POI was emitted (also captures i18n alternates
-// for the entity in that case).
-template <typename Tags>
-static bool try_emit_poi(double lat, double lng, const Tags& tags) {
-    const char* name = tags["name"];
-    if (!name || !*name) return false;
-    uint32_t cat_id = 0, parent_id = 0;
-    uint8_t rank = 0;
-    if (!extract_poi(tags, cat_id, rank, parent_id)) return false;
-    uint32_t poi_id = add_poi_point(lat, lng, name, cat_id, rank, parent_id);
-    if (poi_id != UINT32_MAX) {
-        collect_i18n_names(tags, ENTITY_POI, poi_id);
-        return true;
-    }
-    return false;
-}
-
 // Importance score from Nominatim-style prominence signals. Saturates
 // at 255 so it fits in u8. Values:
 //   - population: log10(pop)/8.0 * 100. log10(100M) = 8 ⇒ 100, 1M ⇒ 75,
@@ -884,6 +1033,11 @@ static bool try_emit_poi(double lat, double lng, const Tags& tags) {
 // population this commonly saturates for major world cities (75 + 30 +
 // 50 = 155, room remains for super-prominent capitals like Tokyo
 // where population alone hits 87).
+//
+// Used for both PlacePoint (places=city/town/village/...) and PoiPoint
+// (amenity/shop/tourism/...) — the formula is identical because both
+// use the same OSM signals, and the runtime ranks them on the same
+// 0..255 scale.
 template <typename Tags>
 static uint8_t compute_place_importance(const Tags& tags) {
     uint32_t score = 0;
@@ -904,6 +1058,25 @@ static uint8_t compute_place_importance(const Tags& tags) {
     if (tags["wikipedia"] != nullptr) score += 50;
 
     return static_cast<uint8_t>(std::min<uint32_t>(score, 255));
+}
+
+// Try to extract+emit a POI for the given OSM entity at (lat, lng).
+// Returns true when a POI was emitted (also captures i18n alternates
+// for the entity in that case).
+template <typename Tags>
+static bool try_emit_poi(double lat, double lng, const Tags& tags) {
+    const char* name = tags["name"];
+    if (!name || !*name) return false;
+    uint32_t cat_id = 0, parent_id = 0;
+    uint8_t rank = 0;
+    if (!extract_poi(tags, cat_id, rank, parent_id)) return false;
+    uint8_t importance = compute_place_importance(tags);
+    uint32_t poi_id = add_poi_point(lat, lng, name, cat_id, rank, importance, parent_id);
+    if (poi_id != UINT32_MAX) {
+        collect_i18n_names(tags, ENTITY_POI, poi_id);
+        return true;
+    }
+    return false;
 }
 
 // Returns the `place_id` the point was assigned to, or UINT32_MAX when
@@ -1270,6 +1443,7 @@ public:
                 uint32_t place_id = add_place_point(lat, lng, rank, importance, name);
                 if (place_id != UINT32_MAX) {
                     collect_i18n_names(node.tags(), ENTITY_PLACE, place_id);
+                    maybe_emit_english_exonym(node.tags(), ENTITY_PLACE, place_id);
                 }
             }
         }
@@ -1348,6 +1522,7 @@ public:
                         uint32_t place_id = add_place_point(clat, clng, rank, importance, way_name);
                         if (place_id != UINT32_MAX) {
                             collect_i18n_names(way.tags(), ENTITY_PLACE, place_id);
+                            maybe_emit_english_exonym(way.tags(), ENTITY_PLACE, place_id);
                         }
                     }
                 }
@@ -1454,6 +1629,7 @@ public:
                         cent_lat, cent_lng, prank, pimp, pname);
                     if (place_id != UINT32_MAX) {
                         collect_i18n_names(area.tags(), ENTITY_PLACE, place_id);
+                        maybe_emit_english_exonym(area.tags(), ENTITY_PLACE, place_id);
                     }
                 }
             }
@@ -1522,6 +1698,7 @@ public:
                     vertices, name_str.c_str(), admin_level, country_code);
                 if (poly_id != UINT32_MAX) {
                     collect_i18n_names(area.tags(), ENTITY_ADMIN, poly_id);
+                    maybe_emit_english_exonym(area.tags(), ENTITY_ADMIN, poly_id);
                 }
             }
             for (const auto& inner_ring : area.inner_rings(outer_ring)) {
