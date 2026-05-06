@@ -15,7 +15,7 @@
 //! Outputs (all CSV, with header rows):
 //!   streets.csv           id, osm_way_id, name, node_count, midpoint_lat, midpoint_lng
 //!   place_points.csv      id, name, rank, importance, lat, lng
-//!   admin_polygons.csv    id, name, admin_level, country_code, vertex_count, area_sq_deg
+//!   admin_polygons.csv    id, name, admin_level, importance, country_code, vertex_count, area_sq_deg
 //!   addr_points.csv       id, housenumber, street_id, street_name, lat, lng
 //!   interp_ways.csv       id, street_id, street_name, start_number, end_number, interpolation, node_count
 //!   i18n_names.csv        entity_kind, entity_id, lang, localized_name
@@ -203,7 +203,7 @@ fn dump_admin_polygons(idx: &Index, path: &Path) -> Result<usize, String> {
     let polys: &[AdminPolygon] = as_typed_slice(&idx.admin_polygons);
 
     let mut f = new_csv(path)?;
-    writeln!(f, "id,name,admin_level,country_code,vertex_count,area_sq_deg").map_err(io_err)?;
+    writeln!(f, "id,name,admin_level,importance,country_code,vertex_count,area_sq_deg").map_err(io_err)?;
 
     for (id, p) in polys.iter().enumerate() {
         let name = idx.get_string(p.name_id);
@@ -215,9 +215,10 @@ fn dump_admin_polygons(idx: &Index, path: &Path) -> Result<usize, String> {
         };
         writeln!(
             f,
-            "{id},{name},{lvl},{cc},{vc},{area:.6}",
+            "{id},{name},{lvl},{imp},{cc},{vc},{area:.6}",
             name = csv_escape(name),
             lvl = p.admin_level,
+            imp = p.importance,
             cc = cc,
             vc = p.vertex_count,
             area = p.area,

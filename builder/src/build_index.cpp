@@ -89,13 +89,22 @@ struct InterpWay {
     uint8_t interpolation;
 };
 
+// `importance` is the same Nominatim-style 0..255 prominence score that
+// PlacePoint and PoiPoint carry — derived from `population` (log scale),
+// `wikidata`, and `wikipedia` tags. Closes the gap where major cities
+// represented as admin polygons (Arlington County VA, Münster NRW,
+// Cornwall ON) were losing same-name disambiguation to tiny `place=town`
+// siblings because admin docs entered the ranker with importance=0.
+// Slot it into one byte of the existing 3-byte padding after
+// `admin_level` — the struct stays 24 bytes (binary-format-stable).
 struct AdminPolygon {
-    uint32_t vertex_offset;
-    uint16_t vertex_count;
-    uint32_t name_id;
-    uint8_t admin_level;
-    float area;
-    uint16_t country_code;
+    uint32_t vertex_offset;     // 4
+    uint16_t vertex_count;      // 2
+    uint32_t name_id;           // 4
+    uint8_t admin_level;        // 1
+    uint8_t importance;         // 1 — 0..255, see compute_place_importance
+    float area;                 // 4
+    uint16_t country_code;      // 2
 };
 
 struct NodeCoord {
@@ -1379,18 +1388,73 @@ static bool process_address_tags(double lat, double lng, const Tags& tags,
 // the runtime will use), or UINT32_MAX when the polygon was skipped.
 // Callers can pass the id plus the source OSM area's tag list into
 // `collect_i18n_names` to capture localized name:xx.
+// Approximate polygon area in km², projecting lat/lng into a local
+// equal-distance grid centred on the polygon's centroid. Used only for
+// the small-country vertex-cap heuristic in `add_admin_polygon` — it's
+// not an exact spheroidal area, but the relative ordering across
+// countries is what matters and the local projection is accurate to a
+// few percent at country scale (the cosine-of-latitude simplification
+// stops being useful at continental scale, which is precisely where
+// the cap doesn't bite anyway).
+static float polygon_area_km2(const std::vector<std::pair<double,double>>& vertices) {
+    size_t n = vertices.size();
+    if (n < 3) return 0.0f;
+
+    double sum_lat = 0.0;
+    for (const auto& [lat, lng] : vertices) sum_lat += lat;
+    double centroid_lat = sum_lat / static_cast<double>(n);
+    double cos_lat = std::cos(centroid_lat * M_PI / 180.0);
+    constexpr double kKmPerDegLat = 111.32;
+
+    bool crosses_antimeridian = false;
+    for (size_t i = 0; i < n; i++) {
+        size_t j = (i + 1) % n;
+        if (std::fabs(vertices[i].second - vertices[j].second) > 180.0) {
+            crosses_antimeridian = true;
+            break;
+        }
+    }
+    auto lng_at = [&](size_t i) -> double {
+        double lng = vertices[i].second;
+        if (crosses_antimeridian && lng < 0.0) lng += 360.0;
+        return lng;
+    };
+
+    double area = 0.0;
+    for (size_t i = 0; i < n; i++) {
+        size_t j = (i + 1) % n;
+        double xi = lng_at(i) * cos_lat * kKmPerDegLat;
+        double yi = vertices[i].first * kKmPerDegLat;
+        double xj = lng_at(j) * cos_lat * kKmPerDegLat;
+        double yj = vertices[j].first * kKmPerDegLat;
+        area += xi * yj - xj * yi;
+    }
+    return static_cast<float>(std::fabs(area) / 2.0);
+}
+
 static uint32_t add_admin_polygon(const std::vector<std::pair<double,double>>& vertices,
                                    const char* name, uint8_t admin_level,
-                                   const char* country_code) {
-    // Vertex cap scaled by admin_level. Country borders (level 2) need
-    // high fidelity because reverse-geocode failures cluster within a
-    // few km of international borders — at 500 vertices a country
-    // outline drifts kilometres in places, putting query points on
-    // the wrong side of the border. States/provinces (level 4) need
-    // moderate detail; suburbs/cities (level 8+) tolerate aggressive
-    // simplification because they're rarely the deciding boundary.
+                                   const char* country_code,
+                                   uint8_t importance) {
+    // Vertex cap scaled by admin_level, with a special bump for small
+    // countries at level 2. Country borders need high fidelity because
+    // reverse-geocode failures cluster within a few km of international
+    // borders — at 8000 vertices a small country like Belgium drifts
+    // hundreds of metres in places, putting query points on the wrong
+    // side. Vertex density (vertices per km of border) is what actually
+    // matters; small countries have less border to spend the budget on,
+    // so a flat 8000 cap shortchanges them relative to large countries
+    // that still get good per-km fidelity at 8000. Bumping ≤500K km²
+    // countries to 16000 (and ≤100K to 32000) closes the BE/NL/LU/CH
+    // border-bleed failures observed in bench-accuracy. The hard cap
+    // of 32000 stays well under uint16_t's 65535 vertex_count limit.
     size_t max_vertices;
-    if (admin_level <= 2)      max_vertices = 8000;  // countries
+    if (admin_level <= 2) {
+        float area_km2 = polygon_area_km2(vertices);
+        if (area_km2 <= 100000.0f)      max_vertices = 32000;  // BE/NL/CH/LU
+        else if (area_km2 <= 500000.0f) max_vertices = 16000;  // DE/IT/GB/PL/JP
+        else                            max_vertices = 8000;   // FR/ES/RU/US/...
+    }
     else if (admin_level <= 4) max_vertices = 3000;  // states/provinces
     else if (admin_level <= 6) max_vertices = 1500;  // counties/regions
     else                       max_vertices = 500;   // cities/districts/suburbs
@@ -1409,6 +1473,7 @@ static uint32_t add_admin_polygon(const std::vector<std::pair<double,double>>& v
     poly.vertex_count = static_cast<uint16_t>(std::min(simplified.size(), size_t(65535)));
     poly.name_id = strings.intern(name);
     poly.admin_level = admin_level;
+    poly.importance = importance;
     poly.area = polygon_area(simplified);
     poly.country_code = (country_code && country_code[0] && country_code[1])
         ? static_cast<uint16_t>((country_code[0] << 8) | country_code[1])
@@ -1694,8 +1759,10 @@ public:
                 }
             }
             if (vertices.size() >= 3) {
+                uint8_t importance = compute_place_importance(area.tags());
                 uint32_t poly_id = add_admin_polygon(
-                    vertices, name_str.c_str(), admin_level, country_code);
+                    vertices, name_str.c_str(), admin_level, country_code,
+                    importance);
                 if (poly_id != UINT32_MAX) {
                     collect_i18n_names(area.tags(), ENTITY_ADMIN, poly_id);
                     maybe_emit_english_exonym(area.tags(), ENTITY_ADMIN, poly_id);

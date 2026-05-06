@@ -134,11 +134,12 @@ layout. Run `sizeof/alignof` in Rust to verify locally:
 | Struct | Size | Align | File |
 |---|---:|---:|---|
 | `WayHeader` | 12 | 4 | `street_ways.bin`, `interp_ways.bin` |
-| `AddrPoint` | 16 | 4 | `addr_points.bin` |
-| `InterpWay` | 20 | 4 | `interp_ways.bin` |
-| `AdminPolygon` | 20 | 4 | `admin_polygons.bin` |
+| `AddrPoint` | 32 | 4 | `addr_points.bin` |
+| `InterpWay` | 24 | 4 | `interp_ways.bin` |
+| `AdminPolygon` | 24 | 4 | `admin_polygons.bin` |
 | `NodeCoord` | 8 | 4 | `street_nodes.bin`, `admin_vertices.bin`, `interp_nodes.bin`, `wof_countries_vertices.bin` |
 | `PlacePoint` | 16 | 4 | `place_points.bin` |
+| `PoiPoint` | 24 | 4 | `poi_points.bin` |
 | `I18nRecord` | 16 | 4 | `i18n_names.bin` |
 | `WofCountry` | 24 | 4 | `wof_countries.bin` |
 | `AutocompleteEntry` | 20 | 4 | `fst_<cc>.bin`, `fst_unified.bin` |
@@ -199,20 +200,35 @@ pub struct AdminPolygon {
     pub vertex_count: u16,    // number of NodeCoords in the outer ring
     pub name_id: u32,         // into strings.bin
     pub admin_level: u8,      // OSM admin_level (2–10; 11 for postal_code boundaries)
+    pub importance: u8,       // 0..255 prominence (population log + wikidata + wikipedia)
     pub area: f32,            // shoelace area in deg² (not geodesic)
     pub country_code: u16,    // packed ISO 3166-1 alpha-2, 0 if unset
 }
 ```
+
+`importance` mirrors the Nominatim-style score `PlacePoint` and
+`PoiPoint` carry. The forward-search ranker uses it as an additive
+bonus so a major city represented as an admin polygon (Arlington
+County VA, Münster NRW) wins same-name disambiguation against tiny
+`place=town` siblings — those previously beat it because admin docs
+entered the ranker with `importance=0`. The byte was carved out of
+the original 3-byte padding slot after `admin_level`; the on-disk
+struct stays 24 bytes (binary-format-stable).
 
 Vertices in `admin_vertices.bin` are densely packed `NodeCoord`
 records; each polygon's ring is `&admin_vertices[vertex_offset..vertex_offset+vertex_count]`.
 
 **Note**: `vertex_count` is `u16` (max 65 535). Very large country
 polygons get Douglas-Peucker simplified in the C++ builder before
-they're written — our UK-mainland-sized rings fit under the cap
-after simplification. The WoF importer handles the same concern
-differently (see `wof_countries.bin` below: `vertex_count` widened
-to `u32`).
+they're written. The cap is graduated by `admin_level` and (at
+level 2) by approximate country area — small countries like
+Belgium, Netherlands, Switzerland, Luxembourg get 32 000 vertices,
+mid-size countries (Germany, Italy, GB, Japan, Poland) 16 000, and
+the rest 8 000. Vertex density (vertices per km of border) is what
+actually matters at international borders, and a flat 8 000 cap
+shortchanges small countries with disproportionate per-km border
+length. The WoF importer handles the same concern differently
+(see `wof_countries.bin` below: `vertex_count` widened to `u32`).
 
 ### `addr_points.bin` + `addr_entries.bin`
 

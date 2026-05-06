@@ -35,7 +35,9 @@ fn interp_way_size() {
 
 #[test]
 fn admin_polygon_size() {
-    // u32 + u16 + (2 pad) + u32 + u8 + (3 pad) + f32 + u16 + (2 pad) = 24
+    // u32 + u16 + (2 pad) + u32 + u8 + u8 + (2 pad) + f32 + u16 + (2 pad) = 24
+    // (one byte of the original 3-byte padding after admin_level was
+    //  repurposed as the new `importance` field — size unchanged.)
     assert_eq!(size_of::<AdminPolygon>(), 24);
     assert_eq!(align_of::<AdminPolygon>(), 4);
 }
@@ -106,6 +108,43 @@ fn place_point_field_offsets_round_trip() {
         p.importance, 200,
         "importance reads wrong byte — likely swapped with pad"
     );
+}
+
+#[test]
+fn admin_polygon_field_offsets_round_trip() {
+    // Layout the C++ builder writes. Field order matches
+    // builder/src/build_index.cpp `struct AdminPolygon`:
+    //   u32 vertex_offset | u16 vertex_count | 2B pad | u32 name_id |
+    //   u8 admin_level | u8 importance | 2B pad | f32 area |
+    //   u16 country_code | 2B pad
+    //
+    // `importance` lives in what used to be padding; if it ever
+    // accidentally swaps with the admin_level byte (or the bytes that
+    // remain padding), this round-trip catches it before a 13h rebuild
+    // ships an admin index where every polygon ranks at importance=0.
+    let mut bytes = [0u8; 24];
+    bytes[0..4].copy_from_slice(&0xDEADBEEF_u32.to_le_bytes());   // vertex_offset
+    bytes[4..6].copy_from_slice(&0x1234_u16.to_le_bytes());       // vertex_count
+    // bytes[6..8] = pad
+    bytes[8..12].copy_from_slice(&0xCAFEBABE_u32.to_le_bytes());  // name_id
+    bytes[12] = 6;                                                // admin_level
+    bytes[13] = 200;                                              // importance
+    // bytes[14..16] = pad
+    bytes[16..20].copy_from_slice(&12345.5_f32.to_le_bytes());    // area
+    bytes[20..22].copy_from_slice(&0xABCD_u16.to_le_bytes());     // country_code
+    // bytes[22..24] = pad
+
+    let p: AdminPolygon = cast_one(&bytes);
+    assert_eq!(p.vertex_offset, 0xDEADBEEF, "vertex_offset reads wrong field");
+    assert_eq!(p.vertex_count, 0x1234, "vertex_count reads wrong field");
+    assert_eq!(p.name_id, 0xCAFEBABE, "name_id reads wrong field");
+    assert_eq!(p.admin_level, 6, "admin_level reads wrong byte");
+    assert_eq!(
+        p.importance, 200,
+        "importance reads wrong byte — likely swapped with admin_level or pad"
+    );
+    assert!((p.area - 12345.5).abs() < 1e-1, "area mismatch: {}", p.area);
+    assert_eq!(p.country_code, 0xABCD, "country_code reads wrong field");
 }
 
 #[test]
