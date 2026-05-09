@@ -1751,6 +1751,22 @@ public:
         //
         // The inner-ring count is printed in the summary so an operator
         // can tell how much of their build is affected.
+        //
+        // Pre-pass to materialise outer-ring vertex sets + decide
+        // whether to collapse them. Cities like Greensboro NC have a
+        // single boundary relation with 41 outer rings (annexation
+        // parcels + ETJ + city limits), each currently written as a
+        // separate AdminPolygon with the same name + importance.
+        // Forward search for "Greensboro" then sees 41 same-score
+        // candidates scattered across the metro and the bias re-rank
+        // can pick a fragment over the canonical city polygon. Collapse
+        // to the largest ring when admin_level >= 4 AND there are more
+        // than `kCollapseRingThreshold` rings — that captures
+        // pathological proliferation while preserving legitimate
+        // multi-island geometry (Indonesia at admin_level=2 is
+        // excluded by the level gate; Hawaii Maui County at
+        // admin_level=6 with 3 islands stays under the threshold).
+        std::vector<std::vector<std::pair<double,double>>> outer_vertex_sets;
         for (const auto& outer_ring : area.outer_rings()) {
             std::vector<std::pair<double,double>> vertices;
             for (const auto& node_ref : outer_ring) {
@@ -1758,6 +1774,34 @@ public:
                     vertices.emplace_back(node_ref.location().lat(), node_ref.location().lon());
                 }
             }
+            if (vertices.size() >= 3) {
+                outer_vertex_sets.push_back(std::move(vertices));
+            }
+            for (const auto& inner_ring : area.inner_rings(outer_ring)) {
+                (void)inner_ring;
+                inner_ring_count_++;
+            }
+        }
+
+        constexpr size_t kCollapseRingThreshold = 10;
+        if (admin_level >= 4 && outer_vertex_sets.size() > kCollapseRingThreshold) {
+            // Keep only the largest ring by polygon_area.
+            size_t largest_idx = 0;
+            float largest_area = polygon_area(outer_vertex_sets[0]);
+            for (size_t i = 1; i < outer_vertex_sets.size(); ++i) {
+                float a = polygon_area(outer_vertex_sets[i]);
+                if (a > largest_area) {
+                    largest_area = a;
+                    largest_idx = i;
+                }
+            }
+            std::vector<std::vector<std::pair<double,double>>> collapsed;
+            collapsed.push_back(std::move(outer_vertex_sets[largest_idx]));
+            outer_vertex_sets = std::move(collapsed);
+            collapsed_admin_count_++;
+        }
+
+        for (const auto& vertices : outer_vertex_sets) {
             if (vertices.size() >= 3) {
                 uint8_t importance = compute_place_importance(area.tags());
                 uint32_t poly_id = add_admin_polygon(
@@ -1767,10 +1811,6 @@ public:
                     collect_i18n_names(area.tags(), ENTITY_ADMIN, poly_id);
                     maybe_emit_english_exonym(area.tags(), ENTITY_ADMIN, poly_id);
                 }
-            }
-            for (const auto& inner_ring : area.inner_rings(outer_ring)) {
-                (void)inner_ring;
-                inner_ring_count_++;
             }
         }
 
@@ -1785,6 +1825,7 @@ public:
     uint64_t interp_count() const { return interp_count_; }
     uint64_t admin_count() const { return admin_count_; }
     uint64_t inner_ring_count() const { return inner_ring_count_; }
+    uint64_t collapsed_admin_count() const { return collapsed_admin_count_; }
 
 private:
     uint64_t way_count_ = 0;
@@ -1792,6 +1833,7 @@ private:
     uint64_t interp_count_ = 0;
     uint64_t admin_count_ = 0;
     uint64_t inner_ring_count_ = 0;
+    uint64_t collapsed_admin_count_ = 0;
 
     void process_building_address(const osmium::Way& way) {
         const auto& wnodes = way.nodes();
@@ -2536,6 +2578,12 @@ static int run_build(int argc, char* argv[]) {
                   << " inner rings (holes) seen; not indexed — area ranking"
                   << " resolves enclaves, pure hole attribution is a known"
                   << " limitation" << std::endl;
+    }
+    if (handler.collapsed_admin_count() > 0) {
+        std::cerr << "  " << handler.collapsed_admin_count()
+                  << " admin areas collapsed to largest outer ring (>10"
+                  << " rings, admin_level >= 4); fixes Greensboro-style"
+                  << " name proliferation in forward search" << std::endl;
     }
     std::cerr << "  " << place_count_total << " place=* points" << std::endl;
     std::cerr << "  " << poi_count_total << " POIs" << std::endl;
