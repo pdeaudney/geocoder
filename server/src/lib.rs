@@ -19,6 +19,7 @@ pub mod autocomplete;
 pub mod fetcher;
 pub mod geo;
 pub mod gnaf;
+pub mod housenumber;
 pub mod i18n;
 pub mod ip_geo;
 pub mod h3_cell;
@@ -1066,12 +1067,12 @@ impl Index {
             Self::for_each_entry(&self.addr_entries, offsets.addr, |id| {
                 let p = &all_points[id as usize];
                 let p_hn = self.get_string(p.housenumber_id);
-                // eq_ignore_ascii_case is zero-alloc — both sides are compared
-                // byte-by-byte with per-byte ASCII-lowercase folding. In
-                // dense cities this loop visits hundreds of candidates per
-                // request; the old `p_hn.to_ascii_lowercase() != hn_needle`
-                // allocated a String per visit.
-                if !p_hn.eq_ignore_ascii_case(hn_needle) {
+                // Range-aware match: "256" hits stored "255-257" and
+                // vice versa. See `crate::housenumber` for the full
+                // rule set. Falls back to case-insensitive exact
+                // equality when neither side parses as a numeric
+                // range.
+                if !crate::housenumber::housenumber_matches(hn_needle, p_hn) {
                     return;
                 }
                 if let Some(hint) = street_hint {
