@@ -1801,13 +1801,24 @@ impl Forward {
         //     pass over a larger TopDocs heap — adds <1 ms at
         //     planet scale, paid only on bias-enabled queries.
         let oversample = if q.bias.is_some() {
-            // Cap raised from 500 → 1000 after Arlington (us) /
-            // Cornwall (ca) / Aurora (us) failures: highly-ambiguous
-            // toponyms in the US/UK can have 200+ name-only matches
-            // per country, and the right answer occasionally sits past
-            // BM25-rank 500. The extra 500 docs are cheap (TopDocs is
-            // a heap), and only paid on bias-enabled queries.
-            (limit * 30).min(1_000)
+            // Cap raised again 1 000 → 3 000 after the second
+            // bias-disambiguation regression sweep showed Arlington
+            // County VA at BM25 rank 600-1000 in the US shard for
+            // q="Arlington". The single-token-name docs ("Arlington"
+            // PlacePoints in 50 US towns + Arlington Township admin
+            // polygons in dozens of states + thousands of Arlington
+            // Avenue/Street/Road street docs) saturate the prior
+            // 1 000-doc heap before the right answer appears, so
+            // bias re-rank never sees it. Per-doc fetch cost matters
+            // here (each TopDocs hit triggers `searcher.doc(addr)`
+            // which decompresses the segment), so this is the upper
+            // bound we'll grow before refactoring to a custom
+            // FAST-field collector that scores during the segment
+            // pass and only fetches the post-rank top 50. Latency
+            // budget for bias queries is ~50 ms; at planet scale a
+            // 3 000-doc fetch loop measures ~15-25 ms on warm cache.
+            // Only paid on bias-enabled queries.
+            (limit * 30).min(3_000)
         } else {
             (limit * 3).min(150)
         };
