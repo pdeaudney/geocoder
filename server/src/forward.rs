@@ -258,6 +258,61 @@ fn wide_coord_bucket(lat: f64, lng: f64) -> (i32, i32) {
     ((lat * 2.5).round() as i32, (lng * 2.5).round() as i32)
 }
 
+/// Synthesize a short form from a compound canonical name. OSM
+/// convention puts `short_name` on the boundary relation rather than
+/// the `place=city` node for many big cities, so the place_point's
+/// i18n alternates often don't include the obvious shortening even
+/// when the city has one. Confirmed against the deployed planet
+/// build: Frankfurt am Main (entity_id 12084) has `short_name=Frankfurt`
+/// only on the admin polygon — its place_point's i18n_names rows
+/// carry `name:en=Frankfurt` and friends but no language-less
+/// "Frankfurt" short alias from a `short_name` tag on the node.
+///
+/// Heuristic: when the canonical name matches `<X> <prep> <Y>` for
+/// a known compound preposition, emit `<X>` as a synthetic short
+/// alt. Captures Frankfurt am Main, Newcastle upon Tyne, Stoke on
+/// Trent, Frankfurt an der Oder, etc. Returns `None` when no
+/// pattern matches — caller should fall back to whatever short
+/// alias the i18n alternates table provides (which already covers
+/// `name:en=Frankfurt` for the same row, so the synthesis is a
+/// belt-and-braces measure on top of i18n).
+///
+/// Does NOT split on hyphens — French compound names like
+/// "Boulogne-sur-Mer" use hyphenated prepositions, but tantivy's
+/// SimpleTokenizer already splits hyphens into separate tokens, so
+/// the leading part is matchable as-is via the standard name field.
+fn synthesize_short_form(name: &str) -> Option<&str> {
+    let lower = name.to_ascii_lowercase();
+    // Compound prepositions surrounded by spaces. The first match
+    // wins (left-to-right scan), so we order by likely frequency in
+    // place names. Lowercase only — the input was already
+    // ascii-folded for the lookup.
+    static COMPOUND_PREPS: &[&str] = &[
+        " am ",      // Frankfurt am Main, Halle (Saale) am Saale
+        " an ",      // Frankfurt an der Oder
+        " upon ",    // Newcastle upon Tyne, Stratford upon Avon
+        " on ",      // Stoke on Trent, Newcastle on Tyne (hyphenated form lost on hyphen-split anyway)
+        " under ",   // Newcastle under Lyme
+        " im ",      // Speyer im Rhein
+        " bei ",     // Munich bei München
+        " sur ",     // Boulogne sur Mer (space form)
+        " of ",      // Isle of Wight, City of London
+        " near ",
+        " by ",
+    ];
+    for prep in COMPOUND_PREPS {
+        if let Some(idx) = lower.find(prep) {
+            // Slice the original `name` (preserves case) up to the
+            // preposition. Trim incidental trailing whitespace.
+            let leading = name[..idx].trim();
+            if !leading.is_empty() && leading.len() < name.len() {
+                return Some(leading);
+            }
+        }
+    }
+    None
+}
+
 /// For each `(name_id, ~22 km bucket)` cluster of admin polygons at
 /// admin_level 4-10, keep only the polygon with the largest `area` —
 /// that's typically the canonical city-proper outline (not an
@@ -285,6 +340,7 @@ fn build_admin_metro_keep_set(
 ) -> std::collections::HashSet<u32> {
     let mut best_per_cluster: std::collections::HashMap<(u32, i32, i32), (u32, f32)> =
         std::collections::HashMap::new();
+    let mut considered = 0usize;
     for (poly_id, poly) in polys.iter().enumerate() {
         if poly.admin_level < 4 || poly.admin_level > 10 {
             continue;
@@ -297,6 +353,7 @@ fn build_admin_metro_keep_set(
         if cnt == 0 || off + cnt > admin_vertices.len() {
             continue;
         }
+        considered += 1;
         let (lat, lng) = polygon_centroid(&admin_vertices[off..off + cnt]);
         let (b_lat, b_lng) = wide_coord_bucket(lat, lng);
         let key = (poly.name_id, b_lat, b_lng);
@@ -307,6 +364,13 @@ fn build_admin_metro_keep_set(
             *entry = (poly_id as u32, poly.area);
         }
     }
+    let kept = best_per_cluster.len();
+    eprintln!(
+        "[forward] admin_metro_dedup: considered {} admin polygons (level 4-10), kept {} unique (name, ~44 km bucket) clusters — dropped {} duplicates",
+        considered,
+        kept,
+        considered.saturating_sub(kept)
+    );
     best_per_cluster.values().map(|v| v.0).collect()
 }
 
@@ -1228,6 +1292,37 @@ fn tantivy_doc(
                 alt_indexed.push(' ');
             }
             alt_indexed.push_str(tok);
+        }
+    }
+
+    // Synthesize a short form from the canonical name when it matches
+    // a known compound preposition pattern (Frankfurt am Main →
+    // "Frankfurt"). Belt-and-braces: even when i18n_names doesn't
+    // include `short_name=Frankfurt` (because OSM put it on the
+    // boundary relation, not the place=city node), this synthesis
+    // adds the leading toponym to alt_name so `q=Frankfurt` matches
+    // the place_point with single-token BM25 strength on top of the
+    // length-norm-penalised name field. Treated as a short form for
+    // dedup purposes (bypasses the name-token check).
+    if let Some(short) = synthesize_short_form(name) {
+        let canonical_short = canonicalise_phrase(short);
+        let trimmed_short = canonical_short.trim();
+        if !trimmed_short.is_empty() {
+            let short_tokens: Vec<&str> = trimmed_short.split_whitespace().collect();
+            // Only treat as a short form when the synthesised piece
+            // tokenises to a single token. Multi-token leadings (e.g.
+            // "City of London" → "City of") aren't short forms in the
+            // usual sense and risk polluting alt_name.
+            if short_tokens.len() == 1 {
+                let tok = short_tokens[0];
+                let key = ascii_fold(tok).to_ascii_lowercase();
+                if !key.is_empty() && seen_alt.insert(key) {
+                    if !alt_indexed.is_empty() {
+                        alt_indexed.push(' ');
+                    }
+                    alt_indexed.push_str(tok);
+                }
+            }
         }
     }
     // (No second-pass dedup — the per-alt loop above already strips
