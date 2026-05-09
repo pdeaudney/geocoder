@@ -1801,24 +1801,30 @@ impl Forward {
         //     pass over a larger TopDocs heap — adds <1 ms at
         //     planet scale, paid only on bias-enabled queries.
         let oversample = if q.bias.is_some() {
-            // Cap raised again 1 000 → 3 000 after the second
-            // bias-disambiguation regression sweep showed Arlington
-            // County VA at BM25 rank 600-1000 in the US shard for
-            // q="Arlington". The single-token-name docs ("Arlington"
-            // PlacePoints in 50 US towns + Arlington Township admin
-            // polygons in dozens of states + thousands of Arlington
-            // Avenue/Street/Road street docs) saturate the prior
-            // 1 000-doc heap before the right answer appears, so
-            // bias re-rank never sees it. Per-doc fetch cost matters
-            // here (each TopDocs hit triggers `searcher.doc(addr)`
-            // which decompresses the segment), so this is the upper
-            // bound we'll grow before refactoring to a custom
-            // FAST-field collector that scores during the segment
-            // pass and only fetches the post-rank top 50. Latency
-            // budget for bias queries is ~50 ms; at planet scale a
-            // 3 000-doc fetch loop measures ~15-25 ms on warm cache.
+            // Floor at 3 000 docs — NOT a cap. The previous
+            // `(limit * 30).min(3 000)` formula was a no-op for the
+            // bias-disambiguation regression: it defaults to
+            // limit=10, which gives `min(300, 3000) = 300` over-fetch.
+            // Index-dump verification on the deployed planet build
+            // confirmed Arlington County VA exists at importance=147
+            // and a `name=Arlington` PlacePoint sits at (38.89,
+            // -77.08) — but it ranks at BM25 position 600-1000 in
+            // the US shard because Tantivy returns same-score
+            // single-token "Arlington" docs (~78 admin polygons +
+            // ~50 PlacePoints + thousands of `Arlington Avenue/St`
+            // street docs) in essentially doc-id order. With only
+            // 300 over-fetched docs, the right answer never reaches
+            // `boosted_score` regardless of how high the importance-
+            // bonus cap is set. The 3 000-doc floor guarantees the
+            // bias re-rank sees enough material to flip the obvious
+            // cases. Cost: each TopDocs hit triggers
+            // `searcher.doc(addr)` which decompresses the segment;
+            // at planet scale a 3 000-doc fetch loop measures
+            // ~15-25 ms on warm cache, comfortably inside the
+            // ~50 ms bias-query budget. The 10 000-doc upper bound
+            // protects against pathological large-limit queries.
             // Only paid on bias-enabled queries.
-            (limit * 30).min(3_000)
+            (limit * 30).max(3_000).min(10_000)
         } else {
             (limit * 3).min(150)
         };
