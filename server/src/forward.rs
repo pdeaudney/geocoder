@@ -996,8 +996,27 @@ pub fn build_partitioned_with_heap(
             let t_index = TIndex::create_in_dir(&dir, schema_handle.schema.clone())
                 .map_err(|e| format!("create tantivy {}: {}", dir.display(), e))?;
             register_tokenizer(&t_index);
+            // Per-writer thread count scales with bucket size. Small
+            // countries (~< 1M docs) finish in seconds with a single
+            // thread, and oversubscribing them fights the outer
+            // par_iter for cores. Big country shards (US, GB, DE, FR
+            // at planet scale = 5-50M docs each) become the long pole
+            // once smaller shards finish: with 1 writer thread per
+            // shard, the final phase ran on a single core for hours.
+            // Bumping the long-pole shards to 4 writer threads lets
+            // tantivy parallelise segment construction across the
+            // remaining cores, ~3-4× speedup on the tail. The
+            // crossover at 1M docs is rough but matches the bucket-
+            // size distribution at planet scale (only US/GB/DE/FR/IT/
+            // ES sit above it). Operators on memory-tight hosts can
+            // override via TANTIVY_WRITER_THREADS=N (concurrent peak
+            // = N × heap_bytes per active long-pole shard).
+            let writer_threads = std::env::var("TANTIVY_WRITER_THREADS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or_else(|| if docs.len() >= 1_000_000 { 4 } else { 1 });
             let mut writer = t_index
-                .writer_with_num_threads(1, heap_bytes)
+                .writer_with_num_threads(writer_threads, heap_bytes)
                 .map_err(|e| format!("tantivy writer: {e}"))?;
 
             let mut stats = BuildStats::default();
