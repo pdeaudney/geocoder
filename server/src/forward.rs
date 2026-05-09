@@ -233,6 +233,74 @@ fn coord_bucket(lat: f64, lng: f64) -> (i32, i32) {
     ((lat * 10.0).round() as i32, (lng * 10.0).round() as i32)
 }
 
+/// Wider bucket (~22 km) for admin-vs-admin metro dedup. The C++
+/// builder emits one `AdminPolygon` per outer ring of an OSM
+/// boundary relation; for cities like Greensboro NC whose boundary
+/// relation has 41 outer rings (annexation parcels + ETJ + city
+/// limits), that produces 41 same-name admin polygons scattered
+/// across the metro that all match BM25 equally for `q=Greensboro`.
+/// The bias re-rank picks whichever fragment happens to combine best
+/// importance + distance instead of the canonical place_point. The
+/// wider bucket collapses metro-scale duplicates while preserving
+/// distinct same-name admins in different metros (Greensboro NC vs
+/// Greensboro NY ~700 km apart fall in different buckets).
+#[inline]
+fn wide_coord_bucket(lat: f64, lng: f64) -> (i32, i32) {
+    ((lat * 5.0).round() as i32, (lng * 5.0).round() as i32)
+}
+
+/// For each `(name_id, ~22 km bucket)` cluster of admin polygons at
+/// admin_level 4-10, keep only the polygon with the largest `area` —
+/// that's typically the canonical city-proper outline (not an
+/// annexation parcel or ETJ extension). Returns the set of `poly_id`s
+/// to keep.
+///
+/// Skipped:
+///   - admin_level < 4 (countries) — multi-polygon countries like
+///     Indonesia / Russia / Greece legitimately have many outer rings
+///     for islands; the country-level lookup needs all of them.
+///   - admin_level > 10 (postal codes) — already gated out below; the
+///     range mirrors the admin doc loop's filter.
+///
+/// Tradeoff: at admin_level 4-6, sub-national admins with legitimate
+/// multi-island geometry (Hawaii Maui County = Maui + Lanai +
+/// Kahoolawe) will lose their secondary islands. That's acceptable for
+/// forward-search ranking — a query for "Maui County" still matches
+/// the main island's polygon and resolves to the right county. The
+/// reverse-geocode path uses `admin_polygons.bin` directly (not this
+/// dedup), so reverse-lookup of a Lanai-island coord still works.
+fn build_admin_metro_keep_set(
+    polys: &[crate::AdminPolygon],
+    admin_vertices: &[NodeCoord],
+    idx: &crate::Index,
+) -> std::collections::HashSet<u32> {
+    let mut best_per_cluster: std::collections::HashMap<(u32, i32, i32), (u32, f32)> =
+        std::collections::HashMap::new();
+    for (poly_id, poly) in polys.iter().enumerate() {
+        if poly.admin_level < 4 || poly.admin_level > 10 {
+            continue;
+        }
+        if idx.get_string(poly.name_id).is_empty() {
+            continue;
+        }
+        let off = poly.vertex_offset as usize;
+        let cnt = poly.vertex_count as usize;
+        if cnt == 0 || off + cnt > admin_vertices.len() {
+            continue;
+        }
+        let (lat, lng) = polygon_centroid(&admin_vertices[off..off + cnt]);
+        let (b_lat, b_lng) = wide_coord_bucket(lat, lng);
+        let key = (poly.name_id, b_lat, b_lng);
+        let entry = best_per_cluster
+            .entry(key)
+            .or_insert((poly_id as u32, poly.area));
+        if poly.area > entry.1 {
+            *entry = (poly_id as u32, poly.area);
+        }
+    }
+    best_per_cluster.values().map(|v| v.0).collect()
+}
+
 /// Build a single monolithic tantivy index at `dest`. Everything goes in
 /// one bucket — queries are filtered by the indexed `country_code` field
 /// rather than dispatched to a different tantivy per country.
@@ -359,12 +427,19 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
     // are skipped: too generic, or non-name codes.
     let polys: &[crate::AdminPolygon] = as_typed_slice(&idx.admin_polygons);
     let admin_vertices: &[NodeCoord] = as_typed_slice(&idx.admin_vertices);
+    let admin_metro_keep = build_admin_metro_keep_set(polys, admin_vertices, &idx);
     for (poly_id, poly) in polys.iter().enumerate() {
         if poly.admin_level < 4 || poly.admin_level > 10 {
             continue;
         }
         let name = idx.get_string(poly.name_id);
         if name.is_empty() {
+            continue;
+        }
+        // Metro-cluster dedup: skip same-name polygon fragments that
+        // aren't the largest in their (~22 km) cluster. See
+        // `build_admin_metro_keep_set` for rationale.
+        if !admin_metro_keep.contains(&(poly_id as u32)) {
             continue;
         }
         let off = poly.vertex_offset as usize;
@@ -698,6 +773,8 @@ pub fn build_partitioned_with_heap(
     {
         let polys: &[crate::AdminPolygon] = as_typed_slice(&idx.admin_polygons);
         let admin_vertices: &[NodeCoord] = as_typed_slice(&idx.admin_vertices);
+        let admin_metro_keep = build_admin_metro_keep_set(polys, admin_vertices, &idx);
+        let admin_metro_keep_ref = &admin_metro_keep;
         let place_signature_ref = &place_signature;
         let admin_candidates: Vec<([u8; 2], PendingDoc<'_>)> = polys
             .par_iter()
@@ -708,6 +785,12 @@ pub fn build_partitioned_with_heap(
                 }
                 let name = idx.get_string(poly.name_id);
                 if name.is_empty() {
+                    return None;
+                }
+                // Metro-cluster dedup: skip same-name polygon fragments
+                // that aren't the largest in their (~22 km) cluster.
+                // See `build_admin_metro_keep_set`.
+                if !admin_metro_keep_ref.contains(&(poly_id as u32)) {
                     return None;
                 }
                 let off = poly.vertex_offset as usize;
