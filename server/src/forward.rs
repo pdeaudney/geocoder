@@ -233,20 +233,29 @@ fn coord_bucket(lat: f64, lng: f64) -> (i32, i32) {
     ((lat * 10.0).round() as i32, (lng * 10.0).round() as i32)
 }
 
-/// Wider bucket (~22 km) for admin-vs-admin metro dedup. The C++
+/// Wide bucket (~44 km) for admin-vs-admin metro dedup. The C++
 /// builder emits one `AdminPolygon` per outer ring of an OSM
 /// boundary relation; for cities like Greensboro NC whose boundary
 /// relation has 41 outer rings (annexation parcels + ETJ + city
 /// limits), that produces 41 same-name admin polygons scattered
 /// across the metro that all match BM25 equally for `q=Greensboro`.
 /// The bias re-rank picks whichever fragment happens to combine best
-/// importance + distance instead of the canonical place_point. The
-/// wider bucket collapses metro-scale duplicates while preserving
-/// distinct same-name admins in different metros (Greensboro NC vs
-/// Greensboro NY ~700 km apart fall in different buckets).
+/// importance + distance instead of the canonical place_point.
+///
+/// First attempt used 0.2° (~22 km), but the regression run with
+/// PR #31 deployed showed Greensboro NC still failing: the place_point
+/// at (36.072, -79.792) and a failing admin centroid at (36.054,
+/// -79.641) — 13.5 km apart — landed in different buckets in *both*
+/// dimensions because they straddled the bucket boundary. Widening
+/// to 0.4° (~44 km) puts a typical city metro entirely in one bucket
+/// regardless of how its centroid sits relative to the boundary.
+///
+/// Distinct same-name metros stay separate: Greensboro NC vs
+/// Greensboro NY (~700 km), Springfield MO vs IL (~290 km),
+/// Cambridge UK vs MA (~5 500 km) all sit in different buckets.
 #[inline]
 fn wide_coord_bucket(lat: f64, lng: f64) -> (i32, i32) {
-    ((lat * 5.0).round() as i32, (lng * 5.0).round() as i32)
+    ((lat * 2.5).round() as i32, (lng * 2.5).round() as i32)
 }
 
 /// For each `(name_id, ~22 km bucket)` cluster of admin polygons at
@@ -1146,43 +1155,85 @@ fn tantivy_doc(
     append_translit(&mut name_indexed, name);
     name_indexed = dedup_indexed_tokens(&name_indexed);
 
+    // Pre-compute the set of name tokens so we can detect short-form
+    // alts below (e.g. short_name="Frankfurt" for name="Frankfurt am
+    // Main"). Without this carve-out the standard alt-vs-name dedup
+    // strips short forms entirely — which kills the BM25 boost we
+    // need for queries that hit the short form. Major cities with
+    // multi-token canonical names (Frankfurt am Main, Newcastle upon
+    // Tyne, Saint-Quentin, Cornwall ON's "Cornwall County" style)
+    // were losing single-word queries to small same-name villages
+    // because their length-normalised name-field score sat 1.5×
+    // below the village's single-token name match, and stripping
+    // the short form from alt_name removed the only mechanism to
+    // recover that score.
+    let name_token_set: std::collections::HashSet<String> = name_indexed
+        .split_whitespace()
+        .map(|t| ascii_fold(t).to_ascii_lowercase())
+        .collect();
+
     let mut alt_indexed = String::new();
+    let mut seen_alt: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(16);
     for alt in alternates {
         let canonical_alt = canonicalise_phrase(alt);
-        if canonical_alt.trim().is_empty() {
+        let trimmed = canonical_alt.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        if !alt_indexed.is_empty() {
-            alt_indexed.push(' ');
-        }
-        alt_indexed.push_str(canonical_alt.trim());
-        append_translit(&mut alt_indexed, alt);
-    }
-    // Strip any token that's already in the primary name field — keeps
-    // alt_name strictly additive ("Sydney" appears N times across the
-    // German/French/Italian/etc. name:xx tags but doesn't need to appear
-    // in alt_name at all). Then dedup remaining tokens for the same
-    // length-normalization reason as the primary field.
-    if !alt_indexed.is_empty() {
-        let mut already: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        for tok in name_indexed.split_whitespace() {
-            already.insert(ascii_fold(tok).to_ascii_lowercase());
-        }
-        let mut filtered = String::with_capacity(alt_indexed.len());
-        for tok in alt_indexed.split_whitespace() {
+        let alt_tokens: Vec<&str> = trimmed.split_whitespace().collect();
+        // "Short form" = the alt phrase is exactly one token AND that
+        // token appears in the canonical name. Treat as an intentional
+        // shortening worth preserving in alt_name even though the
+        // standard dedup would strip it.
+        let is_short_form = alt_tokens.len() == 1
+            && name_token_set.contains(&ascii_fold(alt_tokens[0]).to_ascii_lowercase());
+        for tok in &alt_tokens {
             let key = ascii_fold(tok).to_ascii_lowercase();
-            if key.is_empty() || already.contains(&key) {
+            if key.is_empty() {
                 continue;
             }
-            already.insert(key);
-            if !filtered.is_empty() {
-                filtered.push(' ');
+            // Standard alts dedup against name AND prior alts. Short
+            // forms bypass the name-dedup so the short token survives,
+            // but still dedup against prior alts so multiple language
+            // tags carrying the same short form ("name:de=München" +
+            // short_name=München in a different lang tag) don't stack.
+            if !is_short_form && name_token_set.contains(&key) {
+                continue;
             }
-            filtered.push_str(tok);
+            if !seen_alt.insert(key) {
+                continue;
+            }
+            if !alt_indexed.is_empty() {
+                alt_indexed.push(' ');
+            }
+            alt_indexed.push_str(tok);
         }
-        alt_indexed = filtered;
+        // Transliterations of this alt: use the same dedup discipline
+        // by routing through the same path. append_translit no-ops on
+        // ASCII sources and adds Latinised forms otherwise; rather
+        // than threading our short-form awareness through it, just
+        // append into a scratch buffer and merge token-by-token.
+        let mut translit_scratch = String::new();
+        append_translit(&mut translit_scratch, alt);
+        for tok in translit_scratch.split_whitespace() {
+            let key = ascii_fold(tok).to_ascii_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            if name_token_set.contains(&key) || !seen_alt.insert(key) {
+                continue;
+            }
+            if !alt_indexed.is_empty() {
+                alt_indexed.push(' ');
+            }
+            alt_indexed.push_str(tok);
+        }
     }
+    // (No second-pass dedup — the per-alt loop above already strips
+    // duplicates against name AND prior alts, and intentionally
+    // preserves single-token short forms that share a token with
+    // the canonical name.)
 
     let suburb_indexed = suburb.map(canonicalise_phrase).unwrap_or_default();
     let state_indexed = state.map(canonicalise_phrase).unwrap_or_default();
