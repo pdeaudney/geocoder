@@ -2102,6 +2102,37 @@ fn boosted_score(hit: &Hit, bias: Option<&BiasCoord>) -> f32 {
             let near_penalty = (BiasCoord::DISTANCE_ALPHA as f32) * (d_km + 1.0).ln();
             let far_penalty = (d_km - NEAR_RADIUS_KM).max(0.0) * FAR_PENALTY_PER_KM;
 
+            // Multiplicative near-bias prominence boost. KIND_PLACE only
+            // (PlacePoints + admin polygons). When a wikipedia-backed
+            // major-city place doc sits within ~50 km of the user's
+            // bias hint AND has high importance, multiply its raw BM25
+            // score by up to 1.5×. Closes the regression-bias-
+            // disambiguation failures the additive importance bonus
+            // could not: Arlington County VA's PlacePoint scores
+            // raw BM25 ~32.7 vs other small "Arlington" PlacePoints'
+            // ~39.2 (BM25 length-norm + suburb-field interactions
+            // we can't easily change at index time), a 6.5-unit gap
+            // the additive cap=4.0 bonus physically can't bridge. With
+            // dist_factor=0.96 (2 km from bias) and imp_factor=0.38
+            // (importance=97), the multiplier becomes 1+0.96*0.38*0.5
+            // = 1.18, lifting VA to ~38.6 — past the small Arlingtons.
+            // Gated to KIND_PLACE so a wikipedia-backed POI (Sydney
+            // Opera House) doesn't override an unrelated place query;
+            // and to importance > 0 so docs with no prominence signal
+            // are unaffected (still ranked by BM25 + bias distance).
+            const NEAR_BIAS_RADIUS_KM: f32 = 50.0;
+            const NEAR_BIAS_MAX_BOOST: f32 = 0.50;
+            let near_bias_factor = if hit.kind == KIND_PLACE
+                && hit.importance > 0
+                && d_km < NEAR_BIAS_RADIUS_KM
+            {
+                let dist_factor = 1.0 - (d_km / NEAR_BIAS_RADIUS_KM);
+                let imp_factor = hit.importance as f32 / 255.0;
+                1.0 + (dist_factor * imp_factor * NEAR_BIAS_MAX_BOOST)
+            } else {
+                1.0
+            };
+
             // Prominence bonus from index-time importance signals
             // (population log + wikidata + wikipedia). The bias-path
             // cap is intentionally larger than the unbiased path's
@@ -2129,7 +2160,7 @@ fn boosted_score(hit: &Hit, bias: Option<&BiasCoord>) -> f32 {
             const IMPORTANCE_BONUS_MAX: f32 = 4.0;
             let importance_bonus = (hit.importance as f32 / 255.0) * IMPORTANCE_BONUS_MAX;
 
-            hit.score + importance_bonus - near_penalty - far_penalty
+            hit.score * near_bias_factor + importance_bonus - near_penalty - far_penalty
         }
     }
 }
@@ -2514,12 +2545,15 @@ mod bias_curve_tests {
     }
 
     fn hit_with_importance(score: f32, lat: f64, lng: f64, importance: u64) -> Hit {
+        // kind=KIND_PLACE — matches what PlacePoints + admin polygons
+        // get in the real index, and is the kind the bias-path
+        // near-bias multiplier gates on.
         Hit {
             name: String::new(),
             suburb: None,
             state: None,
             country_code: None,
-            kind: 0,
+            kind: KIND_PLACE,
             rank: 16,
             importance,
             lat,
@@ -2662,6 +2696,68 @@ mod bias_curve_tests {
         assert!(
             bias_delta >= 3.5,
             "bias-path importance bonus at importance=255 should be near 4.0; got {bias_delta}"
+        );
+    }
+
+    /// Arlington VA failure regression. Exact scenario observed on the
+    /// deployed planet build: q="Arlington" in US shard, bias on DC.
+    /// Arlington County VA's PlacePoint (importance ~97, ~2 km from
+    /// bias) had raw BM25 ~32.7 vs other small "Arlington" PlacePoints'
+    /// ~39.2 (a 6.5-unit gap from BM25 length-norm + suburb-field
+    /// interactions baked into the index). The previous additive-only
+    /// scoring (cap=4.0 importance bonus + 0.20·ln distance penalty)
+    /// could not bridge that gap — Arlington VT (572 km away,
+    /// importance ~30) won. The multiplicative near-bias boost fixes
+    /// it: VA's score gets ~1.18× lift (dist_factor=0.96, imp_factor
+    /// =0.38, max=0.50), pushing it past VT after additive bonuses.
+    /// Pins the fix so future tuning that drops the multiplier below
+    /// what's needed to flip this case fails loudly.
+    #[test]
+    fn near_bias_high_importance_place_beats_far_low_importance_place() {
+        let dc = BiasCoord { lat: 38.88, lng: -77.10 };
+        // Arlington County VA PlacePoint: low BM25 (32.7), high
+        // importance (97), 2 km from bias.
+        let arlington_va = hit_with_importance(32.73, 38.89, -77.08, 97);
+        // Arlington VT PlacePoint: high BM25 (39.2), low importance
+        // (~30), 572 km from bias.
+        let arlington_vt = hit_with_importance(39.21, 43.07, -73.15, 30);
+
+        let s_va = boosted_score(&arlington_va, Some(&dc));
+        let s_vt = boosted_score(&arlington_vt, Some(&dc));
+
+        assert!(
+            s_va > s_vt,
+            "Arlington VA ({s_va}) should outscore Arlington VT ({s_vt}) — \
+             near-bias high-importance multiplier must close the BM25 gap"
+        );
+    }
+
+    /// Far-distance high-importance places must NOT get the near-bias
+    /// multiplier — only docs within NEAR_BIAS_RADIUS_KM (50 km) do.
+    /// Pins the gating so a future tuning that drops the radius
+    /// can't silently start boosting wikipedia-backed cities thousands
+    /// of km from the bias hint, which would re-introduce the failure
+    /// mode the old prominence boost was removed to fix (a Melbourne
+    /// user searching `St Kilda` getting Adelaide instead of the
+    /// Melbourne suburb).
+    #[test]
+    fn near_bias_multiplier_is_distance_gated() {
+        let bias = BiasCoord { lat: 0.0, lng: 0.0 };
+        // Both at importance=255 — only difference is distance.
+        let near = hit_with_importance(10.0, 0.0, 0.0, 255);
+        let far  = hit_with_importance(10.0, 10.0, 10.0, 255); // ~1500 km away
+
+        let s_near_with_bias = boosted_score(&near, Some(&bias));
+        let s_far_with_bias  = boosted_score(&far,  Some(&bias));
+
+        // Near doc gets multiplier (1.0 * 1.0 * 0.5 = 0.5 lift on a
+        // factor of 1.5×); far doc gets no multiplier. The gap must
+        // be at least the multiplier's contribution at importance=255.
+        let gap = s_near_with_bias - s_far_with_bias;
+        assert!(
+            gap > 5.0,
+            "near doc must outscore far same-importance doc by > 5 BM25 \
+             (multiplier + distance penalty); got gap={gap}"
         );
     }
 }
