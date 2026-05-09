@@ -2086,15 +2086,30 @@ fn boosted_score(hit: &Hit, bias: Option<&BiasCoord>) -> f32 {
             let far_penalty = (d_km - NEAR_RADIUS_KM).max(0.0) * FAR_PENALTY_PER_KM;
 
             // Prominence bonus from index-time importance signals
-            // (population log + wikidata + wikipedia). Saturates at
-            // 1.5 BM25 units, which is enough to flip a Wikipedia-
-            // backed major city above an obscure same-name village
-            // when both sit within similar distance from the bias
-            // hint. Scale chosen so an importance==255 doc gets the
-            // full bonus; <50 (no wiki, low population) contributes
-            // ~0.3 units. Only place docs carry meaningful importance
-            // (others stored 0), so streets and POIs see no bonus.
-            const IMPORTANCE_BONUS_MAX: f32 = 1.5;
+            // (population log + wikidata + wikipedia). The bias-path
+            // cap is intentionally larger than the unbiased path's
+            // (1.5) because BM25 length-normalization decisively
+            // favours short single-token names: a query for
+            // "Frankfurt" gives a small `name=Frankfurt` village a
+            // BM25 score 3-4 units above Frankfurt am Main's admin
+            // doc (`name=Frankfurt am Main`, three tokens), and the
+            // 1.5-unit bonus could not close that gap even though
+            // Frankfurt am Main's wikipedia + population score the
+            // full 255 importance. Lifting the bias-path cap to 4.0
+            // is enough to flip every observed
+            // `regression-bias-disambiguation` failure (Arlington
+            // County VA / Münster / Cornwall ON / Frankfurt /
+            // Saint-Quentin / Greensboro / Newcastle-under-Lyme /
+            // Springfield MO) without overpowering text matches:
+            // a 5+ BM25 gap still wins, and only docs with
+            // importance > ~190 see anywhere near the full bonus
+            // (so unranked admins / streets / POIs that stored
+            // importance=0 are unaffected). The unbiased path's
+            // smaller cap is retained because there's no proximity
+            // signal there to anchor the choice and a stronger
+            // bonus would surface globally-prominent same-name
+            // matches over locally-correct ones.
+            const IMPORTANCE_BONUS_MAX: f32 = 4.0;
             let importance_bonus = (hit.importance as f32 / 255.0) * IMPORTANCE_BONUS_MAX;
 
             hit.score + importance_bonus - near_penalty - far_penalty
@@ -2584,17 +2599,52 @@ mod bias_curve_tests {
     }
 
     /// Importance bonus is bounded — it cannot single-handedly flip
-    /// vastly different BM25 scores. A 5-unit BM25 gap dwarfs the
-    /// max 1.5-unit importance bonus.
+    /// vastly different BM25 scores. With the 4.0-unit cap on the
+    /// bias path, a clearly-better text match (≥6 BM25 unit gap)
+    /// still wins. The threshold is intentionally tight so a
+    /// medium-quality short-name match (e.g. a query that hits
+    /// Frankfurt am Main's admin name slightly worse than the
+    /// village's `name=Frankfurt`, but where Frankfurt am Main has
+    /// importance=255 and is at the bias hint) flips the right way.
     #[test]
     fn importance_bonus_cannot_overpower_bm25() {
         let bias = BiasCoord { lat: 0.0, lng: 0.0 };
         let weak_major   = hit_with_importance(1.0, 0.0, 0.0, 255);
-        let strong_plain = hit_with_importance(6.0, 0.0, 0.0, 0);
+        let strong_plain = hit_with_importance(8.0, 0.0, 0.0, 0);
 
         let s_weak   = boosted_score(&weak_major, Some(&bias));
         let s_strong = boosted_score(&strong_plain, Some(&bias));
 
         assert!(s_strong > s_weak, "BM25 should dominate when the gap is large");
+    }
+
+    /// The bias-path cap (4.0 BM25 units at importance=255) is
+    /// intentionally larger than the unbiased path's (1.5). Asserts
+    /// that gap so a future tuning that drops it below the unbiased
+    /// cap fails loudly — that would silently regress every
+    /// regression-bias-disambiguation case the larger cap was
+    /// introduced to fix (Arlington County VA / Frankfurt am Main /
+    /// Münster / Cornwall ON / etc.).
+    #[test]
+    fn bias_importance_cap_exceeds_unbiased_cap() {
+        let bias = BiasCoord { lat: 0.0, lng: 0.0 };
+        // Co-located, equal BM25 — the only differentiator is the
+        // importance bonus. Score delta == bonus delta.
+        let high_imp = hit_with_importance(0.0, 0.0, 0.0, 255);
+        let low_imp  = hit_with_importance(0.0, 0.0, 0.0, 0);
+
+        let bias_delta   = boosted_score(&high_imp, Some(&bias))
+                         - boosted_score(&low_imp, Some(&bias));
+        let unbiased_delta = boosted_score(&high_imp, None)
+                           - boosted_score(&low_imp, None);
+
+        assert!(
+            bias_delta > unbiased_delta,
+            "bias-path importance bonus ({bias_delta}) must exceed unbiased-path bonus ({unbiased_delta})"
+        );
+        assert!(
+            bias_delta >= 3.5,
+            "bias-path importance bonus at importance=255 should be near 4.0; got {bias_delta}"
+        );
     }
 }
