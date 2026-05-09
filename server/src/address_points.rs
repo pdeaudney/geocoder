@@ -194,7 +194,10 @@ impl AddressPointIndex {
                     return;
                 };
                 let hn = self.string_at(p.housenumber_id);
-                if !hn.eq_ignore_ascii_case(hn_needle) {
+                // Range-aware match: query "256" hits stored
+                // "255-257" (G-NAF NUMBER_FIRST + NUMBER_LAST joined
+                // form), and vice versa. See `crate::housenumber`.
+                if !crate::housenumber::housenumber_matches(hn_needle, hn) {
                     return;
                 }
                 if let Some(street_needle) = street_needle {
