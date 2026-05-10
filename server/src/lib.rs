@@ -953,7 +953,14 @@ impl Index {
         near_lat: f64,
         near_lng: f64,
     ) -> Option<AddrPointMatch<'_>> {
-        self.find_addr_point_in_country(housenumber, street_name_hint, near_lat, near_lng, None)
+        self.find_addr_point_in_country(
+            housenumber,
+            street_name_hint,
+            None,
+            near_lat,
+            near_lng,
+            None,
+        )
     }
 
     /// Housenumber lookup with an explicit country hint.
@@ -977,6 +984,7 @@ impl Index {
         &self,
         housenumber: &str,
         street_name_hint: Option<&str>,
+        unit_hint: Option<&str>,
         near_lat: f64,
         near_lng: f64,
         country_code: Option<&[u8; 2]>,
@@ -992,20 +1000,22 @@ impl Index {
                 if let Some(m) = gnaf.find_by_housenumber(
                     housenumber,
                     street_name_hint,
+                    unit_hint,
                     near_lat,
                     near_lng,
                     self.street_cell_level,
                 ) {
                     span.record("geocoder.address.source", "gnaf");
-                    // G-NAF / OpenAddresses ladders don't carry
-                    // sub-building or tagged-parent details — those
-                    // fields belong to the OSM AddrPoint format only.
+                    // G-NAF carries unit (FLAT_NUMBER) on the
+                    // AddressPoint after Phase 2; floor and
+                    // parent_place are OSM-only fields and stay empty
+                    // when the source is G-NAF.
                     return Some(AddrPointMatch {
                         lat: m.lat,
                         lng: m.lng,
                         housenumber: m.housenumber,
                         street: m.street,
-                        unit: "",
+                        unit: m.unit,
                         floor: "",
                         parent_place: "",
                         flags: 0,
@@ -1023,6 +1033,7 @@ impl Index {
                 cc,
                 housenumber,
                 street_name_hint,
+                unit_hint,
                 near_lat,
                 near_lng,
                 self.street_cell_level,
@@ -1036,7 +1047,7 @@ impl Index {
                     lng: m.lng,
                     housenumber: m.housenumber,
                     street: m.street,
-                    unit: "",
+                    unit: m.unit,
                     floor: "",
                     parent_place: "",
                     flags: 0,
@@ -1058,9 +1069,17 @@ impl Index {
         let street_hint = street_name_hint
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let unit_needle = unit_hint.map(str::trim).filter(|s| !s.is_empty());
 
         let cos_lat = near_lat.to_radians().cos();
-        let mut best: Option<(f64, &AddrPoint)> = None;
+        // Two-tier search: when the caller specified a unit, prefer
+        // candidates whose stored unit_id matches; fall back to
+        // unit-less candidates when no unit-tagged match exists.
+        // Mirrors the discipline applied in
+        // `address_points::find_by_housenumber` so behaviour is
+        // consistent across G-NAF, OpenAddresses, and OSM sources.
+        let mut best_with_unit: Option<(f64, &AddrPoint)> = None;
+        let mut best_unitless: Option<(f64, &AddrPoint)> = None;
 
         for c in std::iter::once(cell).chain(neighbors.into_iter()) {
             let offsets = Self::lookup_geo_cell(&self.geo_cells, c);
@@ -1089,15 +1108,36 @@ impl Index {
                 let dlat = (p.lat as f64 - near_lat).to_radians();
                 let dlng = (p.lng as f64 - near_lng).to_radians();
                 let dist = dist_sq(dlat, dlng, cos_lat);
-                let take = match best {
+
+                // When the caller specifies a unit, prefer points
+                // whose stored unit_id matches and bucket unit-less
+                // points as a fallback. When no unit is specified,
+                // every candidate goes into the primary bucket — we
+                // preserve the pre-Phase-2 behaviour of indifference
+                // to per-point unit tagging.
+                let bucket = match unit_needle {
+                    Some(want) if p.unit_id != 0 => {
+                        let p_unit = self.get_string(p.unit_id);
+                        if p_unit.eq_ignore_ascii_case(want) {
+                            &mut best_with_unit
+                        } else {
+                            return;
+                        }
+                    }
+                    Some(_) => &mut best_unitless,
+                    None => &mut best_with_unit,
+                };
+                let take = match bucket {
                     None => true,
-                    Some((best_dist, _)) => dist < best_dist,
+                    Some((best_dist, _)) => dist < *best_dist,
                 };
                 if take {
-                    best = Some((dist, p));
+                    *bucket = Some((dist, p));
                 }
             });
         }
+
+        let best = best_with_unit.or(best_unitless);
 
         let result = best.map(|(_, p)| {
             // When FLAG_ADDR_PLACE is set, street_or_place_id holds

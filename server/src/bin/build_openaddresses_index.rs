@@ -214,6 +214,13 @@ fn build_country(
             let street = row.get("STREET").unwrap_or_default();
             let city = row.get("CITY").unwrap_or_default();
             let postcode = row.get("POSTCODE").unwrap_or_default();
+            // OpenAddresses uses the literal column name `UNIT` for
+            // apartment/flat designators (BAN: "appartement", BAG:
+            // "huisletter+huisnummertoevoeging" merged on import).
+            // Empty in most national datasets — interning the empty
+            // string would burn a non-zero id on every unit-less row,
+            // so use the 0 sentinel like G-NAF does.
+            let unit = row.get("UNIT").unwrap_or_default();
 
             let point = AddressPoint {
                 lat,
@@ -222,6 +229,11 @@ fn build_country(
                 street_id: strings.intern(street),
                 locality_id: strings.intern(city),
                 postcode_id: strings.intern(postcode),
+                unit_id: if unit.trim().is_empty() {
+                    0
+                } else {
+                    strings.intern(unit)
+                },
             };
             let cell = CellID::from(LatLng::from_degrees(lat as f64, lon as f64))
                 .parent(street_level)

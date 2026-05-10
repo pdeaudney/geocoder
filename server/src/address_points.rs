@@ -36,9 +36,15 @@ use std::path::{Path, PathBuf};
 
 /// Fixed-size record in `<prefix>_points.bin`.
 ///
-/// The `#[repr(C)]` layout must stay 24 bytes — the `struct_layout` test
+/// The `#[repr(C)]` layout must stay 28 bytes — the `struct_layout` test
 /// pins this. Changing fields is a binary-format change that forces every
 /// consumer to rebuild.
+///
+/// `unit_id` was added in Phase 2 of the address-coverage work to
+/// carry G-NAF FLAT_NUMBER (and OSM `addr:unit` once the C++ side
+/// emits it). 0 means "no unit recorded for this point". Callers
+/// querying without a unit still hit unit-bearing records (the
+/// matcher treats `query_unit=None` as "any unit").
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AddressPoint {
@@ -48,6 +54,7 @@ pub struct AddressPoint {
     pub street_id: u32,
     pub locality_id: u32,
     pub postcode_id: u32,
+    pub unit_id: u32,
 }
 
 /// Resolved address returned from the query path.
@@ -58,6 +65,9 @@ pub struct AddressMatch<'a> {
     pub street: &'a str,
     pub locality: &'a str,
     pub postcode: &'a str,
+    /// Stored unit (FLAT_NUMBER from G-NAF, `addr:unit` from OSM).
+    /// `""` when the underlying record has no unit.
+    pub unit: &'a str,
 }
 
 /// Four mmap'd files forming one address-point index. Open once at
@@ -148,16 +158,34 @@ impl AddressPointIndex {
             street: self.string_at(point.street_id),
             locality: self.string_at(point.locality_id),
             postcode: self.string_at(point.postcode_id),
+            unit: if point.unit_id != 0 {
+                self.string_at(point.unit_id)
+            } else {
+                ""
+            },
         }
     }
 
-    /// Find the address point matching `housenumber` (case-insensitive
-    /// exact) and optionally a street-name substring, within a 9-cell S2
-    /// neighbourhood of `(near_lat, near_lng)` at `street_level`.
+    /// Find the address point matching `housenumber` (range-aware via
+    /// `crate::housenumber`) and optionally a street-name substring
+    /// + unit, within a 9-cell S2 neighbourhood of `(near_lat,
+    /// near_lng)` at `street_level`.
+    ///
+    /// `unit_hint` semantics:
+    ///   - `None` → unit is unconstrained; matches both unit-bearing
+    ///              and unit-less stored records (geographic-nearest
+    ///              tiebreak picks one)
+    ///   - `Some("3")` → match stored records where `unit_id` resolves
+    ///                   to `"3"` (case-insensitive exact). Stored
+    ///                   records with no unit are also accepted as a
+    ///                   fallback so `unit=3` against a building that
+    ///                   only has a building-level point still resolves
+    ///                   to the building.
     pub fn find_by_housenumber(
         &self,
         housenumber: &str,
         street_hint: Option<&str>,
+        unit_hint: Option<&str>,
         near_lat: f64,
         near_lng: f64,
         street_level: u64,
@@ -179,12 +207,17 @@ impl AddressPointIndex {
         let street_needle = street_hint
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let unit_needle = unit_hint.map(str::trim).filter(|s| !s.is_empty());
 
         let cos_lat = near_lat.to_radians().cos();
-        let mut best: Option<(f64, &AddressPoint)> = None;
-        // Fuse the candidate enumeration with the scoring pass — avoids
-        // materialising a Vec<u32> of IDs for every query. On dense
-        // cities this was ~1–4 KB of heap per call.
+        // Track the best unit-matched and best fallback hit separately.
+        // When the caller supplies a unit, prefer a stored record whose
+        // unit matches; if none exists, fall back to a unit-less stored
+        // record (the building-level address). Without unit hint, both
+        // tracks collapse to the same scoring path.
+        let mut best_unit_match: Option<(f64, &AddressPoint)> = None;
+        let mut best_fallback: Option<(f64, &AddressPoint)> = None;
+
         for cell in std::iter::once(origin).chain(neighbours.into_iter()) {
             let Some(entry_offset) = lookup_cell_offset(&self.cells, cell.0) else {
                 continue;
@@ -194,35 +227,52 @@ impl AddressPointIndex {
                     return;
                 };
                 let hn = self.string_at(p.housenumber_id);
-                // Range-aware match: query "256" hits stored
-                // "255-257" (G-NAF NUMBER_FIRST + NUMBER_LAST joined
-                // form), and vice versa. See `crate::housenumber`.
                 if !crate::housenumber::housenumber_matches(hn_needle, hn) {
                     return;
                 }
                 if let Some(street_needle) = street_needle {
                     let street = self.string_at(p.street_id);
-                    // Zero-alloc case-insensitive substring check. Mirrors
-                    // crate::contains_ignore_ascii_case but inlined here
-                    // to avoid a module-private dependency.
                     if !contains_ignore_ascii_case(street, street_needle) {
                         return;
                     }
                 }
+
                 let dlat = (p.lat as f64 - near_lat).to_radians();
                 let dlng = (p.lng as f64 - near_lng).to_radians();
                 let dist = dlat * dlat + dlng * dlng * cos_lat * cos_lat;
-                let take = match best {
-                    None => true,
-                    Some((best_dist, _)) => dist < best_dist,
-                };
+
+                // Unit-discipline branch.
+                if let Some(unit_needle) = unit_needle {
+                    if p.unit_id == 0 {
+                        // Stored has no unit — only useful as a
+                        // building-level fallback.
+                        let take = best_fallback.map_or(true, |(d, _)| dist < d);
+                        if take {
+                            best_fallback = Some((dist, p));
+                        }
+                        return;
+                    }
+                    let stored_unit = self.string_at(p.unit_id);
+                    if stored_unit.eq_ignore_ascii_case(unit_needle) {
+                        let take = best_unit_match.map_or(true, |(d, _)| dist < d);
+                        if take {
+                            best_unit_match = Some((dist, p));
+                        }
+                    }
+                    return;
+                }
+
+                // No unit hint — single track.
+                let take = best_unit_match.map_or(true, |(d, _)| dist < d);
                 if take {
-                    best = Some((dist, p));
+                    best_unit_match = Some((dist, p));
                 }
             });
         }
 
-        best.map(|(_, p)| self.hydrate(p))
+        best_unit_match
+            .or(best_fallback)
+            .map(|(_, p)| self.hydrate(p))
     }
 
     /// Nearest address point to `(lat, lng)` within a 9-cell neighbourhood.

@@ -1224,6 +1224,46 @@ static void normalise_housenumber(const char* raw,
         return;
     }
 
+    // AU/NZ unit-shorthand convention: `<unit-digits>/<housenumber>`
+    // with no apartment-prefix word, e.g. "3/827a", "12/40-44", "5/1".
+    // Distinguished from a range or fraction housenumber by the
+    // separator: AU ranges use a hyphen ("40-44"), so a `/` between two
+    // digit-led tokens is unambiguously a unit divider — never a range.
+    // Restricting to `/` (not `,` / `;`) avoids touching edge cases
+    // like "12, Apt 3" which the word-prefix rule above already
+    // handles when the lhs is a housenumber.
+    for (size_t i = 0; i < s.size(); i++) {
+        char c = s[i];
+        if (c != '/') continue;
+        std::string lhs = s.substr(0, i);
+        std::string rhs = s.substr(i + 1);
+        trim(lhs);
+        trim(rhs);
+        if (lhs.empty() || rhs.empty()) continue;
+        if (!std::isdigit(static_cast<unsigned char>(lhs[0]))) continue;
+        if (!std::isdigit(static_cast<unsigned char>(rhs[0]))) continue;
+        // LHS must be all digits + optional single trailing letter
+        // (covers "3", "12", "3a"). Rejects "12-14" / "1/2" forms by
+        // construction since they'd contain a `-` or extra non-alnum.
+        bool lhs_ok = true;
+        size_t alpha_count = 0;
+        for (size_t j = 0; j < lhs.size(); j++) {
+            char lc = lhs[j];
+            if (std::isdigit(static_cast<unsigned char>(lc))) continue;
+            if (std::isalpha(static_cast<unsigned char>(lc)) && j > 0
+                && alpha_count == 0) {
+                alpha_count++;
+                continue;
+            }
+            lhs_ok = false;
+            break;
+        }
+        if (!lhs_ok) continue;
+        unit_out = std::move(lhs);
+        housenumber_out = std::move(rhs);
+        return;
+    }
+
     // No split — passthrough.
     housenumber_out = std::move(s);
 }
