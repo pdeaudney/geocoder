@@ -202,9 +202,10 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
         );
         read_psv(&path, |fields| {
             // Field positions (0-indexed):
-            //   0=ADDRESS_DETAIL_PID, 3=DATE_RETIRED, 16=NUMBER_FIRST_PREFIX,
-            //   17=NUMBER_FIRST, 18=NUMBER_FIRST_SUFFIX, 22=STREET_LOCALITY_PID,
-            //   24=LOCALITY_PID, 26=POSTCODE
+            //   0=ADDRESS_DETAIL_PID, 3=DATE_RETIRED,
+            //   9=FLAT_NUMBER_PREFIX, 10=FLAT_NUMBER, 11=FLAT_NUMBER_SUFFIX,
+            //   16=NUMBER_FIRST_PREFIX, 17=NUMBER_FIRST, 18=NUMBER_FIRST_SUFFIX,
+            //   22=STREET_LOCALITY_PID, 24=LOCALITY_PID, 26=POSTCODE
             if fields.len() <= 26 {
                 return;
             }
@@ -228,6 +229,7 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
             if housenumber.is_empty() {
                 return;
             }
+            let unit = build_unit(fields);
             let Some(street_name) = street.get(street_pid) else {
                 return;
             };
@@ -242,6 +244,11 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
                 street_id: strings.intern(street_name),
                 locality_id: strings.intern(&title_case(locality)),
                 postcode_id: strings.intern(postcode),
+                // 0 sentinel preserves the round-trip with the
+                // runtime: `unit_id == 0` means "no unit recorded".
+                // Interning the empty string would burn a non-zero
+                // id on every unit-less address (~14 M of them).
+                unit_id: if unit.is_empty() { 0 } else { strings.intern(&unit) },
             };
             let cell = CellID::from(LatLng::from_degrees(lat as f64, lng as f64))
                 .parent(street_level)
@@ -360,6 +367,27 @@ fn build_housenumber(fields: &[&str]) -> String {
         (true, false) => last_combined,
         (false, false) => format!("{}-{}", first_combined, last_combined),
     }
+}
+
+/// Compose the unit / FLAT designator string from ADDRESS_DETAIL fields.
+/// G-NAF splits a unit label like "Unit 12B" across three columns:
+///   9=FLAT_NUMBER_PREFIX ("Unit "), 10=FLAT_NUMBER ("12"),
+///   11=FLAT_NUMBER_SUFFIX ("B"). Returns the concatenated form, or an
+/// empty string when no FLAT components are present (the common case —
+/// most AU addresses are single-dwelling houses with no unit).
+///
+/// We deliberately ignore FLAT_TYPE_CODE (field 8) at index time:
+/// callers issue queries like "3/827a" where the discriminator is the
+/// number alone, not the type word. Keeping the stored slot tight to
+/// the digits/suffix maximises hit rate.
+fn build_unit(fields: &[&str]) -> String {
+    let prefix = fields.get(9).copied().unwrap_or("");
+    let number = fields.get(10).copied().unwrap_or("");
+    let suffix = fields.get(11).copied().unwrap_or("");
+    if number.is_empty() && prefix.is_empty() && suffix.is_empty() {
+        return String::new();
+    }
+    format!("{}{}{}", prefix, number, suffix)
 }
 
 /// Upper-case input like "ALYSSE CLOSE" / "BAULKHAM HILLS" → nicer

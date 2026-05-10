@@ -84,7 +84,7 @@ fn tiny_synthetic_batch_roundtrips_through_build_and_query() {
 
     // Exact housenumber lookup should return the address's registered coord.
     let m = oa
-        .find_by_housenumber(b"tt", "11", Some("Alysse"), -33.7371, 150.9800, 17)
+        .find_by_housenumber(b"tt", "11", Some("Alysse"), None, -33.7371, 150.9800, 17)
         .expect("should find #11");
     assert_eq!(m.housenumber, "11");
     assert_eq!(m.postcode, "2153");
@@ -100,7 +100,7 @@ fn tiny_synthetic_batch_roundtrips_through_build_and_query() {
     assert!(matches!(n.housenumber, "11" | "12"), "unexpected {}", n.housenumber);
 
     // Wrong country code returns None.
-    assert!(oa.find_by_housenumber(b"zz", "11", None, -33.7371, 150.9800, 17).is_none());
+    assert!(oa.find_by_housenumber(b"zz", "11", None, None, -33.7371, 150.9800, 17).is_none());
 
     cleanup(&tmp);
 }

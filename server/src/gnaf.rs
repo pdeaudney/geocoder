@@ -37,12 +37,19 @@ impl Gnaf {
         &self,
         housenumber: &str,
         street_hint: Option<&str>,
+        unit_hint: Option<&str>,
         near_lat: f64,
         near_lng: f64,
         street_level: u64,
     ) -> Option<GnafMatch<'_>> {
-        self.inner
-            .find_by_housenumber(housenumber, street_hint, near_lat, near_lng, street_level)
+        self.inner.find_by_housenumber(
+            housenumber,
+            street_hint,
+            unit_hint,
+            near_lat,
+            near_lng,
+            street_level,
+        )
     }
 
     pub fn find_nearest(&self, lat: f64, lng: f64, street_level: u64) -> Option<GnafMatch<'_>> {
