@@ -2618,6 +2618,14 @@ fn ascii_fold(s: &str) -> String {
 #[derive(Debug, Default, Clone)]
 pub struct ParsedQuery {
     pub house_number: Option<String>,
+    /// Unit / flat / apartment number extracted from AU-style
+    /// `<unit>/<housenumber>` shorthand (`3/827a` → unit=`"3"`,
+    /// hn=`"827a"`). Carried through to the response so callers can
+    /// echo the user's typed unit; G-NAF's address-point storage
+    /// currently doesn't index by unit (FLAT_NUMBER not on disk —
+    /// fix in Phase 2), so this field doesn't yet narrow the lookup
+    /// — but it's the right place to surface the input.
+    pub unit: Option<String>,
     /// State name (expanded from an abbreviation if recognised).
     pub state: Option<String>,
     /// Postcode as a 4-digit string. Not yet wired into search because our
@@ -2648,17 +2656,119 @@ fn canonicalise_state(token: &str) -> Option<&'static str> {
 /// Parse a freeform query into structured parts. Pure string work — no
 /// lookups. Conservative by design: if something doesn't look like a state
 /// abbreviation / postcode / house number, it stays in `rest`.
+/// Walk the input and consume a leading AU `<unit>/<housenumber>`
+/// shorthand if present. Tolerates whitespace around the `/`. Returns
+/// `(unit, hn, byte_offset_into_input_after_match)` on success.
+///
+/// Pattern in regex shorthand: `^\s*(\d+)\s*/\s*(\d[A-Za-z0-9]*)`
+/// — followed by either end-of-input or whitespace before the next
+/// "real" character. We don't actually use a regex; this is a small
+/// hand-written scanner.
+fn consume_au_unit_prefix(input: &str) -> Option<(String, String, usize)> {
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+
+    // Skip leading whitespace.
+    while i < bytes.len() && (bytes[i] as char).is_whitespace() {
+        i += 1;
+    }
+    let unit_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == unit_start {
+        return None;
+    }
+    let unit_end = i;
+    while i < bytes.len() && (bytes[i] as char).is_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'/' {
+        return None;
+    }
+    i += 1; // consume '/'
+    while i < bytes.len() && (bytes[i] as char).is_whitespace() {
+        i += 1;
+    }
+    let hn_start = i;
+    if i >= bytes.len() || !bytes[i].is_ascii_digit() {
+        return None;
+    }
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c.is_ascii_alphanumeric() {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    let hn_end = i;
+    // Accept end-of-input OR whitespace as the terminator. Anything
+    // else (`,`, `(`, etc.) means we partially matched something
+    // that isn't actually an AU unit/hn; bail out.
+    if i < bytes.len() {
+        let c = bytes[i] as char;
+        if !c.is_whitespace() {
+            return None;
+        }
+    }
+    let unit = std::str::from_utf8(&bytes[unit_start..unit_end])
+        .ok()?
+        .to_string();
+    let hn = std::str::from_utf8(&bytes[hn_start..hn_end]).ok()?.to_string();
+    Some((unit, hn, hn_end))
+}
+
 pub fn parse_freeform_query(input: &str) -> ParsedQuery {
-    let tokens = tokenize_user_input(input);
     let mut parsed = ParsedQuery::default();
+
+    // Pre-tokenisation pass: detect the AU `<unit>/<housenumber>`
+    // shorthand at the start of the input (e.g. `3/827a Old Northern
+    // Road`, also `3 / 827a ...`). Tokenisation splits on `/`, so by
+    // the time we reach the per-token loop the "/" signal is gone and
+    // we can't tell whether `["3", "827a"]` came from `3/827a` (unit
+    // + hn) or `3 827a` (two house-number candidates). Strip the
+    // matched prefix here and feed the rest of the string through
+    // the normal tokeniser. Only fires when the input *starts* with
+    // the pattern — embedded "12/45" elsewhere in the query is
+    // ambiguous and falls through to the standard path.
+    let stripped: String;
+    let to_tokenise: &str = {
+        match consume_au_unit_prefix(input) {
+            Some((unit, hn, rest_offset)) => {
+                parsed.unit = Some(unit);
+                parsed.house_number = Some(hn);
+                stripped = input[rest_offset..].to_string();
+                &stripped
+            }
+            None => input,
+        }
+    };
+
+    let tokens = tokenize_user_input(to_tokenise);
     let mut rest: Vec<String> = Vec::with_capacity(tokens.len());
 
     let last_idx = tokens.len().saturating_sub(1);
     for (i, tok) in tokens.iter().enumerate() {
         let all_digits = !tok.is_empty() && tok.chars().all(|c| c.is_ascii_digit());
+        // Leading digit-LED token (digit + optional alpha suffix) →
+        // house_number when we don't already have one. Captures
+        // `1327A Old Northern Road` whose first token is `1327a`
+        // (not all-digit, so the historic `all_digits` branch
+        // missed it). The all-digit branches below still apply for
+        // trailing postcode / late housenumber heuristics.
+        if i == 0
+            && parsed.house_number.is_none()
+            && !tok.is_empty()
+            && tok.chars().next().is_some_and(|c| c.is_ascii_digit())
+            && !all_digits
+        {
+            parsed.house_number = Some(tok.clone());
+            continue;
+        }
         if all_digits {
             // Leading pure-digit token → house_number.
-            if i == 0 {
+            if i == 0 && parsed.house_number.is_none() {
                 parsed.house_number = Some(tok.clone());
                 continue;
             }
@@ -2741,6 +2851,59 @@ pub fn fuzzy_name(schema: &ForwardSchema, token: &str, distance: u8) -> Box<dyn 
         distance,
         true,
     ))
+}
+
+#[cfg(test)]
+mod parse_freeform_query_tests {
+    use super::*;
+
+    #[test]
+    fn au_unit_slash_housenumber_pattern() {
+        // AU shorthand: leading "<unit>/<housenumber>" extracts both
+        // into separate fields and strips the matched prefix from
+        // the rest bag.
+        let p = parse_freeform_query("3/827a Old Northern Road Dural NSW 2158");
+        assert_eq!(p.unit.as_deref(), Some("3"));
+        assert_eq!(p.house_number.as_deref(), Some("827a"));
+        assert_eq!(p.postcode.as_deref(), Some("2158"));
+        // 3 and 827a should NOT appear in rest — they were stripped
+        // before tokenisation.
+        assert!(!p.rest.iter().any(|t| t == "3" || t == "827a"));
+    }
+
+    #[test]
+    fn au_unit_slash_with_whitespace() {
+        let p = parse_freeform_query("12 / 45 Smith St");
+        assert_eq!(p.unit.as_deref(), Some("12"));
+        assert_eq!(p.house_number.as_deref(), Some("45"));
+    }
+
+    #[test]
+    fn leading_digit_then_alpha_token_is_house_number() {
+        // `1327A Old Northern Road` — the historical all-digit rule
+        // missed this because "1327a" isn't all-digit. Now captured
+        // by the new digit-led leading-token rule.
+        let p = parse_freeform_query("1327A Old Northern Road Middle Dural NSW 2158");
+        assert_eq!(p.house_number.as_deref(), Some("1327a"));
+        assert_eq!(p.unit, None);
+        assert_eq!(p.postcode.as_deref(), Some("2158"));
+    }
+
+    #[test]
+    fn plain_leading_digit_still_works() {
+        let p = parse_freeform_query("42 Smith Street");
+        assert_eq!(p.house_number.as_deref(), Some("42"));
+        assert_eq!(p.unit, None);
+    }
+
+    #[test]
+    fn embedded_unit_slash_does_not_fire() {
+        // Only the LEADING `<unit>/<hn>` pattern fires. An embedded
+        // "12/45" elsewhere (rare) is ambiguous and falls through
+        // the standard tokeniser, which splits on `/`.
+        let p = parse_freeform_query("Smith Street 12/45");
+        assert_ne!(p.unit.as_deref(), Some("12"));
+    }
 }
 
 #[cfg(test)]

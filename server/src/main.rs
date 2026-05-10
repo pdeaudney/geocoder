@@ -140,6 +140,14 @@ struct SearchParams {
     street: Option<String>,
     #[serde(default)]
     housenumber: Option<String>,
+    /// Unit / flat / apartment number. Currently echoed back to the
+    /// caller in the response but not yet used to narrow lookups —
+    /// G-NAF's on-disk address-point format doesn't carry FLAT_NUMBER
+    /// (Phase 2 fix). Until then `unit` is purely informational.
+    /// Accepted from explicit param or inferred from AU shorthand
+    /// `<unit>/<housenumber>` in freeform `q`.
+    #[serde(default)]
+    unit: Option<String>,
     #[serde(default)]
     city: Option<String>,
     #[serde(default)]
@@ -933,6 +941,14 @@ async fn search(
         .housenumber
         .clone()
         .or_else(|| parsed.as_ref().and_then(|p| p.house_number.clone()));
+    // Unit (flat/apartment number). Same precedence rule as
+    // housenumber: explicit `?unit=...` wins, otherwise the freeform
+    // `q="3/827a ..."` AU shorthand contributes. Threaded into
+    // enrich_hit so the response echoes the user's typed unit.
+    let unit = params
+        .unit
+        .clone()
+        .or_else(|| parsed.as_ref().and_then(|p| p.unit.clone()));
 
     let limit = params.limit.unwrap_or(10).clamp(1, 50);
 
@@ -1092,7 +1108,7 @@ async fn search(
     let idx_snapshot = index.load();
     let enriched: Vec<serde_json::Value> = enrich_span.in_scope(|| {
         hits.into_iter()
-            .map(|hit| enrich_hit(hit, housenumber.as_deref(), &idx_snapshot, &h3_resolutions))
+            .map(|hit| enrich_hit(hit, housenumber.as_deref(), unit.as_deref(), &idx_snapshot, &h3_resolutions))
             .collect()
     });
 
@@ -1224,7 +1240,7 @@ async fn nearby(
             // and stamp it on the response so callers can rank/render
             // without re-doing haversine themselves.
             let d_m = query_server::geo::haversine_m(hit.lat, hit.lng, params.lat, params.lng);
-            let mut v = enrich_hit(hit, None, &idx_snapshot, &h3_resolutions);
+            let mut v = enrich_hit(hit, None, None, &idx_snapshot, &h3_resolutions);
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("distance_m".into(), serde_json::json!(d_m.round()));
             }
@@ -1293,6 +1309,7 @@ fn snapshot_from_search_hit(
 fn enrich_hit(
     hit: forward::Hit,
     housenumber: Option<&str>,
+    unit: Option<&str>,
     index: &Index,
     h3_resolutions: &[u8],
 ) -> serde_json::Value {
@@ -1321,6 +1338,14 @@ fn enrich_hit(
         "display_name": addr.display_name,
         "address": {
             "house_number": matched_hn.or_else(|| details.house_number.as_deref().map(str::to_owned)),
+            // `unit` is echoed from the caller's input (or freeform AU
+            // shorthand); we don't currently match on it because G-NAF's
+            // on-disk address-point format doesn't carry FLAT_NUMBER
+            // (Phase 2 wires it through). Surface it so callers can
+            // verify their typed unit round-trips and so the response
+            // shape is stable for clients that already split apartment
+            // from building number.
+            "unit": unit,
             "road": details.road,
             "city": details.city,
             "state": details.state,
