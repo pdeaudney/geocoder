@@ -104,6 +104,31 @@ haven't implemented.
 For the 5-region set, plan for ~40–60 GB free on the build host
 (PBFs + final indexes + tantivy + FST + headroom).
 
+## Docker build
+
+The repo's `Dockerfile` includes every index builder. The `build` entrypoint
+fetches the selected sources, builds into `/data/index.next`, and publishes
+`/data/index` only after the final autocomplete stage succeeds:
+
+```bash
+docker build -t geocoder:local .
+export PBF_URLS='https://download.geofabrik.de/australia-oceania/australia-latest.osm.pbf https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.pbf https://download.geofabrik.de/europe/united-kingdom-latest.osm.pbf https://download.geofabrik.de/north-america/canada-latest.osm.pbf https://download.geofabrik.de/north-america/us-latest.osm.pbf'
+docker run --rm -v "$PWD/data:/data" \
+  -e PBF_URLS \
+  -e WOF_COUNTRIES='au nz gb ca us' \
+  -e OA_GEOJSON_SOURCES='us/ny/city_of_new_york us/ca/san_francisco us/va/statewide ca/on/city_of_toronto ca/ab/calgary' \
+  geocoder:local build
+```
+
+The OpenAddresses list is a selected US/CA sample, not nationwide coverage;
+review each source's licence before use. To add AU G-NAF, set a
+license-accepted `GNAF_ARCHIVE_URL` on the host and pass
+`-e GNAF_ARCHIVE_URL` to `docker run`. Prepared G-NAF PSV files, WoF SQLite,
+or OpenAddresses CSVs under `/data` are also imported without a fetch flag.
+Use `docker run -v "$PWD/data:/data" -p 3000:3000 geocoder:local serve`
+after the build. An explicit `build` regenerates all stages; `auto` serves an
+unchanged completed index and rebuilds when source files change.
+
 ## Download
 
 Use the `fetch-data` binary (`server/src/bin/fetch_data.rs`). It

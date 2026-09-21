@@ -2,5 +2,8 @@ build/
 target/
 server/target/
 test-output/
+data/
+data-*/
+test-data/
 *.osm.pbf
 .git/
