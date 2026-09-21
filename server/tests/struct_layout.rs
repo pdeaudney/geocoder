@@ -8,6 +8,7 @@
 
 use std::mem::{align_of, size_of};
 
+use query_server::address_points::AddressPoint;
 use query_server::{AddrPoint, AdminPolygon, InterpWay, NodeCoord, PlacePoint, PoiPoint, WayHeader};
 
 #[test]
@@ -53,6 +54,17 @@ fn place_point_size() {
     // f32 + f32 + u32 + u8 (rank) + u8 (importance) + 2B pad = 16
     assert_eq!(size_of::<PlacePoint>(), 16);
     assert_eq!(align_of::<PlacePoint>(), 4);
+}
+
+#[test]
+fn address_point_size() {
+    // f32 + f32 + u32 + u32 + u32 + u32 + u32 = 28
+    // (lat, lng, housenumber_id, street_id, locality_id, postcode_id,
+    //  unit_id). Pinned so a future field add to the G-NAF/OpenAddresses
+    //  on-disk format is caught at compile/test time, not after a 13 h
+    //  G-NAF rebuild ships a corrupt index.
+    assert_eq!(size_of::<AddressPoint>(), 28);
+    assert_eq!(align_of::<AddressPoint>(), 4);
 }
 
 #[test]

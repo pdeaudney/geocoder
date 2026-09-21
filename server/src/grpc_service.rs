@@ -163,6 +163,7 @@ impl Geocoder for GeocoderService {
                 match snap.find_addr_point_in_country(
                     hn,
                     Some(&hit.name),
+                    None,
                     hit.lat,
                     hit.lng,
                     cc_bytes.as_ref(),
@@ -367,6 +368,7 @@ impl Geocoder for GeocoderService {
             match snap.find_addr_point_in_country(
                 &r.housenumber,
                 Some(&top.name),
+                None,
                 top.lat,
                 top.lng,
                 cc_bytes.as_ref(),

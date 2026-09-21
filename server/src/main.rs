@@ -72,6 +72,11 @@ struct ValidateParams {
     /// address-point indexes and returns `verified` confidence.
     #[serde(default)]
     housenumber: Option<String>,
+    /// Optional unit / apartment / flat number. Used to disambiguate
+    /// when multiple AddrPoints share the same housenumber+street
+    /// (apartment buildings).
+    #[serde(default)]
+    unit: Option<String>,
     street: String,
     /// Locality / suburb / city. Required.
     city: String,
@@ -140,6 +145,14 @@ struct SearchParams {
     street: Option<String>,
     #[serde(default)]
     housenumber: Option<String>,
+    /// Unit / flat / apartment number. Currently echoed back to the
+    /// caller in the response but not yet used to narrow lookups —
+    /// G-NAF's on-disk address-point format doesn't carry FLAT_NUMBER
+    /// (Phase 2 fix). Until then `unit` is purely informational.
+    /// Accepted from explicit param or inferred from AU shorthand
+    /// `<unit>/<housenumber>` in freeform `q`.
+    #[serde(default)]
+    unit: Option<String>,
     #[serde(default)]
     city: Option<String>,
     #[serde(default)]
@@ -568,6 +581,7 @@ async fn validate_address(
             idx_snap.find_addr_point_in_country(
                 hn,
                 Some(&top.name),
+                params.unit.as_deref(),
                 top.lat,
                 top.lng,
                 cc_bytes.as_ref(),
@@ -933,6 +947,14 @@ async fn search(
         .housenumber
         .clone()
         .or_else(|| parsed.as_ref().and_then(|p| p.house_number.clone()));
+    // Unit (flat/apartment number). Same precedence rule as
+    // housenumber: explicit `?unit=...` wins, otherwise the freeform
+    // `q="3/827a ..."` AU shorthand contributes. Threaded into
+    // enrich_hit so the response echoes the user's typed unit.
+    let unit = params
+        .unit
+        .clone()
+        .or_else(|| parsed.as_ref().and_then(|p| p.unit.clone()));
 
     let limit = params.limit.unwrap_or(10).clamp(1, 50);
 
@@ -1092,7 +1114,7 @@ async fn search(
     let idx_snapshot = index.load();
     let enriched: Vec<serde_json::Value> = enrich_span.in_scope(|| {
         hits.into_iter()
-            .map(|hit| enrich_hit(hit, housenumber.as_deref(), &idx_snapshot, &h3_resolutions))
+            .map(|hit| enrich_hit(hit, housenumber.as_deref(), unit.as_deref(), &idx_snapshot, &h3_resolutions))
             .collect()
     });
 
@@ -1224,7 +1246,7 @@ async fn nearby(
             // and stamp it on the response so callers can rank/render
             // without re-doing haversine themselves.
             let d_m = query_server::geo::haversine_m(hit.lat, hit.lng, params.lat, params.lng);
-            let mut v = enrich_hit(hit, None, &idx_snapshot, &h3_resolutions);
+            let mut v = enrich_hit(hit, None, None, &idx_snapshot, &h3_resolutions);
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("distance_m".into(), serde_json::json!(d_m.round()));
             }
@@ -1293,23 +1315,50 @@ fn snapshot_from_search_hit(
 fn enrich_hit(
     hit: forward::Hit,
     housenumber: Option<&str>,
+    unit: Option<&str>,
     index: &Index,
     h3_resolutions: &[u8],
 ) -> serde_json::Value {
     use serde_json::json;
 
-    let (final_lat, final_lng, matched_hn) = match (hit.kind, housenumber) {
+    let cc_bytes: Option<[u8; 2]> = hit
+        .country_code
+        .as_deref()
+        .and_then(parse_country_code_bytes);
+    let (final_lat, final_lng, matched_hn, matched_unit) = match (hit.kind, housenumber) {
         (forward::KIND_STREET, Some(hn)) => {
-            match index.find_addr_point(hn, Some(&hit.name), hit.lat, hit.lng) {
-                Some(m) => (m.lat, m.lng, Some(m.housenumber.to_owned())),
-                None => (hit.lat, hit.lng, None),
+            match index.find_addr_point_in_country(
+                hn,
+                Some(&hit.name),
+                unit,
+                hit.lat,
+                hit.lng,
+                cc_bytes.as_ref(),
+            ) {
+                Some(m) => {
+                    let stored_unit = if m.unit.is_empty() {
+                        None
+                    } else {
+                        Some(m.unit.to_owned())
+                    };
+                    (m.lat, m.lng, Some(m.housenumber.to_owned()), stored_unit)
+                }
+                None => (hit.lat, hit.lng, None, None),
             }
         }
-        _ => (hit.lat, hit.lng, None),
+        _ => (hit.lat, hit.lng, None, None),
     };
 
     let addr = index.query(final_lat, final_lng);
     let details = &addr.address;
+
+    // Prefer the unit recorded on the matched address point over the
+    // unit echoed from the caller's input. The stored value comes from
+    // G-NAF / OpenAddresses (authoritative) and is normalised the same
+    // way `addr:unit` is read from OSM. Falls back to the input unit
+    // when no AddrPoint match was found (e.g. street-only result), so
+    // callers always see their typed unit round-trip.
+    let surfaced_unit = matched_unit.as_deref().or(unit);
 
     json!({
         "name": hit.name,
@@ -1321,6 +1370,7 @@ fn enrich_hit(
         "display_name": addr.display_name,
         "address": {
             "house_number": matched_hn.or_else(|| details.house_number.as_deref().map(str::to_owned)),
+            "unit": surfaced_unit,
             "road": details.road,
             "city": details.city,
             "state": details.state,
