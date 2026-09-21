@@ -78,6 +78,21 @@ pub struct WofCountryMatch<'a> {
 }
 
 impl WofCountries {
+    /// Names and codes carried by the loaded country polygons. Forward
+    /// search uses these names to recognise a trailing country without
+    /// maintaining a separate country-name list in the query parser.
+    pub fn names_and_codes(&self) -> Vec<(&str, [u8; 2])> {
+        as_typed_slice::<WofCountry>(&self.polygons)
+            .iter()
+            .map(|p| {
+                (
+                    read_cstr(&self.strings, p.name_id as usize),
+                    [(p.country_code >> 8) as u8, p.country_code as u8],
+                )
+            })
+            .collect()
+    }
+
     pub fn open(dir: &Path) -> Result<Option<Self>, String> {
         let polygons_path = dir.join("wof_countries.bin");
         let vertices_path = dir.join("wof_countries_vertices.bin");
@@ -87,10 +102,8 @@ impl WofCountries {
             return Ok(None);
         }
 
-        let polygons =
-            mmap_file(&polygons_path).map_err(|e| format!("wof polygons: {e}"))?;
-        let vertices =
-            mmap_file(&vertices_path).map_err(|e| format!("wof vertices: {e}"))?;
+        let polygons = mmap_file(&polygons_path).map_err(|e| format!("wof polygons: {e}"))?;
+        let vertices = mmap_file(&vertices_path).map_err(|e| format!("wof vertices: {e}"))?;
         let strings = mmap_file(&strings_path).map_err(|e| format!("wof strings: {e}"))?;
 
         // Width sanity: WofCountry is 20 bytes, NodeCoord is 8 bytes.
@@ -111,8 +124,7 @@ impl WofCountries {
 
         let polys: &[WofCountry] = as_typed_slice(&polygons);
         let verts: &[NodeCoord] = as_typed_slice(&vertices);
-        let mut sorted_bboxes: Vec<(u32, f64, f64, f64, f64)> =
-            Vec::with_capacity(polys.len());
+        let mut sorted_bboxes: Vec<(u32, f64, f64, f64, f64)> = Vec::with_capacity(polys.len());
         for (idx, p) in polys.iter().enumerate() {
             let off = p.vertex_offset as usize;
             let count = p.vertex_count as usize;
@@ -127,18 +139,20 @@ impl WofCountries {
             for v in ring {
                 let la = v.lat as f64;
                 let ln = v.lng as f64;
-                if la < min_lat { min_lat = la; }
-                if la > max_lat { max_lat = la; }
-                if ln < min_lng { min_lng = ln; }
-                if ln > max_lng { max_lng = ln; }
+                if la < min_lat {
+                    min_lat = la;
+                }
+                if la > max_lat {
+                    max_lat = la;
+                }
+                if ln < min_lng {
+                    min_lng = ln;
+                }
+                if ln > max_lng {
+                    max_lng = ln;
+                }
             }
-            sorted_bboxes.push((
-                idx as u32,
-                min_lat,
-                max_lat,
-                min_lng,
-                max_lng,
-            ));
+            sorted_bboxes.push((idx as u32, min_lat, max_lat, min_lng, max_lng));
         }
         // Sort by area descending (proxy: bbox area). Larger landmasses
         // first means the common case (a point inside a country's main
@@ -146,7 +160,9 @@ impl WofCountries {
         sorted_bboxes.sort_by(|a, b| {
             let area_a = (a.2 - a.1) * (a.4 - a.3);
             let area_b = (b.2 - b.1) * (b.4 - b.3);
-            area_b.partial_cmp(&area_a).unwrap_or(std::cmp::Ordering::Equal)
+            area_b
+                .partial_cmp(&area_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         Ok(Some(WofCountries {
@@ -190,7 +206,10 @@ impl WofCountries {
             }
             let cc = [(p.country_code >> 8) as u8, (p.country_code & 0xFF) as u8];
             let name = read_cstr(&self.strings, p.name_id as usize);
-            return Some(WofCountryMatch { name, country_code: cc });
+            return Some(WofCountryMatch {
+                name,
+                country_code: cc,
+            });
         }
         None
     }
@@ -206,4 +225,3 @@ fn read_cstr(pool: &[u8], offset: usize) -> &str {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     std::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
-

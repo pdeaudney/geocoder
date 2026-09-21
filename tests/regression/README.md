@@ -70,7 +70,24 @@ One file per corpus under `corpora/`:
 | `json_path_exists`        | Path resolves to a non-null value.                                  |
 | `json_path_absent`        | Path missing or null.                                               |
 | `json_path_min_count`     | Array at path has ≥ `min` elements.                                 |
+| `result_matches_within`   | One result in the first `limit` entries matches every mapped field. |
+| `result_absent`           | No result matches every mapped field.                                 |
+| `result_coord_within`     | A result in the first `limit` entries is within `max_m` metres.       |
+| `result_count`            | Result count satisfies an expression such as `>= 5`.                |
 | `coord_within_m`          | Haversine distance between (`lat_path`, `lng_path`) and the given expected lat/lng is ≤ `max_m` metres. |
+
+Pelias converted cases use `result_matches_within` to preserve each case's `priorityThresh`.
+The runner counts fully comparable, partial, and unsupported cases separately.
+Unsupported requests are skipped; partial cases run only checks for response fields our API exposes.
+
+`corpora/forward-quality-targets.json` keeps the original queries from the
+US/CA failure triage but checks real coordinates and stable address fields.
+It does not replace the literal Pelias corpus: display spelling differences
+remain visible in the Pelias report, while this corpus measures whether the
+service found the intended location.
+
+`corpora/reverse-oa-targets.json` checks that an exact OpenAddresses point
+beats a farther OSM house for reverse geocoding.
 
 ### Path syntax
 

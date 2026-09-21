@@ -1,40 +1,30 @@
 {
   "name": "pelias-au-addresses",
-  "description": "Converted from pelias/acceptance-tests (australian addresses). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (australian addresses). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Deakin"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Australian Capital Territory"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Carrington Street"
+            "fields": {
+              "address.city": "Deakin",
+              "address.country_code": "AU",
+              "address.state": "Australian Capital Territory",
+              "name": "38 Carrington Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-australian-addresses-1",
       "notes": "Canberra Address",
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "au",
           "q": "38 carrington st, deakin, ACT, australia"
         }
       },
@@ -47,35 +37,25 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Prahran"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Victoria"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Commercial Road"
+            "fields": {
+              "address.city": "Prahran",
+              "address.country_code": "AU",
+              "address.state": "Victoria",
+              "name": "164 Commercial Road"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-australian-addresses-2",
       "notes": "Victoria, Australia address test",
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "au",
           "q": "164 commercial rd, prahran, vic"
         }
       },
@@ -88,30 +68,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Rivett"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Tristania Street"
+            "fields": {
+              "address.city": "Rivett",
+              "address.country_code": "AU",
+              "name": "41 Tristania Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-australian-addresses-3",
       "notes": "General Australian suburb address test",
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "au",
           "q": "41 Tristania St, rivett, ACT"
         }
       },
@@ -124,25 +98,23 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Harbachs Road"
+            "fields": {
+              "address.country_code": "AU",
+              "name": "160 Harbachs Road"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-australian-addresses-4",
       "notes": "Tasmanian address",
+      "partial_reason": "expected field layer, expected field localadmin, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "au",
           "q": "160 Harbachs Rd, Dysart, TAS 7030"
         }
       },
@@ -155,25 +127,23 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Harbachs Road"
+            "fields": {
+              "address.country_code": "AU",
+              "name": "160 Harbachs Road"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-australian-addresses-4.1",
       "notes": "Tasmanian address",
+      "partial_reason": "expected field layer, expected field localadmin, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "au",
           "q": "160 Harbachs Rd, Dysart, Tasmania 7030"
         }
       },
@@ -186,30 +156,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Bundaberg East"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Bargara Road"
+            "fields": {
+              "address.city": "Bundaberg East",
+              "address.country_code": "AU",
+              "name": "113 Bargara Road"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-australian-addresses-5",
       "notes": "Queensland address",
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "au",
           "q": "113 Bargara Road, Bundaberg East, QLD, AUS"
         }
       },
@@ -222,30 +186,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Bundaberg East"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Bargara Road"
+            "fields": {
+              "address.city": "Bundaberg East",
+              "address.country_code": "AU",
+              "name": "113 Bargara Road"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-australian-addresses-5.1",
       "notes": "Queensland address",
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "au",
           "q": "113 Bargara Road, Bundaberg East, QLD, AUS"
         }
       },

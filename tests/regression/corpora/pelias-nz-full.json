@@ -1,14 +1,23 @@
 {
   "name": "pelias-nz-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "Glen Road"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": -41.287732,
+            "expected_lng": 174.76323,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 500.0
           }
         ],
         "status": 200
@@ -17,55 +26,57 @@
       "notes": null,
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "nz",
           "q": "glen rd, kelburn"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources"
     },
     {
       "expect": {
-        "checks": [
-          {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Kelburn"
-          }
-        ],
+        "checks": [],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_streets-7",
-      "notes": null,
+      "notes": [
+        "house number provided in 3rd position instead of 1st"
+      ],
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "nz",
           "q": "glasgow street 18, kelburn, wellington"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "no comparable expected fields"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "NZ",
+              "address.road": "Glen Road",
+              "name": "Glen Road"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": -41.287732,
+            "expected_lng": 174.76323,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 500.0
           }
         ],
         "status": 200
@@ -76,7 +87,43 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "nz",
+          "q": "glen rd, kelburn"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country_code": "NZ",
+              "address.road": "Glen Road"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
+          },
+          {
+            "expected_lat": -41.287732,
+            "expected_lng": 174.76323,
+            "kind": "result_coord_within",
+            "limit": 5,
+            "max_m": 500.0
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_street_fallback-2",
+      "notes": null,
+      "partial_reason": "expected field layer",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
           "q": "glen rd, kelburn"
         }
       },
@@ -89,27 +136,31 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "New Zealand",
+              "address.country_code": "NZ",
+              "name": "Niue"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
-      "id": "pelias-pelias-combined-search_street_fallback-2",
-      "notes": null,
+      "id": "pelias-pelias-combined-wof_dependencies-6",
+      "notes": "",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "nz",
-          "q": "glen rd, kelburn"
+          "q": "Niue"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources, upstream status fail"
     }
   ]
 }

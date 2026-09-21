@@ -1,4 +1,4 @@
-.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-bias-disambiguation regression-worldwide bench-accuracy bench-fixtures pelias-refresh pelias-full-refresh bench inspect-dump wof-import prerebuild-rehearsal test builder builder-clean clean
+.PHONY: help ami ami-init ami-validate ami-worldwide-build regression-au regression-au-debug regression-pelias-au regression-roundtrip-au regression-nominatim-au regression-bias-disambiguation regression-worldwide bench-accuracy bench-fixtures pelias-refresh pelias-full-refresh bench inspect-dump wof-import wof-postcodes-import prerebuild-rehearsal test builder builder-clean clean
 
 help:
 	@echo "Build:"
@@ -14,7 +14,8 @@ help:
 	@echo "  bench-fixtures        Build / refresh the planet load-test fixtures (Geonames + Pelias)"
 	@echo "  bench-accuracy        Run the bench-fixture accuracy sweep against ./data/index"
 	@echo "  inspect-dump          Dump the index to CSV under data/index/dump-csv/ for DuckDB"
-	@echo "  wof-import            Import WoF country polygons into WOF_INDEX_DIR (default data/index-worldwide)"
+	@echo "  wof-import            Import WoF countries and downloaded postcodes into WOF_INDEX_DIR"
+	@echo "  wof-postcodes-import  Refresh WoF postcodes without rewriting country polygons"
 	@echo "  regression-pelias-au  Run the Pelias AU corpus (partial failures expected today)"
 	@echo "  regression-roundtrip-au  Ground-truth coord round-trips (reverse + housenumber)"
 	@echo "  regression-nominatim-au  Hand-translated Nominatim BDD scenarios"
@@ -67,7 +68,7 @@ regression-au-debug:
 # Expected to have partial failure rate today — different coverage and
 # ranking. Use it to track convergence vs the external gold standard.
 regression-pelias-au:
-	./scripts/run-regression.sh --corpus ./tests/regression/corpora/pelias-au-addresses.json
+	./scripts/run-regression.sh --index ./data/index-worldwide --corpus ./tests/regression/corpora/pelias-au-addresses.json
 
 regression-roundtrip-au:
 	./scripts/run-regression.sh --corpus ./tests/regression/corpora/au-roundtrip-addresses.json
@@ -116,6 +117,7 @@ regression-worldwide:
 # JSON files.
 PELIAS_COUNTRIES := au nz gb us ca fr de nl es it br jp in mx ar at be bg ch cl cn co cr cz dk do ec eg ee fi gr hk hr hu id ie il ir is jm ke kr lk lt lu lv ma my ng no pe ph pl pt ro ru sa sg sk si se th tr tw ua uy ve vn za
 pelias-full-refresh:
+	cargo build --release -p regression-runner --bin pelias-to-ours
 	python3 scripts/merge-pelias-corpus.py \
 	    test-data/pelias-acceptance-tests/test_cases > /tmp/pelias-combined.json
 	@for cc in $(PELIAS_COUNTRIES); do \
@@ -168,12 +170,17 @@ bench-accuracy:
 # Geofabrik extracts that miss their own admin_level=2 relation
 # (typical of great-britain-latest and us-latest). Expects
 # whosonfirst-data-admin-*.db files under test-data/ (fetched by
-# scripts/fetch-test-data.sh). Writes wof_countries_*.bin into the
+# scripts/fetch-test-data.sh). Also exports postcode points when separate
+# whosonfirst-data-postalcode-*.db files have been fetched. Writes into the
 # given index dir — defaults to data/index-worldwide.
 WOF_INDEX_DIR ?= ./data/index-worldwide
 wof-import:
 	cargo build --release -p wof-importer
 	./target/release/wof-importer ./test-data $(WOF_INDEX_DIR)
+
+wof-postcodes-import:
+	cargo build --release -p wof-importer
+	./target/release/wof-importer ./test-data $(WOF_INDEX_DIR) --postcodes-only
 
 # Dump the mmap'd index to CSV under ./data/index/dump-csv/ so DuckDB
 # (or any SQL tool) can inspect streets, admin polygons, places, addr

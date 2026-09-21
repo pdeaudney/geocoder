@@ -25,9 +25,7 @@ use crate::{
 use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, TermQuery};
-use tantivy::schema::{
-    Field, IndexRecordOption, Schema, Value, FAST, INDEXED, STORED, STRING,
-};
+use tantivy::schema::{Field, IndexRecordOption, Schema, Value, FAST, INDEXED, STORED, STRING};
 use tantivy::tokenizer::{AsciiFoldingFilter, LowerCaser, SimpleTokenizer, TextAnalyzer};
 use tantivy::{
     doc, Index as TIndex, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
@@ -36,6 +34,7 @@ use tantivy::{
 pub const KIND_PLACE: u64 = 1;
 pub const KIND_STREET: u64 = 2;
 pub const KIND_POI: u64 = 3;
+pub const KIND_ADDRESS: u64 = 4;
 
 /// Schema handle — kept together so build + query code agree on field ids.
 pub struct ForwardSchema {
@@ -54,6 +53,12 @@ pub struct ForwardSchema {
     pub state: Field,
     pub country_code: Field,
     pub kind: Field,
+    /// Exact address fields. Empty on place, street, and POI documents.
+    pub housenumber: Field,
+    pub housenumber_raw: Field,
+    pub unit: Field,
+    pub unit_raw: Field,
+    pub postcode: Field,
     /// POI category — `<key>:<value>` interned at build time
     /// (`amenity:cafe`, `tourism:attraction`, ...). Indexed (tokenised
     /// on `:`) so callers can pass e.g. `category=amenity` to filter to
@@ -113,6 +118,7 @@ const STREET_TYPE_ABBREVIATIONS: &[(&str, &str)] = &[
     ("av", "avenue"),
     ("rd", "road"),
     ("dr", "drive"),
+    ("tr", "trail"),
     ("ct", "court"),
     ("cl", "close"),
     ("pl", "place"),
@@ -147,6 +153,11 @@ impl ForwardSchema {
         let state = schema.add_text_field("state", text_opts.clone());
         let country_code = schema.add_text_field("country_code", STRING | STORED);
         let kind = schema.add_u64_field("kind", INDEXED | FAST | STORED);
+        let housenumber = schema.add_text_field("housenumber", STRING | STORED);
+        let housenumber_raw = schema.add_text_field("housenumber_raw", STORED);
+        let unit = schema.add_text_field("unit", STRING | STORED);
+        let unit_raw = schema.add_text_field("unit_raw", STORED);
+        let postcode = schema.add_text_field("postcode", STRING | STORED);
         // category is tokenised (the colon in `amenity:cafe` becomes a
         // word break) so a freeform query for "cafe" matches POIs of
         // type amenity:cafe, and a structured `category=amenity` filter
@@ -166,6 +177,11 @@ impl ForwardSchema {
             state,
             country_code,
             kind,
+            housenumber,
+            housenumber_raw,
+            unit,
+            unit_raw,
+            postcode,
             category,
             rank,
             importance,
@@ -181,6 +197,7 @@ impl ForwardSchema {
 pub struct BuildStats {
     pub places: usize,
     pub streets: usize,
+    pub addresses: usize,
 }
 
 /// Signed-area-weighted polygon centroid (lat, lng). Falls back to the
@@ -288,17 +305,16 @@ fn synthesize_short_form(name: &str) -> Option<&str> {
     // place names. Lowercase only — the input was already
     // ascii-folded for the lookup.
     static COMPOUND_PREPS: &[&str] = &[
-        " am ",      // Frankfurt am Main, Halle (Saale) am Saale
-        " an ",      // Frankfurt an der Oder
-        " upon ",    // Newcastle upon Tyne, Stratford upon Avon
-        " on ",      // Stoke on Trent, Newcastle on Tyne (hyphenated form lost on hyphen-split anyway)
-        " under ",   // Newcastle under Lyme
-        " im ",      // Speyer im Rhein
-        " bei ",     // Munich bei München
-        " sur ",     // Boulogne sur Mer (space form)
-        " of ",      // Isle of Wight, City of London
-        " near ",
-        " by ",
+        " am ",    // Frankfurt am Main, Halle (Saale) am Saale
+        " an ",    // Frankfurt an der Oder
+        " upon ",  // Newcastle upon Tyne, Stratford upon Avon
+        " on ", // Stoke on Trent, Newcastle on Tyne (hyphenated form lost on hyphen-split anyway)
+        " under ", // Newcastle under Lyme
+        " im ", // Speyer im Rhein
+        " bei ", // Munich bei München
+        " sur ", // Boulogne sur Mer (space form)
+        " of ", // Isle of Wight, City of London
+        " near ", " by ",
     ];
     for prep in COMPOUND_PREPS {
         if let Some(idx) = lower.find(prep) {
@@ -313,7 +329,7 @@ fn synthesize_short_form(name: &str) -> Option<&str> {
     None
 }
 
-/// For each `(name_id, ~22 km bucket)` cluster of admin polygons at
+/// For each `(name_id, admin_level, ~44 km bucket)` cluster of admin polygons at
 /// admin_level 4-10, keep only the polygon with the largest `area` —
 /// that's typically the canonical city-proper outline (not an
 /// annexation parcel or ETJ extension). Returns the set of `poly_id`s
@@ -338,7 +354,7 @@ fn build_admin_metro_keep_set(
     admin_vertices: &[NodeCoord],
     idx: &crate::Index,
 ) -> std::collections::HashSet<u32> {
-    let mut best_per_cluster: std::collections::HashMap<(u32, i32, i32), (u32, f32)> =
+    let mut best_per_cluster: std::collections::HashMap<(u32, u8, i32, i32), (u32, f32)> =
         std::collections::HashMap::new();
     let mut considered = 0usize;
     for (poly_id, poly) in polys.iter().enumerate() {
@@ -356,7 +372,7 @@ fn build_admin_metro_keep_set(
         considered += 1;
         let (lat, lng) = polygon_centroid(&admin_vertices[off..off + cnt]);
         let (b_lat, b_lng) = wide_coord_bucket(lat, lng);
-        let key = (poly.name_id, b_lat, b_lng);
+        let key = (poly.name_id, poly.admin_level, b_lat, b_lng);
         let entry = best_per_cluster
             .entry(key)
             .or_insert((poly_id as u32, poly.area));
@@ -396,7 +412,11 @@ pub fn default_heap_bytes() -> usize {
     512 * 1024 * 1024
 }
 
-pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<BuildStats, String> {
+pub fn build_with_heap(
+    source: &Path,
+    dest: &Path,
+    heap_bytes: usize,
+) -> Result<BuildStats, String> {
     let source_str = source
         .to_str()
         .ok_or_else(|| format!("non-utf8 source path: {}", source.display()))?;
@@ -666,6 +686,111 @@ pub fn build_with_heap(source: &Path, dest: &Path, heap_bytes: usize) -> Result<
         }
     }
 
+    // Exact address documents share the same query schema in both build
+    // layouts. G-NAF takes precedence over duplicate AU OSM/OA rows.
+    let osm_addresses: &[crate::AddrPoint] = as_typed_slice(&idx.addr_points);
+    for p in osm_addresses {
+        let street = idx.get_string(p.street_or_place_id);
+        let hn = idx.get_string(p.housenumber_id);
+        if street.is_empty() || hn.is_empty() || p.flags & crate::FLAG_IS_HOUSENAME != 0 {
+            continue;
+        }
+        let admin = idx.find_admin_with_place(p.lat as f64, p.lng as f64);
+        let Some(cc) = admin.country_code else {
+            continue;
+        };
+        if cc == *b"AU" && idx.gnaf.is_some() {
+            continue;
+        }
+        let locality = if p.parent_place_id != 0 {
+            Some(idx.get_string(p.parent_place_id))
+        } else {
+            admin.city
+        };
+        writer
+            .add_document(address_doc(
+                &schema_handle,
+                street,
+                hn,
+                idx.get_string(p.unit_id),
+                idx.get_string(p.postcode_id),
+                p.lat as f64,
+                p.lng as f64,
+                locality,
+                [admin.city, borough_alias(cc, admin.state, admin.county)],
+                admin.state,
+                cc,
+                26,
+            ))
+            .map_err(|e| format!("index OSM address: {e}"))?;
+        stats.addresses += 1;
+    }
+    if let Some(gnaf) = idx.gnaf.as_ref() {
+        for p in gnaf.points() {
+            let street = gnaf.string_at(p.street_id);
+            let hn = gnaf.string_at(p.housenumber_id);
+            if street.is_empty() || hn.is_empty() {
+                continue;
+            }
+            let admin = idx.find_admin(p.lat as f64, p.lng as f64);
+            writer
+                .add_document(address_doc(
+                    &schema_handle,
+                    street,
+                    hn,
+                    gnaf.string_at(p.unit_id),
+                    gnaf.string_at(p.postcode_id),
+                    p.lat as f64,
+                    p.lng as f64,
+                    Some(gnaf.string_at(p.locality_id)),
+                    [admin.city, None],
+                    admin.state,
+                    *b"AU",
+                    24,
+                ))
+                .map_err(|e| format!("index G-NAF address: {e}"))?;
+            stats.addresses += 1;
+        }
+    }
+    if let Some(oa) = idx.open_addresses.as_ref() {
+        for (country, shard) in oa.shards() {
+            let cc = [
+                country[0].to_ascii_uppercase(),
+                country[1].to_ascii_uppercase(),
+            ];
+            if cc == *b"AU" && idx.gnaf.is_some() {
+                continue;
+            }
+            for p in shard.points() {
+                let street = shard.string_at(p.street_id);
+                let hn = shard.string_at(p.housenumber_id);
+                if street.is_empty() || hn.is_empty() {
+                    continue;
+                }
+                let admin = idx.find_admin(p.lat as f64, p.lng as f64);
+                let source_city = shard.string_at(p.locality_id);
+                let source_city = (!source_city.is_empty()).then_some(source_city);
+                writer
+                    .add_document(address_doc(
+                        &schema_handle,
+                        street,
+                        hn,
+                        shard.string_at(p.unit_id),
+                        shard.string_at(p.postcode_id),
+                        p.lat as f64,
+                        p.lng as f64,
+                        admin.city.or(source_city),
+                        [source_city, borough_alias(cc, admin.state, admin.county)],
+                        admin.state,
+                        cc,
+                        25,
+                    ))
+                    .map_err(|e| format!("index OpenAddresses address: {e}"))?;
+                stats.addresses += 1;
+            }
+        }
+    }
+
     writer
         .commit()
         .map_err(|e| format!("tantivy commit: {e}"))?;
@@ -724,6 +849,9 @@ pub fn build_partitioned_with_heap(
     // is preserved.
     struct PendingDoc<'a> {
         name: &'a str,
+        housenumber: Option<&'a str>,
+        unit: Option<&'a str>,
+        postcode: Option<&'a str>,
         /// `name:xx` alternates from i18n_names.bin. Empty for streets
         /// (the C++ builder doesn't emit street entries) and for
         /// places without name:xx tags. Concatenated into the indexed
@@ -739,11 +867,45 @@ pub fn build_partitioned_with_heap(
         lat: f64,
         lng: f64,
         suburb: Option<&'a str>,
+        /// Also searchable, while `suburb` remains the displayed name.
+        extra_localities: [Option<&'a str>; 2],
         state: Option<&'a str>,
         country_code: [u8; 2],
         /// POI category — `<key>:<value>` interned in strings.bin
         /// (e.g. `amenity:cafe`). Empty for non-POI docs.
         category: &'a str,
+    }
+
+    fn pending_address<'a>(
+        name: &'a str,
+        housenumber: &'a str,
+        unit: &'a str,
+        postcode: &'a str,
+        lat: f64,
+        lng: f64,
+        suburb: Option<&'a str>,
+        extra_localities: [Option<&'a str>; 2],
+        state: Option<&'a str>,
+        country_code: [u8; 2],
+        rank: u64,
+    ) -> PendingDoc<'a> {
+        PendingDoc {
+            name,
+            housenumber: Some(housenumber),
+            unit: Some(unit),
+            postcode: Some(postcode),
+            alternates: Vec::new(),
+            kind: KIND_ADDRESS,
+            rank,
+            importance: 0,
+            lat,
+            lng,
+            suburb,
+            extra_localities,
+            state,
+            country_code,
+            category: "",
+        }
     }
 
     // Helper: resolve a doc's country code from find_admin-derived bytes.
@@ -802,6 +964,9 @@ pub fn build_partitioned_with_heap(
                     cc,
                     PendingDoc {
                         name,
+                        housenumber: None,
+                        unit: None,
+                        postcode: None,
                         alternates,
                         kind: KIND_PLACE,
                         rank: p.rank as u64,
@@ -809,6 +974,7 @@ pub fn build_partitioned_with_heap(
                         lat,
                         lng,
                         suburb: admin.city,
+                        extra_localities: [None, None],
                         state: admin.state,
                         country_code: cc,
                         category: "",
@@ -900,6 +1066,9 @@ pub fn build_partitioned_with_heap(
                     cc,
                     PendingDoc {
                         name,
+                        housenumber: None,
+                        unit: None,
+                        postcode: None,
                         alternates,
                         kind: KIND_PLACE,
                         rank,
@@ -907,6 +1076,7 @@ pub fn build_partitioned_with_heap(
                         lat,
                         lng,
                         suburb: admin.city,
+                        extra_localities: [None, None],
                         state: admin.state,
                         country_code: cc,
                         category: "",
@@ -951,6 +1121,9 @@ pub fn build_partitioned_with_heap(
                 cc,
                 PendingDoc {
                     name,
+                    housenumber: None,
+                    unit: None,
+                    postcode: None,
                     // No street entries in i18n_names.bin (the C++
                     // builder only emits admin polygons and place
                     // points), so nothing to add here.
@@ -961,6 +1134,7 @@ pub fn build_partitioned_with_heap(
                     lat,
                     lng,
                     suburb: admin.city,
+                    extra_localities: [None, None],
                     state: admin.state,
                     country_code: cc,
                     category: "",
@@ -1015,6 +1189,9 @@ pub fn build_partitioned_with_heap(
                     cc,
                     PendingDoc {
                         name,
+                        housenumber: None,
+                        unit: None,
+                        postcode: None,
                         alternates,
                         kind: KIND_POI,
                         rank: poi.rank as u64,
@@ -1022,6 +1199,7 @@ pub fn build_partitioned_with_heap(
                         lat,
                         lng,
                         suburb,
+                        extra_localities: [None, None],
                         state: geo_admin.state,
                         country_code: cc,
                         category,
@@ -1031,6 +1209,121 @@ pub fn build_partitioned_with_heap(
             .collect();
         for (cc, doc) in poi_candidates {
             buckets.entry(cc).or_default().push(doc);
+        }
+    }
+
+    // Address documents make an exact house/postcode searchable at its
+    // own coordinate. A street-way midpoint can be kilometres from a
+    // requested house, so spatial refinement alone cannot do this.
+    let osm_addresses: &[crate::AddrPoint] = as_typed_slice(&idx.addr_points);
+    let osm_candidates: Vec<([u8; 2], PendingDoc<'_>)> = osm_addresses
+        .par_iter()
+        .filter_map(|p| {
+            let name = idx.get_string(p.street_or_place_id);
+            let hn = idx.get_string(p.housenumber_id);
+            if name.is_empty() || hn.is_empty() || p.flags & crate::FLAG_IS_HOUSENAME != 0 {
+                return None;
+            }
+            let lat = p.lat as f64;
+            let lng = p.lng as f64;
+            let admin = idx.find_admin_with_place(lat, lng);
+            let cc = country_bytes(admin.country_code)?;
+            if cc == *b"AU" && idx.gnaf.is_some() {
+                return None; // G-NAF covers AU more completely.
+            }
+            let suburb = if p.parent_place_id != 0 {
+                Some(idx.get_string(p.parent_place_id))
+            } else {
+                admin.city
+            };
+            Some((
+                cc,
+                pending_address(
+                    name,
+                    hn,
+                    idx.get_string(p.unit_id),
+                    idx.get_string(p.postcode_id),
+                    lat,
+                    lng,
+                    suburb,
+                    [admin.city, borough_alias(cc, admin.state, admin.county)],
+                    admin.state,
+                    cc,
+                    26,
+                ),
+            ))
+        })
+        .collect();
+    for (cc, doc) in osm_candidates {
+        buckets.entry(cc).or_default().push(doc);
+    }
+
+    if let Some(gnaf) = idx.gnaf.as_ref() {
+        let gnaf_candidates: Vec<PendingDoc<'_>> = gnaf
+            .points()
+            .par_iter()
+            .filter_map(|p| {
+                let name = gnaf.string_at(p.street_id);
+                let hn = gnaf.string_at(p.housenumber_id);
+                if name.is_empty() || hn.is_empty() {
+                    return None;
+                }
+                let admin = idx.find_admin(p.lat as f64, p.lng as f64);
+                Some(pending_address(
+                    name,
+                    hn,
+                    gnaf.string_at(p.unit_id),
+                    gnaf.string_at(p.postcode_id),
+                    p.lat as f64,
+                    p.lng as f64,
+                    Some(gnaf.string_at(p.locality_id)),
+                    [admin.city, None],
+                    admin.state,
+                    *b"AU",
+                    24,
+                ))
+            })
+            .collect();
+        buckets.entry(*b"AU").or_default().extend(gnaf_candidates);
+    }
+
+    if let Some(oa) = idx.open_addresses.as_ref() {
+        for (country, shard) in oa.shards() {
+            let cc = [
+                country[0].to_ascii_uppercase(),
+                country[1].to_ascii_uppercase(),
+            ];
+            if cc == *b"AU" && idx.gnaf.is_some() {
+                continue;
+            }
+            let candidates: Vec<PendingDoc<'_>> = shard
+                .points()
+                .par_iter()
+                .filter_map(|p| {
+                    let name = shard.string_at(p.street_id);
+                    let hn = shard.string_at(p.housenumber_id);
+                    if name.is_empty() || hn.is_empty() {
+                        return None;
+                    }
+                    let admin = idx.find_admin(p.lat as f64, p.lng as f64);
+                    let source_city = shard.string_at(p.locality_id);
+                    let source_city = (!source_city.is_empty()).then_some(source_city);
+                    Some(pending_address(
+                        name,
+                        hn,
+                        shard.string_at(p.unit_id),
+                        shard.string_at(p.postcode_id),
+                        p.lat as f64,
+                        p.lng as f64,
+                        admin.city.or(source_city),
+                        [source_city, borough_alias(cc, admin.state, admin.county)],
+                        admin.state,
+                        cc,
+                        25,
+                    ))
+                })
+                .collect();
+            buckets.entry(cc).or_default().extend(candidates);
         }
     }
 
@@ -1064,8 +1357,7 @@ pub fn build_partitioned_with_heap(
                 std::fs::remove_dir_all(&dir)
                     .map_err(|e| format!("clear {}: {}", dir.display(), e))?;
             }
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
+            std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
             let t_index = TIndex::create_in_dir(&dir, schema_handle.schema.clone())
                 .map_err(|e| format!("create tantivy {}: {}", dir.display(), e))?;
             register_tokenizer(&t_index);
@@ -1094,8 +1386,23 @@ pub fn build_partitioned_with_heap(
 
             let mut stats = BuildStats::default();
             for d in &docs {
-                writer
-                    .add_document(tantivy_doc(
+                let doc = if let Some(hn) = d.housenumber {
+                    address_doc(
+                        &schema_handle,
+                        d.name,
+                        hn,
+                        d.unit.unwrap_or(""),
+                        d.postcode.unwrap_or(""),
+                        d.lat,
+                        d.lng,
+                        d.suburb,
+                        d.extra_localities,
+                        d.state,
+                        d.country_code,
+                        d.rank,
+                    )
+                } else {
+                    tantivy_doc(
                         &schema_handle,
                         d.name,
                         &d.alternates,
@@ -1108,10 +1415,15 @@ pub fn build_partitioned_with_heap(
                         d.state,
                         Some(d.country_code),
                         d.category,
-                    ))
+                    )
+                };
+                writer
+                    .add_document(doc)
                     .map_err(|e| format!("index doc: {e}"))?;
                 if d.kind == KIND_PLACE {
                     stats.places += 1;
+                } else if d.kind == KIND_ADDRESS {
+                    stats.addresses += 1;
                 } else {
                     // Streets and POIs both increment the streets
                     // counter — BuildStats predates KIND_POI and
@@ -1121,9 +1433,9 @@ pub fn build_partitioned_with_heap(
                     stats.streets += 1;
                 }
             }
-            writer.commit().map_err(|e| {
-                format!("commit {}{}: {}", cc[0] as char, cc[1] as char, e)
-            })?;
+            writer
+                .commit()
+                .map_err(|e| format!("commit {}{}: {}", cc[0] as char, cc[1] as char, e))?;
             Ok((cc, stats))
         })
         .collect();
@@ -1163,8 +1475,7 @@ fn append_translit(_name_indexed: &mut String, _source: &str) {}
 /// indexing analyzer's `LowerCaser` + `AsciiFoldingFilter` so we don't keep
 /// two tokens that the analyzer will collapse anyway.
 fn dedup_indexed_tokens(s: &str) -> String {
-    let mut seen: std::collections::HashSet<String> =
-        std::collections::HashSet::with_capacity(16);
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::with_capacity(16);
     let mut out = String::with_capacity(s.len());
     for tok in s.split_whitespace() {
         let key = ascii_fold(tok).to_ascii_lowercase();
@@ -1349,6 +1660,65 @@ fn tantivy_doc(
     )
 }
 
+fn address_doc(
+    s: &ForwardSchema,
+    street: &str,
+    housenumber: &str,
+    unit: &str,
+    postcode: &str,
+    lat: f64,
+    lng: f64,
+    locality: Option<&str>,
+    extra_localities: [Option<&str>; 2],
+    state: Option<&str>,
+    country_code: [u8; 2],
+    rank: u64,
+) -> TantivyDocument {
+    let mut doc = tantivy_doc(
+        s,
+        street,
+        &[],
+        KIND_ADDRESS,
+        rank,
+        0,
+        lat,
+        lng,
+        locality,
+        state,
+        Some(country_code),
+        "",
+    );
+    doc.add_text(s.housenumber, housenumber.to_ascii_lowercase());
+    doc.add_text(s.housenumber_raw, housenumber);
+    doc.add_text(s.unit, unit.to_ascii_lowercase());
+    doc.add_text(s.unit_raw, unit);
+    doc.add_text(s.postcode, normalize_postcode(postcode));
+    for extra in extra_localities.into_iter().flatten() {
+        if locality.is_none_or(|primary| !primary.eq_ignore_ascii_case(extra)) {
+            doc.add_text(s.suburb, canonicalise_phrase(extra));
+        }
+    }
+    doc
+}
+
+fn borough_alias(
+    country_code: [u8; 2],
+    state: Option<&str>,
+    county: Option<&str>,
+) -> Option<&'static str> {
+    if country_code != *b"US" || state != Some("New York") {
+        return None;
+    }
+    match county? {
+        "New York County" => Some("Manhattan"),
+        "Kings County" => Some("Brooklyn"),
+        "Queens County" => Some("Queens"),
+        "Bronx County" => Some("Bronx"),
+        "Richmond County" => Some("Staten Island"),
+        _ => None,
+    }
+}
+
 // --- Query path ---
 
 /// A single opened tantivy index with its reader + schema handle.
@@ -1383,6 +1753,7 @@ struct FieldedIndex {
 pub struct Forward {
     per_country: std::collections::HashMap<[u8; 2], FieldedIndex>,
     default: Option<FieldedIndex>,
+    country_aliases: std::collections::HashMap<String, String>,
 }
 
 /// Structured forward-geocoding query. Any field can be `None`; the query
@@ -1393,6 +1764,9 @@ pub struct Forward {
 pub struct StructuredQuery<'a> {
     pub q: Option<&'a str>,
     pub street: Option<&'a str>,
+    pub housenumber: Option<&'a str>,
+    pub unit: Option<&'a str>,
+    pub postcode: Option<&'a str>,
     pub city: Option<&'a str>,
     pub state: Option<&'a str>,
     pub country_code: Option<&'a str>,
@@ -1522,7 +1896,23 @@ impl Forward {
             return Ok(Forward {
                 per_country: std::collections::HashMap::new(),
                 default: Some(Self::open_one(dir)?),
+                country_aliases: std::collections::HashMap::new(),
             });
+        }
+
+        // The country polygon data supplies display names for every
+        // installed locale. Keep the map with the forward reader so a
+        // suffix such as ", Germany" follows the index contents.
+        let mut country_aliases = std::collections::HashMap::new();
+        if let Some(countries) = crate::wof_countries::WofCountries::open(dir)? {
+            for (name, code) in countries.names_and_codes() {
+                if !name.is_empty() && code.iter().all(u8::is_ascii_uppercase) {
+                    country_aliases.insert(
+                        name.to_lowercase(),
+                        String::from_utf8_lossy(&code).into_owned(),
+                    );
+                }
+            }
         }
 
         // Default tantivy/ load is best-effort. A common failure mode
@@ -1585,7 +1975,11 @@ impl Forward {
                 }
             }
         }
-        Ok(Forward { per_country, default })
+        Ok(Forward {
+            per_country,
+            default,
+            country_aliases,
+        })
     }
 
     /// Open a single tantivy index directory (shared between the monolithic
@@ -1607,6 +2001,11 @@ impl Forward {
             state: field("state")?,
             country_code: field("country_code")?,
             kind: field("kind")?,
+            housenumber: field("housenumber")?,
+            housenumber_raw: field("housenumber_raw")?,
+            unit: field("unit")?,
+            unit_raw: field("unit_raw")?,
+            postcode: field("postcode")?,
             category: field("category")?,
             rank: field("rank")?,
             importance: field("importance")?,
@@ -1690,7 +2089,10 @@ impl Forward {
     /// Resolve the underlying tantivy index for the first pick-able index
     /// matching the query. Used internally by search_structured; public
     /// mainly so tests can poke at it.
-    fn active_index<'s>(&'s self, q: &StructuredQuery<'_>) -> Option<(&'s FieldedIndex, &'static str)> {
+    fn active_index<'s>(
+        &'s self,
+        q: &StructuredQuery<'_>,
+    ) -> Option<(&'s FieldedIndex, &'static str)> {
         self.pick(q.country_code)
     }
 
@@ -1698,12 +2100,9 @@ impl Forward {
     /// become required field-specific matches; tokens from `q` become
     /// should-match matches against name + suburb + state with name boosted.
     ///
-    /// When the primary query returns zero hits, walks a Nominatim-style
-    /// fallback ladder — drop the most specific constraint, retry — until
-    /// either a hit comes back or every relaxation is exhausted. The ladder
-    /// is: full query → drop country_code → drop state → drop city → drop
-    /// kind. Each step is a one-line simpler query. Total fallback cost
-    /// for a truly-nothing query: ~5 × one search ≈ 100 µs.
+    /// If only country shards are loaded, an unscoped query searches each
+    /// shard and merges the results. Explicit filters remain constraints:
+    /// a miss in New York must not turn into a result in Chicago or Canada.
     #[tracing::instrument(
         name = "forward.search_structured",
         skip_all,
@@ -1722,6 +2121,264 @@ impl Forward {
         )
     )]
     pub fn search_structured(&self, q: StructuredQuery<'_>) -> Result<Vec<Hit>, String> {
+        self.search_structured_inner(q, true)
+    }
+
+    fn search_structured_inner(
+        &self,
+        q: StructuredQuery<'_>,
+        strip_country_suffix: bool,
+    ) -> Result<Vec<Hit>, String> {
+        // "CA" at the end can mean Canada or California. Search both
+        // readings and let the remaining address terms resolve it.
+        if strip_country_suffix && q.country_code.is_none() {
+            if let Some((body, tail)) = q.q.and_then(|text| text.rsplit_once(char::is_whitespace)) {
+                if tail.eq_ignore_ascii_case("CA") && body.trim_end_matches(',').contains(',') {
+                    let mut hits = self.search_structured_inner(
+                        StructuredQuery {
+                            q: Some(body.trim_end()),
+                            country_code: Some("CA"),
+                            ..q.clone()
+                        },
+                        false,
+                    )?;
+                    hits.extend(self.search_structured_inner(
+                        StructuredQuery {
+                            country_code: Some("US"),
+                            ..q.clone()
+                        },
+                        false,
+                    )?);
+                    hits.sort_by(|a, b| {
+                        boosted_score(b, q.bias.as_ref())
+                            .total_cmp(&boosted_score(a, q.bias.as_ref()))
+                    });
+                    hits.truncate(q.limit);
+                    return Ok(hits);
+                }
+            }
+        }
+        if strip_country_suffix {
+            if let Some((body, cc)) = q
+                .q
+                .and_then(|text| country_suffix(text, Some(&self.country_aliases), q.country_code))
+            {
+                if q.country_code
+                    .is_none_or(|explicit| explicit.eq_ignore_ascii_case(&cc))
+                {
+                    return self.search_structured_inner(
+                        StructuredQuery {
+                            q: Some(body),
+                            country_code: Some(&cc),
+                            ..q
+                        },
+                        false,
+                    );
+                }
+            }
+        }
+        if q.country_code.is_none() && self.default.is_none() {
+            let mut countries: Vec<_> = self.per_country.keys().copied().collect();
+            countries.sort_unstable();
+            // A comma-delimited city and region is a place lookup. Query
+            // each shard with its own region spelling before its POIs can
+            // dominate a shared name (for example San Francisco, CA).
+            if q.kind.is_none()
+                && q.street.is_none()
+                && q.city.is_none()
+                && q.state.is_none()
+                && q.housenumber.is_none()
+                && q.postcode.is_none()
+            {
+                if let Some((name, region)) = q.q.and_then(|text| text.rsplit_once(',')) {
+                    let name = name.trim();
+                    let region = region.trim();
+                    if !name.is_empty()
+                        && !region.is_empty()
+                        && region
+                            .chars()
+                            .all(|c| c.is_alphabetic() || c.is_whitespace())
+                    {
+                        let mut places = Vec::new();
+                        for cc in &countries {
+                            let code = String::from_utf8_lossy(cc);
+                            let state = match code.to_ascii_uppercase().as_str() {
+                                "AU" => canonicalise_state(region),
+                                "US" => canonicalise_us_state(region),
+                                "CA" => canonicalise_ca_province(region),
+                                _ => None,
+                            }
+                            .unwrap_or(region);
+                            places.extend(
+                                self.search_structured_inner(
+                                    StructuredQuery {
+                                        q: Some(name),
+                                        state: Some(state),
+                                        country_code: Some(&code),
+                                        kind: Some(KIND_PLACE),
+                                        limit: q.limit.max(10).min(50),
+                                        ..q.clone()
+                                    },
+                                    false,
+                                )?
+                                .into_iter()
+                                .filter(|hit| {
+                                    hit.name.eq_ignore_ascii_case(name)
+                                        && hit
+                                            .state
+                                            .as_deref()
+                                            .is_some_and(|s| s.eq_ignore_ascii_case(state))
+                                }),
+                            );
+                            // A two-letter tail can also be a country.
+                            // Compare both readings using indexed place
+                            // prominence: Toronto, CA means Canada while
+                            // San Francisco, CA means California.
+                            if region.eq_ignore_ascii_case(&code) {
+                                places.extend(
+                                    self.search_structured_inner(
+                                        StructuredQuery {
+                                            q: Some(name),
+                                            country_code: Some(&code),
+                                            kind: Some(KIND_PLACE),
+                                            limit: q.limit.max(10).min(50),
+                                            ..q.clone()
+                                        },
+                                        false,
+                                    )?
+                                    .into_iter()
+                                    .filter(|hit| hit.name.eq_ignore_ascii_case(name)),
+                                );
+                            }
+                        }
+                        if !places.is_empty() {
+                            // Rank 16 is the city/town centre. A state or
+                            // county polygon can share its name and have
+                            // more prominence but a poor centroid.
+                            places.sort_by(|a, b| {
+                                (b.rank == 16)
+                                    .cmp(&(a.rank == 16))
+                                    .then_with(|| b.importance.cmp(&a.importance))
+                                    .then_with(|| b.score.total_cmp(&a.score))
+                            });
+                            places.truncate(q.limit.max(1).min(50));
+                            return Ok(places);
+                        }
+                    }
+                }
+            }
+            if q.kind.is_none()
+                && q.street.is_none()
+                && q.city.is_none()
+                && q.state.is_none()
+                && q.housenumber.is_none()
+                && q.postcode.is_none()
+                && q.bias.is_none()
+            {
+                if let Some((street, locality)) = q.q.and_then(|text| text.rsplit_once(',')) {
+                    let street = street.trim();
+                    let locality = locality.trim();
+                    if !street.is_empty()
+                        && !street.chars().any(|c| c.is_ascii_digit())
+                        && !locality.is_empty()
+                    {
+                        let mut places = Vec::new();
+                        for cc in &countries {
+                            let code = String::from_utf8_lossy(cc);
+                            places.extend(
+                                self.search_structured_inner(
+                                    StructuredQuery {
+                                        q: Some(locality),
+                                        country_code: Some(&code),
+                                        kind: Some(KIND_PLACE),
+                                        limit: 10,
+                                        ..Default::default()
+                                    },
+                                    false,
+                                )?
+                                .into_iter()
+                                .filter(|hit| hit.name.eq_ignore_ascii_case(locality)),
+                            );
+                        }
+                        places.sort_by(|a, b| {
+                            b.importance.cmp(&a.importance).then_with(|| {
+                                boosted_score(b, None).total_cmp(&boosted_score(a, None))
+                            })
+                        });
+                        if let Some(place) = places.first() {
+                            if let Some(code) = place.country_code.as_deref() {
+                                let hits = self.search_structured_inner(
+                                    StructuredQuery {
+                                        country_code: Some(code),
+                                        bias: Some(BiasCoord {
+                                            lat: place.lat,
+                                            lng: place.lng,
+                                        }),
+                                        ..q.clone()
+                                    },
+                                    false,
+                                )?;
+                                if !hits.is_empty() {
+                                    return Ok(hits);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let mut hits = Vec::new();
+            for cc in countries {
+                let code = String::from_utf8_lossy(&cc);
+                hits.extend(self.search_structured_inner(
+                    StructuredQuery {
+                        country_code: Some(&code),
+                        ..q.clone()
+                    },
+                    false,
+                )?);
+            }
+            // Tantivy BM25 uses each shard's own document frequencies.
+            // A small country's "Sydney" can therefore outscore the
+            // much larger Australian city on raw BM25 alone. For an
+            // unbiased exact place-name query, compare the indexed
+            // prominence before the shard-local text score.
+            let exact_place = if q.bias.is_none()
+                && q.housenumber.is_none()
+                && q.postcode.is_none()
+                && q.street.is_none()
+            {
+                q.q.map(str::trim)
+            } else {
+                None
+            };
+            let prominence = |hit: &Hit| {
+                if hit.kind == KIND_PLACE
+                    && exact_place.is_some_and(|name| hit.name.eq_ignore_ascii_case(name))
+                {
+                    hit.importance
+                } else {
+                    0
+                }
+            };
+            let seeks_address = q.housenumber.is_some()
+                || q.q
+                    .and_then(|text| text.trim_start().chars().next())
+                    .is_some_and(|c| c.is_ascii_digit());
+            hits.sort_by(|a, b| {
+                (seeks_address && b.kind == KIND_ADDRESS)
+                    .cmp(&(seeks_address && a.kind == KIND_ADDRESS))
+                    .then_with(|| prominence(b).cmp(&prominence(a)))
+                    .then_with(|| {
+                        boosted_score(b, q.bias.as_ref())
+                            .total_cmp(&boosted_score(a, q.bias.as_ref()))
+                    })
+                    .then_with(|| a.country_code.cmp(&b.country_code))
+            });
+            hits.truncate(q.limit.max(1).min(50));
+            tracing::Span::current().record("geocoder.stage", "fanout");
+            tracing::Span::current().record("geocoder.match_count", hits.len());
+            return Ok(hits);
+        }
         let Some((active, variant)) = self.active_index(&q) else {
             tracing::Span::current().record("geocoder.stage", "no_index");
             tracing::Span::current().record("geocoder.match_count", 0);
@@ -1732,8 +2389,76 @@ impl Forward {
             return Ok(Vec::new());
         };
         tracing::Span::current().record("geocoder.forward.index_variant", variant);
-        tracing::Span::current()
-            .record("geocoder.forward.tantivy_dir", active.dir_name.as_str());
+        tracing::Span::current().record("geocoder.forward.tantivy_dir", active.dir_name.as_str());
+
+        // Full region names are already stored in the state field for
+        // every indexed country. Try the last comma component there
+        // before treating it as another name token. A failed attempt
+        // falls through, since that component may be a neighbourhood.
+        if q.state.is_none() && q.city.is_none() {
+            if let Some((body, region)) = q.q.and_then(|text| text.rsplit_once(',')) {
+                let body = body.trim();
+                let region = region.trim();
+                if !body.is_empty() && !region.is_empty() {
+                    let hits = self.search_once(
+                        active,
+                        &StructuredQuery {
+                            q: Some(body),
+                            state: Some(region),
+                            ..q.clone()
+                        },
+                        true,
+                        true,
+                        true,
+                    )?;
+                    if !hits.is_empty() {
+                        tracing::Span::current().record("geocoder.stage", "region_suffix");
+                        tracing::Span::current().record("geocoder.match_count", hits.len());
+                        return Ok(hits);
+                    }
+                }
+            }
+        }
+
+        // Postal formats overlap worldwide: a five-digit code is not
+        // necessarily a US ZIP. Ask the loaded postcode field instead
+        // of guessing a country from its shape.
+        if q.postcode.is_none()
+            && q.housenumber.is_none()
+            && q.street.is_none()
+            && q.city.is_none()
+            && q.state.is_none()
+            && q.kind.is_none_or(|kind| kind == KIND_ADDRESS)
+        {
+            if let Some(code) = q.q.map(str::trim).filter(|text| {
+                let normalized = normalize_postcode(text);
+                !text.is_empty()
+                    && text
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c.is_ascii_whitespace() || c == '-')
+                    && (postcode_shape(&normalized)
+                        || (normalized.len() == 3
+                            && normalized.bytes().all(|b| b.is_ascii_digit())))
+            }) {
+                let hits = self.search_once(
+                    active,
+                    &StructuredQuery {
+                        q: None,
+                        postcode: Some(code),
+                        kind: Some(KIND_ADDRESS),
+                        ..q.clone()
+                    },
+                    true,
+                    true,
+                    true,
+                )?;
+                if !hits.is_empty() {
+                    tracing::Span::current().record("geocoder.stage", "bare_postcode");
+                    tracing::Span::current().record("geocoder.match_count", hits.len());
+                    return Ok(hits);
+                }
+            }
+        }
 
         // First try: honour every constraint. If it hits, we're done.
         let strict_span = tracing::info_span!(
@@ -1742,47 +2467,54 @@ impl Forward {
             geocoder.stage = "strict",
             geocoder.forward.tantivy_dir = %active.dir_name,
         );
-        let hits = strict_span.in_scope(|| self.search_once(active, &q))?;
+        let hits = strict_span.in_scope(|| self.search_once(active, &q, true, true, true))?;
         if !hits.is_empty() {
             tracing::Span::current().record("geocoder.stage", "strict");
             tracing::Span::current().record("geocoder.match_count", hits.len());
             return Ok(hits);
         }
+        if q.postcode.is_some() {
+            tracing::Span::current().record("geocoder.stage", "explicit_postcode_miss");
+            tracing::Span::current().record("geocoder.match_count", 0);
+            return Ok(Vec::new());
+        }
 
-        // Progressive relaxation — each step returns as soon as any hit
-        // shows up, so we stop dropping constraints the moment the query
-        // can resolve. Mirrors Nominatim's "multiple interpretations" idea.
-        let ladder: &[(&'static str, fn(&mut StructuredQuery<'_>))] = &[
-            ("drop_country_code", |q| q.country_code = None),
-            ("drop_state", |q| q.state = None),
-            ("drop_city", |q| q.city = None),
-            ("drop_kind", |q| q.kind = None),
-        ];
-        let mut relaxed = q.clone();
-        for (stage, relax) in ladder {
-            relax(&mut relaxed);
-            // Relaxing the country_code may flip us to a different index
-            // (per-country → default). Re-pick each iteration so the
-            // fallback actually gets a chance.
-            let (active, variant) = match self.active_index(&relaxed) {
-                Some(a) => a,
-                None => continue,
-            };
-            let rung_span = tracing::info_span!(
-                target: "query_server::forward",
-                "forward.ladder.rung",
-                geocoder.stage = stage,
-                geocoder.forward.tantivy_dir = %active.dir_name,
-                geocoder.forward.index_variant = variant,
-            );
-            let hits = rung_span.in_scope(|| self.search_once(active, &relaxed))?;
+        let parsed =
+            q.q.map(|text| parse_freeform_query_inner(text, q.country_code));
+        let has_house =
+            q.housenumber.is_some() || parsed.as_ref().is_some_and(|p| p.house_number.is_some());
+        let has_postcode =
+            q.postcode.is_some() || parsed.as_ref().is_some_and(|p| p.postcode.is_some());
+        let has_unit = q.unit.is_some() || parsed.as_ref().is_some_and(|p| p.unit.is_some());
+        if q.kind != Some(KIND_ADDRESS) && q.kind != Some(KIND_STREET) && has_house && has_unit {
+            let hits = self.search_once(active, &q, true, true, false)?;
             if !hits.is_empty() {
-                tracing::Span::current().record("geocoder.stage", *stage);
-                tracing::Span::current().record("geocoder.match_count", hits.len());
-                tracing::Span::current().record("geocoder.forward.index_variant", variant);
-                tracing::Span::current()
-                    .record("geocoder.forward.tantivy_dir", active.dir_name.as_str());
                 return Ok(hits);
+            }
+        }
+        if q.kind != Some(KIND_ADDRESS) && q.kind != Some(KIND_STREET) && has_house && has_postcode
+        {
+            let hits = self.search_once(active, &q, true, false, true)?;
+            if !hits.is_empty() {
+                return Ok(hits);
+            }
+            if has_unit {
+                let hits = self.search_once(active, &q, true, false, false)?;
+                if !hits.is_empty() {
+                    return Ok(hits);
+                }
+            }
+        }
+        if q.kind != Some(KIND_ADDRESS) && (has_house || has_postcode) {
+            let has_text = q.street.is_some()
+                || q.city.is_some()
+                || q.state.is_some()
+                || parsed.as_ref().is_some_and(|p| !p.rest.is_empty());
+            if has_text {
+                let hits = self.search_once(active, &q, false, false, false)?;
+                if !hits.is_empty() {
+                    return Ok(hits);
+                }
             }
         }
 
@@ -1790,23 +2522,131 @@ impl Forward {
         // name matching (Levenshtein distance 1). Only fires after the
         // ladder has failed, so we never pay fuzzy's 2-3x cost on queries
         // the strict path already resolved.
-        if let Some(q_text) = q.q.filter(|s| !s.trim().is_empty()) {
-            if let Some((active, variant)) = self.active_index(&q) {
-                let fuzzy_span = tracing::info_span!(
-                    target: "query_server::forward",
-                    "forward.ladder.rung",
-                    geocoder.stage = "fuzzy",
-                    geocoder.forward.tantivy_dir = %active.dir_name,
-                    geocoder.forward.index_variant = variant,
-                );
-                if let Some(hits) = fuzzy_span.in_scope(|| {
-                    self.search_fuzzy(active, q_text, q.kind, q.limit, q.bias.as_ref())
-                })? {
+        if !has_house
+            && !has_postcode
+            && q.street.is_none()
+            && q.city.is_none()
+            && q.state.is_none()
+        {
+            if let Some(q_text) = q.q.filter(|s| !s.trim().is_empty()) {
+                if let Some((active, variant)) = self.active_index(&q) {
+                    let fuzzy_span = tracing::info_span!(
+                        target: "query_server::forward",
+                        "forward.ladder.rung",
+                        geocoder.stage = "fuzzy",
+                        geocoder.forward.tantivy_dir = %active.dir_name,
+                        geocoder.forward.index_variant = variant,
+                    );
+                    if let Some(hits) = fuzzy_span.in_scope(|| {
+                        self.search_fuzzy(
+                            active,
+                            q_text,
+                            q.country_code,
+                            q.kind,
+                            q.limit,
+                            q.bias.as_ref(),
+                        )
+                    })? {
+                        if !hits.is_empty() {
+                            tracing::Span::current().record("geocoder.stage", "fuzzy");
+                            tracing::Span::current().record("geocoder.match_count", hits.len());
+                            return Ok(hits);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Freeform callers often append a neighbourhood after a comma.
+        // Some extracts only name the enclosing city on street records,
+        // so the neighbourhood token cannot match any indexed field.
+        // Keep the country/structured filters and retry the street part.
+        // A place point for the first location component supplies a
+        // proximity hint when the street document uses a wider city name.
+        if let Some(street_part) =
+            q.q.and_then(|text| text.split_once(',').map(|(s, _)| s.trim()))
+        {
+            if !street_part.is_empty() {
+                let mut street_query = q.clone();
+                street_query.q = Some(street_part);
+                if street_query.state.is_none() {
+                    street_query.state = parsed.as_ref().and_then(|p| p.state.as_deref());
+                }
+                if street_query.bias.is_none() && street_query.city.is_none() {
+                    if let Some(locality) =
+                        q.q.and_then(|text| text.split(',').nth(1))
+                            .map(str::trim)
+                            .filter(|part| !part.is_empty())
+                    {
+                        let place = self.search_structured(StructuredQuery {
+                            q: Some(locality),
+                            state: street_query.state,
+                            country_code: street_query.country_code,
+                            kind: Some(KIND_PLACE),
+                            limit: 1,
+                            ..Default::default()
+                        })?;
+                        if let Some(place) = place.first() {
+                            street_query.bias = Some(BiasCoord {
+                                lat: place.lat,
+                                lng: place.lng,
+                            });
+                        }
+                    }
+                }
+                if let Some((active, variant)) = self.active_index(&street_query) {
+                    let hits = self.search_once(active, &street_query, false, false, false)?;
                     if !hits.is_empty() {
-                        tracing::Span::current().record("geocoder.stage", "fuzzy");
+                        tracing::Span::current().record("geocoder.stage", "drop_location_suffix");
                         tracing::Span::current().record("geocoder.match_count", hits.len());
+                        tracing::Span::current().record("geocoder.forward.index_variant", variant);
+                        tracing::Span::current()
+                            .record("geocoder.forward.tantivy_dir", active.dir_name.as_str());
                         return Ok(hits);
                     }
+                }
+            }
+        }
+
+        // A Latin street address can be followed by an admin name in a
+        // different script ("280 Bloor Street West トロント"). The source
+        // address may have only its English admin name. Retry the address
+        // tokens after all normal searches fail, while retaining explicit
+        // country/state/city filters from the caller.
+        // ponytail: this cannot interpret the dropped admin name; add
+        // translated admin aliases if mixed-script ambiguity appears.
+        if let Some(text) = q.q {
+            let tokens = tokenize_user_input(text);
+            let latin: Vec<&str> = tokens
+                .iter()
+                .map(String::as_str)
+                .filter(|token| token.is_ascii())
+                .collect();
+            if latin.len() < tokens.len()
+                && latin
+                    .iter()
+                    .filter(|token| token.bytes().any(|b| b.is_ascii_alphabetic()))
+                    .count()
+                    >= 2
+                && latin
+                    .first()
+                    .is_some_and(|token| token.bytes().next().is_some_and(|b| b.is_ascii_digit()))
+            {
+                let text = latin.join(" ");
+                let hits = self.search_once(
+                    active,
+                    &StructuredQuery {
+                        q: Some(&text),
+                        ..q.clone()
+                    },
+                    true,
+                    true,
+                    true,
+                )?;
+                if !hits.is_empty() {
+                    tracing::Span::current().record("geocoder.stage", "mixed_script_address");
+                    tracing::Span::current().record("geocoder.match_count", hits.len());
+                    return Ok(hits);
                 }
             }
         }
@@ -1834,11 +2674,12 @@ impl Forward {
         &self,
         active: &FieldedIndex,
         q_text: &str,
+        country_code: Option<&str>,
         kind_filter: Option<u64>,
         limit: usize,
         bias: Option<&BiasCoord>,
     ) -> Result<Option<Vec<Hit>>, String> {
-        let parsed = parse_freeform_query(q_text);
+        let parsed = parse_freeform_query_inner(q_text, country_code);
         if parsed.rest.is_empty() {
             return Ok(None);
         }
@@ -1848,12 +2689,24 @@ impl Forward {
             // Edit distance 1 is the sweet spot: catches most single-char
             // typos ("sidny"→"sydney") without blurring into false
             // positives (distance 2 matches anything remotely similar).
-            let fuzzy = FuzzyTermQuery::new(
-                Term::from_field_text(s.name, tok),
-                1,
-                true,
-            );
+            let fuzzy = FuzzyTermQuery::new(Term::from_field_text(s.name, tok), 1, true);
             clauses.push((Occur::Must, Box::new(fuzzy)));
+        }
+        clauses.push((
+            Occur::MustNot,
+            Box::new(TermQuery::new(
+                Term::from_field_u64(s.kind, KIND_ADDRESS),
+                IndexRecordOption::Basic,
+            )),
+        ));
+        if let Some(cc) = country_code {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(s.country_code, &cc.to_ascii_uppercase()),
+                    IndexRecordOption::Basic,
+                )),
+            ));
         }
         if let Some(k) = kind_filter {
             clauses.push((
@@ -1872,9 +2725,7 @@ impl Forward {
             .map_err(|e| format!("fuzzy search: {e}"))?;
         let mut hits = Vec::with_capacity(top.len());
         for (score, addr) in top {
-            let doc: TantivyDocument = searcher
-                .doc(addr)
-                .map_err(|e| format!("fetch doc: {e}"))?;
+            let doc: TantivyDocument = searcher.doc(addr).map_err(|e| format!("fetch doc: {e}"))?;
             hits.push(hit_from_doc(&doc, s, score)?);
         }
         // Re-rank with the prominence boost + optional proximity bias,
@@ -1901,6 +2752,9 @@ impl Forward {
         &self,
         active: &FieldedIndex,
         q: &StructuredQuery<'_>,
+        use_house: bool,
+        use_postcode: bool,
+        use_unit: bool,
     ) -> Result<Vec<Hit>, String> {
         let searcher = active.reader.searcher();
         let s = &active.schema;
@@ -1950,9 +2804,9 @@ impl Forward {
         // (house_number, state abbreviation, postcode), then every remaining
         // token must match at least one of name/suburb/state. State hints
         // from the parse are additive on top of any structured `state`.
-        if let Some(q_text) = q.q.filter(|s| !s.trim().is_empty()) {
-            let parsed = parse_freeform_query(q_text);
-
+        let parsed =
+            q.q.map(|text| parse_freeform_query_inner(text, q.country_code));
+        if let Some(parsed) = parsed.as_ref() {
             // State extracted from freeform is only applied when the caller
             // didn't provide a structured state; otherwise structured wins.
             if q.state.map(str::trim).filter(|s| !s.is_empty()).is_none() {
@@ -1983,13 +2837,54 @@ impl Forward {
                 // CJK queries, exonyms) but should not outrank a doc
                 // whose canonical OSM name contains the query term.
                 const ALT_NAME_BOOST: f32 = 2.0;
-                let name_q: Box<dyn Query> = Box::new(BoostQuery::new(
+                // "St" inside an unpunctuated address can mean Street
+                // ("1 Water St Manhattan") or Saint ("St Louis").
+                // Search both indexed forms; the other query terms and
+                // address context decide which document wins.
+                let aliases: &[&str] = match tok.as_str() {
+                    "st" => &["st", "street"],
+                    "street" => &["street", "st"],
+                    "n" => &["n", "north"],
+                    "north" => &["north", "n"],
+                    "s" => &["s", "south"],
+                    "south" => &["south", "s"],
+                    "e" => &["e", "east"],
+                    "east" => &["east", "e"],
+                    "w" => &["w", "west"],
+                    "west" => &["west", "w"],
+                    "ne" => &["ne", "northeast"],
+                    "northeast" => &["northeast", "ne"],
+                    "nw" => &["nw", "northwest"],
+                    "northwest" => &["northwest", "nw"],
+                    "se" => &["se", "southeast"],
+                    "southeast" => &["southeast", "se"],
+                    "sw" => &["sw", "southwest"],
+                    "southwest" => &["southwest", "sw"],
+                    _ => &[],
+                };
+                let name_term: Box<dyn Query> = if !aliases.is_empty() {
+                    Box::new(BooleanQuery::new(
+                        aliases
+                            .iter()
+                            .copied()
+                            .map(|term| {
+                                (
+                                    Occur::Should,
+                                    Box::new(TermQuery::new(
+                                        Term::from_field_text(s.name, term),
+                                        IndexRecordOption::WithFreqs,
+                                    )) as Box<dyn Query>,
+                                )
+                            })
+                            .collect(),
+                    ))
+                } else {
                     Box::new(TermQuery::new(
                         Term::from_field_text(s.name, tok),
                         IndexRecordOption::WithFreqs,
-                    )),
-                    NAME_BOOST,
-                ));
+                    ))
+                };
+                let name_q: Box<dyn Query> = Box::new(BoostQuery::new(name_term, NAME_BOOST));
                 let alt_name_q: Box<dyn Query> = Box::new(BoostQuery::new(
                     Box::new(TermQuery::new(
                         Term::from_field_text(s.alt_name, tok),
@@ -2001,14 +2896,79 @@ impl Forward {
                     Term::from_field_text(s.suburb, tok),
                     IndexRecordOption::WithFreqs,
                 ));
+                let state_q: Box<dyn Query> = Box::new(TermQuery::new(
+                    Term::from_field_text(s.state, tok),
+                    IndexRecordOption::WithFreqs,
+                ));
                 let tok_clauses: Vec<(Occur, Box<dyn Query>)> = vec![
                     (Occur::Should, name_q),
                     (Occur::Should, alt_name_q),
                     (Occur::Should, suburb_q),
+                    (Occur::Should, state_q),
                 ];
                 let token_q = BooleanQuery::new(tok_clauses);
                 clauses.push((Occur::Must, Box::new(token_q)));
             }
+        }
+
+        let address_kind = q.kind.is_none() || q.kind == Some(KIND_ADDRESS);
+        let house = q
+            .housenumber
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| parsed.as_ref().and_then(|p| p.house_number.as_deref()));
+        let postcode = q
+            .postcode
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| parsed.as_ref().and_then(|p| p.postcode.as_deref()));
+        let unit = q
+            .unit
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| parsed.as_ref().and_then(|p| p.unit.as_deref()));
+        let exact_house = address_kind && use_house && house.is_some();
+        let exact_postcode = address_kind && use_postcode && postcode.is_some();
+        if exact_house {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(s.housenumber, &house.unwrap().to_ascii_lowercase()),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+            if let Some(unit) = unit {
+                let unit_term = if use_unit {
+                    unit.to_ascii_lowercase()
+                } else {
+                    String::new()
+                };
+                clauses.push((
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(s.unit, &unit_term),
+                        IndexRecordOption::Basic,
+                    )),
+                ));
+            }
+        }
+        if exact_postcode {
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(s.postcode, &normalize_postcode(postcode.unwrap())),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+        if clauses.is_empty() && !exact_house && !exact_postcode {
+            return Ok(Vec::new());
+        }
+        if !exact_house && !exact_postcode {
+            clauses.push((
+                Occur::MustNot,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(s.kind, KIND_ADDRESS),
+                    IndexRecordOption::Basic,
+                )),
+            ));
         }
 
         if let Some(k) = q.kind {
@@ -2027,6 +2987,15 @@ impl Forward {
 
         let boolean = BooleanQuery::new(clauses);
         let limit = q.limit.max(1).min(50);
+        let exact_name = q.q.map(str::trim).filter(|text| {
+            !text.is_empty()
+                && !text.contains(',')
+                && house.is_none()
+                && postcode.is_none()
+                && q.street.is_none()
+                && q.city.is_none()
+                && q.state.is_none()
+        });
         // Over-fetch so we can re-rank without losing interesting
         // candidates that a pure BM25 sort would miss. Two regimes:
         //
@@ -2073,6 +3042,11 @@ impl Forward {
             // protects against pathological large-limit queries.
             // Only paid on bias-enabled queries.
             (limit * 30).max(3_000).min(10_000)
+        } else if exact_name.is_some() {
+            // Same-name places and landmarks can have different BM25
+            // scores solely because each document has different context.
+            // Fetch enough candidates to compare their prominence.
+            (limit * 3).max(100).min(150)
         } else {
             (limit * 3).min(150)
         };
@@ -2082,9 +3056,7 @@ impl Forward {
 
         let mut candidates: Vec<Hit> = Vec::with_capacity(top.len());
         for (score, addr) in top {
-            let doc: TantivyDocument = searcher
-                .doc(addr)
-                .map_err(|e| format!("fetch doc: {e}"))?;
+            let doc: TantivyDocument = searcher.doc(addr).map_err(|e| format!("fetch doc: {e}"))?;
             candidates.push(hit_from_doc(&doc, s, score)?);
         }
 
@@ -2096,6 +3068,24 @@ impl Forward {
         // component dominates the boost.
         let bias = q.bias.as_ref();
         candidates.sort_by(|a, b| {
+            if bias.is_none() {
+                let exact = |hit: &Hit| {
+                    matches!(hit.kind, KIND_PLACE | KIND_POI)
+                        && exact_name.is_some_and(|name| hit.name.eq_ignore_ascii_case(name))
+                };
+                let exact_a = exact(a);
+                let exact_b = exact(b);
+                let order = exact_b.cmp(&exact_a);
+                if order != std::cmp::Ordering::Equal {
+                    return order;
+                }
+                if exact_a {
+                    let prominence = b.importance.cmp(&a.importance);
+                    if prominence != std::cmp::Ordering::Equal {
+                        return prominence;
+                    }
+                }
+            }
             let score_a = boosted_score(a, bias);
             let score_b = boosted_score(b, bias);
             score_b
@@ -2159,7 +3149,7 @@ impl Forward {
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
         if let Some(q_text) = q.q.filter(|s| !s.trim().is_empty()) {
-            let parsed = parse_freeform_query(q_text);
+            let parsed = parse_freeform_query_in_country(q_text, q.country_code);
             for tok in &parsed.rest {
                 let term_q: Box<dyn Query> = Box::new(TermQuery::new(
                     Term::from_field_text(s.name, tok),
@@ -2215,9 +3205,7 @@ impl Forward {
         let radius_m = q.radius_km * 1_000.0;
         let mut hits: Vec<(f64, Hit)> = Vec::with_capacity(top.len().min(limit * 2));
         for (score, addr) in top {
-            let doc: TantivyDocument = searcher
-                .doc(addr)
-                .map_err(|e| format!("fetch doc: {e}"))?;
+            let doc: TantivyDocument = searcher.doc(addr).map_err(|e| format!("fetch doc: {e}"))?;
             let hit = hit_from_doc(&doc, s, score)?;
             let d = crate::geo::haversine_m(hit.lat, hit.lng, q.lat, q.lng);
             if d <= radius_m {
@@ -2298,14 +3286,22 @@ fn parse_tantivy_country_prefix(name: &str) -> Option<[u8; 2]> {
 /// matches still beat weak ones regardless of rank. Exponent chosen
 /// empirically so "Sydney" ranks the city above streets named Sydney, but
 /// "Alysse Close Baulkham Hills" still prefers the highly-specific street.
-fn boosted_score(hit: &Hit, bias: Option<&BiasCoord>) -> f32 {
+pub fn boosted_score(hit: &Hit, bias: Option<&BiasCoord>) -> f32 {
     match bias {
         None => {
             // Nominatim-style prominence boost: lower rank wins among
             // similar BM25 scores. A query for "Sydney" returns the
             // city, not "Sydney Lane".
             const BASELINE: f32 = 26.0;
-            let delta = (BASELINE - hit.rank as f32) / 10.0;
+            // POI ranks come from category rules and can be as low as
+            // 10 (a town hall). They are not locality ranks; treating
+            // them as such put a POI named TORONTO above Toronto city.
+            let rank = if hit.kind == KIND_POI {
+                hit.rank.max(20)
+            } else {
+                hit.rank
+            };
+            let delta = (BASELINE - rank as f32) / 10.0;
             let boost = (1.0 + delta.max(0.0) * 0.4).clamp(1.0, 2.0);
 
             // Importance bonus from index-time signals (population log
@@ -2370,16 +3366,14 @@ fn boosted_score(hit: &Hit, bias: Option<&BiasCoord>) -> f32 {
             // are unaffected (still ranked by BM25 + bias distance).
             const NEAR_BIAS_RADIUS_KM: f32 = 50.0;
             const NEAR_BIAS_MAX_BOOST: f32 = 0.50;
-            let near_bias_factor = if hit.kind == KIND_PLACE
-                && hit.importance > 0
-                && d_km < NEAR_BIAS_RADIUS_KM
-            {
-                let dist_factor = 1.0 - (d_km / NEAR_BIAS_RADIUS_KM);
-                let imp_factor = hit.importance as f32 / 255.0;
-                1.0 + (dist_factor * imp_factor * NEAR_BIAS_MAX_BOOST)
-            } else {
-                1.0
-            };
+            let near_bias_factor =
+                if hit.kind == KIND_PLACE && hit.importance > 0 && d_km < NEAR_BIAS_RADIUS_KM {
+                    let dist_factor = 1.0 - (d_km / NEAR_BIAS_RADIUS_KM);
+                    let imp_factor = hit.importance as f32 / 255.0;
+                    1.0 + (dist_factor * imp_factor * NEAR_BIAS_MAX_BOOST)
+                } else {
+                    1.0
+                };
 
             // Prominence bonus from index-time importance signals
             // (population log + wikidata + wikipedia). The bias-path
@@ -2446,18 +3440,27 @@ fn required_f64(doc: &TantivyDocument, field: Field, label: &str) -> Result<f64,
 }
 
 fn hit_from_doc(doc: &TantivyDocument, s: &ForwardSchema, score: f32) -> Result<Hit, String> {
+    let country_code = optional_str(doc, s.country_code);
+    let postcode =
+        optional_str(doc, s.postcode).map(|code| display_postcode(&code, country_code.as_deref()));
     Ok(Hit {
         name: required_str(doc, s.name_raw, "name_raw")?,
+        housenumber: optional_str(doc, s.housenumber_raw),
+        unit: optional_str(doc, s.unit_raw),
+        postcode,
         suburb: optional_str(doc, s.suburb),
         state: optional_str(doc, s.state),
-        country_code: optional_str(doc, s.country_code),
+        country_code,
         kind: required_u64(doc, s.kind, "kind")?,
         rank: required_u64(doc, s.rank, "rank")?,
         // Importance is stored on every doc but only meaningful for
         // place kind. Default 0 here lets pre-importance indexes (built
         // before this field landed) keep loading without a schema-
         // mismatch error.
-        importance: doc.get_first(s.importance).and_then(|v| v.as_u64()).unwrap_or(0),
+        importance: doc
+            .get_first(s.importance)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         lat: required_f64(doc, s.lat, "lat")?,
         lng: required_f64(doc, s.lng, "lng")?,
         score,
@@ -2480,21 +3483,36 @@ fn hit_from_doc(doc: &TantivyDocument, s: &ForwardSchema, score: f32) -> Result<
 /// didn't produce), wire it here as a Vec<String> expansion before
 /// `apply_place_abbreviation_fold`.
 pub fn tokenize_user_input(s: &str) -> Vec<String> {
-    let folded = ascii_fold(s);
-    let raw_tokens: Vec<String> = folded
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(|t| {
-            // Unicode-aware lowercase to mirror tantivy's `LowerCaser`
-            // analyzer step. `to_ascii_lowercase` is a no-op on non-Latin
-            // scripts so a query like `Сидней` (capital С = U+0421) would
-            // never match the indexed `сидней` (lowercase Cyrillic) — a
-            // silent recall failure for every Cyrillic / Greek / Cherokee
-            // / Armenian etc. query that wasn't already lowercase.
-            let lower: String = t.chars().flat_map(char::to_lowercase).collect();
-            canonicalise_token(&lower).to_owned()
-        })
-        .collect();
+    // Dotted compass suffixes are one street token in the source
+    // ("Macleod Trail SE"), even when typed as "S.E.".
+    let folded = ascii_fold(s).to_ascii_lowercase();
+    let folded = [
+        ("n.e.", "ne"),
+        ("n.w.", "nw"),
+        ("s.e.", "se"),
+        ("s.w.", "sw"),
+    ]
+    .into_iter()
+    .fold(folded, |text, (short, full)| text.replace(short, full));
+    let mut raw_tokens = Vec::new();
+    for component in folded.split(',') {
+        let mut part: Vec<String> = component
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                // Unicode-aware lowercase mirrors tantivy's LowerCaser
+                // for Cyrillic, Greek, and other non-Latin names.
+                let lower: String = t.chars().flat_map(char::to_lowercase).collect();
+                canonicalise_token(&lower).to_owned()
+            })
+            .collect();
+        // At the end of a comma-delimited street component, "St" is
+        // Street. At the start of "St Louis" it still means Saint.
+        if part.len() > 1 && part.last().is_some_and(|s| s == "st") {
+            *part.last_mut().unwrap() = "street".to_owned();
+        }
+        raw_tokens.extend(part);
+    }
     apply_place_abbreviation_fold(raw_tokens)
 }
 
@@ -2552,6 +3570,11 @@ pub fn canonicalise_phrase(s: &str) -> String {
         // ASCII-folded view. Keep the original word if no match.
         let trimmed = word.trim_end_matches('.');
         let key_owned = ascii_fold(trimmed).to_ascii_lowercase();
+
+        if i == last && key_owned == "st" && words.len() > 1 {
+            out.push_str("street");
+            continue;
+        }
 
         // Street-type abbreviation table (Tce → terrace, Hwy → highway, …).
         if let Some((_, full)) = STREET_TYPE_ABBREVIATIONS
@@ -2614,6 +3637,26 @@ fn ascii_fold(s: &str) -> String {
     out
 }
 
+pub fn normalize_postcode(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+pub fn display_postcode(code: &str, country_code: Option<&str>) -> String {
+    let code = normalize_postcode(code);
+    let split = match country_code {
+        Some("GB") if code.len() >= 5 => Some(code.len() - 3),
+        Some("CA") if code.len() == 6 => Some(3),
+        _ => None,
+    };
+    split.map_or_else(
+        || code.clone(),
+        |at| format!("{} {}", &code[..at], &code[at..]),
+    )
+}
+
 /// Result of parsing a freeform query like `"10 alysse close baulkham hills nsw 2154"`.
 #[derive(Debug, Default, Clone)]
 pub struct ParsedQuery {
@@ -2628,12 +3671,10 @@ pub struct ParsedQuery {
     pub unit: Option<String>,
     /// State name (expanded from an abbreviation if recognised).
     pub state: Option<String>,
-    /// Postcode as a 4-digit string. Not yet wired into search because our
-    /// index has no postcode field, but carried through so the /search
-    /// response can echo it and a future fix can use it as a filter.
+    /// Postal code normalized without spaces or punctuation.
     pub postcode: Option<String>,
     /// Remaining tokens, lowercased, with hints stripped. Fed to the
-    /// `q` bag search that looks in name + suburb + state fields.
+    /// `q` bag search that looks in name and suburb fields.
     pub rest: Vec<String>,
 }
 
@@ -2641,7 +3682,7 @@ pub struct ParsedQuery {
 /// Returns `None` for tokens that don't look like a state hint.
 fn canonicalise_state(token: &str) -> Option<&'static str> {
     match token.to_ascii_lowercase().as_str() {
-        "nsw" | "new" => Some("New South Wales"), // "new" handles "new south wales" as a single token, cheap bias
+        "nsw" => Some("New South Wales"),
         "vic" | "victoria" => Some("Victoria"),
         "qld" | "queensland" => Some("Queensland"),
         "wa" => Some("Western Australia"),
@@ -2651,6 +3692,193 @@ fn canonicalise_state(token: &str) -> Option<&'static str> {
         "act" => Some("Australian Capital Territory"),
         _ => None,
     }
+}
+
+fn canonicalise_us_state(token: &str) -> Option<&'static str> {
+    match token.to_ascii_uppercase().as_str() {
+        "AL" => Some("Alabama"),
+        "AK" => Some("Alaska"),
+        "AZ" => Some("Arizona"),
+        "AR" => Some("Arkansas"),
+        "CA" => Some("California"),
+        "CO" => Some("Colorado"),
+        "CT" => Some("Connecticut"),
+        "DE" => Some("Delaware"),
+        "DC" => Some("District of Columbia"),
+        "FL" => Some("Florida"),
+        "GA" => Some("Georgia"),
+        "HI" => Some("Hawaii"),
+        "ID" => Some("Idaho"),
+        "IL" => Some("Illinois"),
+        "IN" => Some("Indiana"),
+        "IA" => Some("Iowa"),
+        "KS" => Some("Kansas"),
+        "KY" => Some("Kentucky"),
+        "LA" => Some("Louisiana"),
+        "ME" => Some("Maine"),
+        "MD" => Some("Maryland"),
+        "MA" => Some("Massachusetts"),
+        "MI" => Some("Michigan"),
+        "MN" => Some("Minnesota"),
+        "MS" => Some("Mississippi"),
+        "MO" => Some("Missouri"),
+        "MT" => Some("Montana"),
+        "NE" => Some("Nebraska"),
+        "NV" => Some("Nevada"),
+        "NH" => Some("New Hampshire"),
+        "NJ" => Some("New Jersey"),
+        "NM" => Some("New Mexico"),
+        "NY" => Some("New York"),
+        "NC" => Some("North Carolina"),
+        "ND" => Some("North Dakota"),
+        "OH" => Some("Ohio"),
+        "OK" => Some("Oklahoma"),
+        "OR" => Some("Oregon"),
+        "PA" => Some("Pennsylvania"),
+        "RI" => Some("Rhode Island"),
+        "SC" => Some("South Carolina"),
+        "SD" => Some("South Dakota"),
+        "TN" => Some("Tennessee"),
+        "TX" => Some("Texas"),
+        "UT" => Some("Utah"),
+        "VT" => Some("Vermont"),
+        "VA" => Some("Virginia"),
+        "WA" => Some("Washington"),
+        "WV" => Some("West Virginia"),
+        "WI" => Some("Wisconsin"),
+        "WY" => Some("Wyoming"),
+        _ => None,
+    }
+}
+
+fn canonicalise_ca_province(token: &str) -> Option<&'static str> {
+    match token.to_ascii_uppercase().as_str() {
+        "AB" => Some("Alberta"),
+        "BC" => Some("British Columbia"),
+        "MB" => Some("Manitoba"),
+        "NB" => Some("New Brunswick"),
+        "NL" => Some("Newfoundland and Labrador"),
+        "NS" => Some("Nova Scotia"),
+        "NT" => Some("Northwest Territories"),
+        "NU" => Some("Nunavut"),
+        "ON" => Some("Ontario"),
+        "PE" => Some("Prince Edward Island"),
+        "QC" | "PQ" => Some("Québec"),
+        "SK" => Some("Saskatchewan"),
+        "YT" => Some("Yukon"),
+        _ => None,
+    }
+}
+
+fn country_suffix<'a>(
+    input: &'a str,
+    aliases: Option<&std::collections::HashMap<String, String>>,
+    explicit_code: Option<&str>,
+) -> Option<(&'a str, String)> {
+    let resolve = |tail: &str| {
+        let tail = tail.trim().to_lowercase();
+        let code = match tail.as_str() {
+            "australia" | "aus" | "au" => Some("AU"),
+            "new zealand" | "nzl" | "nz" => Some("NZ"),
+            "united states" | "united states of america" | "usa" | "us" => Some("US"),
+            "canada" | "can" => Some("CA"),
+            "united kingdom" | "uk" | "great britain" | "gbr" | "gb" => Some("GB"),
+            _ => None,
+        };
+        code.map(str::to_owned)
+            .or_else(|| aliases.and_then(|names| names.get(&tail).cloned()))
+            .or_else(|| {
+                explicit_code
+                    .filter(|cc| cc.eq_ignore_ascii_case(&tail))
+                    .map(str::to_ascii_uppercase)
+            })
+    };
+    if let Some((body, tail)) = input.rsplit_once(',') {
+        if let Some(code) = resolve(tail) {
+            return Some((body.trim_end(), code));
+        }
+    }
+    // Country names and ISO-3 suffixes also appear without a comma.
+    for (i, c) in input.char_indices().rev() {
+        if c.is_whitespace() {
+            let body = input[..i].trim_end_matches(|c: char| c.is_whitespace() || c == ',');
+            if !body.is_empty() {
+                if let Some(code) = resolve(&input[i..]) {
+                    return Some((body, code));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn ca_postcode(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 6
+        && b[0].is_ascii_alphabetic()
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_alphabetic()
+        && b[3].is_ascii_digit()
+        && b[4].is_ascii_alphabetic()
+        && b[5].is_ascii_digit()
+}
+
+fn gb_postcode(s: &str) -> bool {
+    let b = s.as_bytes();
+    (5..=7).contains(&b.len())
+        && b[0].is_ascii_alphabetic()
+        && b[b.len() - 3].is_ascii_digit()
+        && b[b.len() - 2..].iter().all(u8::is_ascii_alphabetic)
+        && b[..b.len() - 3].iter().any(u8::is_ascii_digit)
+}
+
+fn postcode_shape(code: &str) -> bool {
+    (4..=10).contains(&code.len())
+        && code.bytes().all(|b| b.is_ascii_alphanumeric())
+        && code.bytes().any(|b| b.is_ascii_digit())
+}
+
+fn trailing_postcode(tokens: &[String], country_code: Option<&str>) -> Option<(usize, String)> {
+    // ponytail: this only recognises suffix codes in freeform text.
+    // Add country-specific address templates when prefix/middle-code
+    // countries are indexed; the structured postcode field works now.
+    let last = tokens.len().checked_sub(1)?;
+    let one = normalize_postcode(&tokens[last]);
+    if last > 0 {
+        let first = normalize_postcode(&tokens[last - 1]);
+        let two = format!("{first}{one}");
+        let mixed = |s: &str| {
+            s.bytes().any(|b| b.is_ascii_digit()) && s.bytes().any(|b| b.is_ascii_alphabetic())
+        };
+        let spaced_code = (mixed(&first) && mixed(&one))
+            || (first.len() == 4
+                && first.bytes().all(|b| b.is_ascii_digit())
+                && one.len() == 2
+                && one.bytes().all(|b| b.is_ascii_alphabetic()))
+            || ((4..=5).contains(&first.len())
+                && first.bytes().all(|b| b.is_ascii_digit())
+                && (3..=4).contains(&one.len())
+                && one.bytes().all(|b| b.is_ascii_digit()));
+        if postcode_shape(&two) && (ca_postcode(&two) || gb_postcode(&two) || spaced_code) {
+            return Some((last - 1, two));
+        }
+    }
+    // A trailing five-digit token can also be a rural house number in
+    // AU/NZ. With no country hint, retain that reading for street-first
+    // input; a leading house number makes a trailing ZIP more likely.
+    let five_digit_house = one.len() == 5
+        && one.bytes().all(|b| b.is_ascii_digit())
+        && (country_code
+            .is_some_and(|cc| cc.eq_ignore_ascii_case("AU") || cc.eq_ignore_ascii_case("NZ"))
+            || (country_code.is_none()
+                && last > 0
+                && !tokens
+                    .first()
+                    .is_some_and(|t| t.starts_with(|c: char| c.is_ascii_digit()))));
+    if postcode_shape(&one) && !five_digit_house {
+        return Some((last, one));
+    }
+    None
 }
 
 /// Parse a freeform query into structured parts. Pure string work — no
@@ -2715,11 +3943,29 @@ fn consume_au_unit_prefix(input: &str) -> Option<(String, String, usize)> {
     let unit = std::str::from_utf8(&bytes[unit_start..unit_end])
         .ok()?
         .to_string();
-    let hn = std::str::from_utf8(&bytes[hn_start..hn_end]).ok()?.to_string();
+    let hn = std::str::from_utf8(&bytes[hn_start..hn_end])
+        .ok()?
+        .to_string();
     Some((unit, hn, hn_end))
 }
 
 pub fn parse_freeform_query(input: &str) -> ParsedQuery {
+    parse_freeform_query_in_country(input, None)
+}
+
+pub fn parse_freeform_query_in_country(input: &str, country_code: Option<&str>) -> ParsedQuery {
+    let input = match country_suffix(input, None, country_code) {
+        Some((body, suffix_code))
+            if country_code.is_none_or(|cc| cc.eq_ignore_ascii_case(&suffix_code)) =>
+        {
+            body
+        }
+        _ => input,
+    };
+    parse_freeform_query_inner(input, country_code)
+}
+
+fn parse_freeform_query_inner(input: &str, country_code: Option<&str>) -> ParsedQuery {
     let mut parsed = ParsedQuery::default();
 
     // Pre-tokenisation pass: detect the AU `<unit>/<housenumber>`
@@ -2745,11 +3991,53 @@ pub fn parse_freeform_query(input: &str) -> ParsedQuery {
         }
     };
 
+    // Keep Queens-style hyphenated house numbers intact. The normal
+    // tokenizer splits punctuation, but the index stores "85-23" as one
+    // exact house-number term.
+    let mut to_tokenise = to_tokenise;
+    if parsed.house_number.is_none() {
+        if let Some((prefix, _)) = to_tokenise.split_once(char::is_whitespace) {
+            let number = prefix.trim_end_matches(',');
+            if number.contains('-')
+                && number
+                    .split('-')
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            {
+                parsed.house_number = Some(number.to_owned());
+                to_tokenise = &to_tokenise[prefix.len()..];
+            }
+        }
+    }
     let tokens = tokenize_user_input(to_tokenise);
     let mut rest: Vec<String> = Vec::with_capacity(tokens.len());
 
     let last_idx = tokens.len().saturating_sub(1);
+    let postcode = trailing_postcode(&tokens, country_code);
+    if let Some((_, code)) = &postcode {
+        parsed.postcode = Some(code.clone());
+    }
+    let first_component_end = to_tokenise
+        .split_once(',')
+        .map(|(part, _)| tokenize_user_input(part).len().saturating_sub(1));
     for (i, tok) in tokens.iter().enumerate() {
+        if postcode.as_ref().is_some_and(|(start, _)| i >= *start) {
+            continue;
+        }
+        // A floor marker narrows a building's internal position but is
+        // not part of its road/locality search terms. Keep the house
+        // match without pretending an unindexed floor was verified.
+        let floor_ordinal = |value: &str| {
+            ["st", "nd", "rd", "th"].into_iter().any(|suffix| {
+                value.strip_suffix(suffix).is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|c| c.is_ascii_digit())
+                })
+            })
+        };
+        if (tokens.get(i + 1).is_some_and(|next| next == "floor") && floor_ordinal(tok))
+            || (tok == "floor" && i > 0 && floor_ordinal(&tokens[i - 1]))
+        {
+            continue;
+        }
         let all_digits = !tok.is_empty() && tok.chars().all(|c| c.is_ascii_digit());
         // Leading digit-LED token (digit + optional alpha suffix) →
         // house_number when we don't already have one. Captures
@@ -2772,23 +4060,29 @@ pub fn parse_freeform_query(input: &str) -> ParsedQuery {
                 parsed.house_number = Some(tok.clone());
                 continue;
             }
-            // Trailing 4-digit token → AU-style postcode.
-            if i == last_idx && tok.len() == 4 {
-                parsed.postcode = Some(tok.clone());
-                continue;
-            }
             // Trailing short digit group (1–3 digits, or 5 digits for
             // US-style ZIP-that-looks-like-housenumber) → house_number
             // if we don't already have one. Handles `"Alysse Close 10"`
             // and other street-then-number token orders that otherwise
             // fall into the word bag and get tokenised out of existence.
-            if i == last_idx
-                && parsed.house_number.is_none()
-                && (tok.len() <= 3 || tok.len() == 5)
+            if i == last_idx && parsed.house_number.is_none() && (tok.len() <= 3 || tok.len() == 5)
             {
                 parsed.house_number = Some(tok.clone());
                 continue;
             }
+        }
+
+        // In comma-delimited street-first addresses, the number ends
+        // the first component rather than the whole query.
+        if parsed.house_number.is_none()
+            && first_component_end == Some(i)
+            && tok.starts_with(|c: char| c.is_ascii_digit())
+            && !["st", "nd", "rd", "th"]
+                .iter()
+                .any(|suffix| tok.ends_with(suffix))
+        {
+            parsed.house_number = Some(tok.clone());
+            continue;
         }
 
         // AU state abbreviation / full name — only demote from `rest` if
@@ -2803,8 +4097,27 @@ pub fn parse_freeform_query(input: &str) -> ParsedQuery {
         // every legitimate case ("Sydney NSW", "Melbourne VIC",
         // "Brisbane Queensland") because those have an additional
         // place token left over after the state demotion.
+        let state_tail = i
+            == postcode
+                .as_ref()
+                .map_or(last_idx, |(start, _)| start.saturating_sub(1));
         if parsed.state.is_none() && tokens.len() > 1 {
-            if let Some(full) = canonicalise_state(tok) {
+            let full = match country_code.unwrap_or("AU").to_ascii_uppercase().as_str() {
+                "AU" => canonicalise_state(tok),
+                "US" if state_tail => canonicalise_us_state(tok),
+                "CA" if state_tail => canonicalise_ca_province(tok),
+                "NZ" if state_tail => match tok.as_str() {
+                    "wellington" => Some("Wellington"),
+                    "auckland" => Some("Auckland"),
+                    "canterbury" => Some("Canterbury"),
+                    "otago" => Some("Otago"),
+                    "waikato" => Some("Waikato"),
+                    "northland" => Some("Northland"),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(full) = full {
                 parsed.state = Some(full.to_owned());
                 continue;
             }
@@ -2822,6 +4135,12 @@ pub fn parse_freeform_query(input: &str) -> ParsedQuery {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Hit {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub housenumber: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub postcode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suburb: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2856,6 +4175,47 @@ pub fn fuzzy_name(schema: &ForwardSchema, token: &str, distance: u8) -> Box<dyn 
 #[cfg(test)]
 mod parse_freeform_query_tests {
     use super::*;
+
+    #[test]
+    fn country_suffix_uses_loaded_names_and_avoids_state_abbreviations() {
+        let aliases = std::collections::HashMap::from([
+            ("germany".to_owned(), "DE".to_owned()),
+            ("éire".to_owned(), "IE".to_owned()),
+        ]);
+        assert_eq!(
+            country_suffix("Berlin, Germany", Some(&aliases), None),
+            Some(("Berlin", "DE".to_owned()))
+        );
+        assert_eq!(
+            country_suffix("Berlin, DE", Some(&aliases), Some("DE")),
+            Some(("Berlin", "DE".to_owned()))
+        );
+        assert_eq!(
+            country_suffix("Dublin, Éire", Some(&aliases), None),
+            Some(("Dublin", "IE".to_owned()))
+        );
+        assert_eq!(country_suffix("Seattle, WA", Some(&aliases), None), None);
+        assert_eq!(
+            country_suffix("San Francisco, CA", Some(&aliases), None),
+            None
+        );
+    }
+
+    #[test]
+    fn new_york_is_not_an_australian_state_hint() {
+        let parsed = parse_freeform_query("New York");
+        assert_eq!(parsed.state, None);
+        assert_eq!(parsed.rest, ["new", "york"]);
+    }
+
+    #[test]
+    fn australian_state_hints_are_scoped_to_au_queries() {
+        let ca = parse_freeform_query_in_country("Victoria Harbour", Some("CA"));
+        assert_eq!(ca.state, None);
+        assert_eq!(ca.rest, ["victoria", "harbour"]);
+        let au = parse_freeform_query_in_country("Sydney NSW", Some("AU"));
+        assert_eq!(au.state.as_deref(), Some("New South Wales"));
+    }
 
     #[test]
     fn au_unit_slash_housenumber_pattern() {
@@ -2897,6 +4257,13 @@ mod parse_freeform_query_tests {
     }
 
     #[test]
+    fn hyphenated_house_number_stays_whole() {
+        let p = parse_freeform_query_in_country("85-23 168th Place Queens NY", Some("US"));
+        assert_eq!(p.house_number.as_deref(), Some("85-23"));
+        assert!(!p.rest.iter().any(|part| part == "85" || part == "23"));
+    }
+
+    #[test]
     fn embedded_unit_slash_does_not_fire() {
         // Only the LEADING `<unit>/<hn>` pattern fires. An embedded
         // "12/45" elsewhere (rare) is ambiguous and falls through
@@ -2912,37 +4279,54 @@ mod nearby_validation_tests {
 
     fn q(lat: f64, lng: f64, radius_km: f64) -> NearbyQuery<'static> {
         NearbyQuery {
-            lat, lng, radius_km,
-            q: None, country_code: None, kind: None, limit: 10,
+            lat,
+            lng,
+            radius_km,
+            q: None,
+            country_code: None,
+            kind: None,
+            limit: 10,
         }
     }
 
-    #[test] fn rejects_invalid_lat() {
-        assert_eq!(q(91.0, 0.0, 5.0).validate().unwrap_err(),  "lat");
+    #[test]
+    fn rejects_invalid_lat() {
+        assert_eq!(q(91.0, 0.0, 5.0).validate().unwrap_err(), "lat");
         assert_eq!(q(-91.0, 0.0, 5.0).validate().unwrap_err(), "lat");
         assert_eq!(q(f64::NAN, 0.0, 5.0).validate().unwrap_err(), "lat");
         assert_eq!(q(f64::INFINITY, 0.0, 5.0).validate().unwrap_err(), "lat");
     }
 
-    #[test] fn rejects_invalid_lng() {
-        assert_eq!(q(0.0, 181.0, 5.0).validate().unwrap_err(),  "lng");
+    #[test]
+    fn rejects_invalid_lng() {
+        assert_eq!(q(0.0, 181.0, 5.0).validate().unwrap_err(), "lng");
         assert_eq!(q(0.0, -181.0, 5.0).validate().unwrap_err(), "lng");
         assert_eq!(q(0.0, f64::NAN, 5.0).validate().unwrap_err(), "lng");
     }
 
-    #[test] fn rejects_invalid_radius() {
+    #[test]
+    fn rejects_invalid_radius() {
         assert_eq!(q(0.0, 0.0, 0.0).validate().unwrap_err(), "radius_km");
         assert_eq!(q(0.0, 0.0, -1.0).validate().unwrap_err(), "radius_km");
         assert_eq!(q(0.0, 0.0, f64::NAN).validate().unwrap_err(), "radius_km");
     }
 
-    #[test] fn rejects_radius_above_cap() {
-        assert_eq!(q(0.0, 0.0, NearbyQuery::MAX_RADIUS_KM + 0.001).validate().unwrap_err(), "radius_km");
+    #[test]
+    fn rejects_radius_above_cap() {
+        assert_eq!(
+            q(0.0, 0.0, NearbyQuery::MAX_RADIUS_KM + 0.001)
+                .validate()
+                .unwrap_err(),
+            "radius_km"
+        );
     }
 
-    #[test] fn accepts_valid_inputs() {
+    #[test]
+    fn accepts_valid_inputs() {
         assert!(q(0.0, 0.0, 1.0).validate().is_ok());
-        assert!(q(90.0, 180.0, NearbyQuery::MAX_RADIUS_KM).validate().is_ok());
+        assert!(q(90.0, 180.0, NearbyQuery::MAX_RADIUS_KM)
+            .validate()
+            .is_ok());
         assert!(q(-90.0, -180.0, 0.001).validate().is_ok());
     }
 }
@@ -2961,6 +4345,9 @@ mod bias_curve_tests {
         // near-bias multiplier gates on.
         Hit {
             name: String::new(),
+            housenumber: None,
+            unit: None,
+            postcode: None,
             suburb: None,
             state: None,
             country_code: None,
@@ -2980,7 +4367,10 @@ mod bias_curve_tests {
     /// that flips the ordering.
     #[test]
     fn far_distance_penalty_flips_ambiguous_winner() {
-        let bias = BiasCoord { lat: 38.88, lng: -77.10 };
+        let bias = BiasCoord {
+            lat: 38.88,
+            lng: -77.10,
+        };
         let arlington_va = hit(2.0, 38.88, -77.10);
         let arlington_tx = hit(4.0, 32.74, -97.32);
 
@@ -3000,25 +4390,33 @@ mod bias_curve_tests {
     fn near_radius_lets_bm25_dominate() {
         let bias = BiasCoord { lat: 0.0, lng: 0.0 };
         let strong_at_300km = hit(5.0, 2.7, 0.0); // ~300 km north
-        let weak_at_origin  = hit(1.0, 0.0, 0.0);
+        let weak_at_origin = hit(1.0, 0.0, 0.0);
 
         let s_strong = boosted_score(&strong_at_300km, Some(&bias));
-        let s_weak   = boosted_score(&weak_at_origin, Some(&bias));
+        let s_weak = boosted_score(&weak_at_origin, Some(&bias));
 
-        assert!(s_strong > s_weak, "strong BM25 within near radius should still win");
+        assert!(
+            s_strong > s_weak,
+            "strong BM25 within near radius should still win"
+        );
     }
 
     /// Without bias the prominence boost is preserved — a rank-16 city
     /// should outscore a rank-26 street at equal BM25.
     #[test]
     fn no_bias_uses_prominence_boost() {
-        let mut city   = hit(1.0, 0.0, 0.0); city.rank = 16;
-        let mut street = hit(1.0, 0.0, 0.0); street.rank = 26;
+        let mut city = hit(1.0, 0.0, 0.0);
+        city.rank = 16;
+        let mut street = hit(1.0, 0.0, 0.0);
+        street.rank = 26;
 
-        let s_city   = boosted_score(&city, None);
+        let s_city = boosted_score(&city, None);
         let s_street = boosted_score(&street, None);
 
-        assert!(s_city > s_street, "city should outscore street under prominence boost");
+        assert!(
+            s_city > s_street,
+            "city should outscore street under prominence boost"
+        );
     }
 
     /// Without bias, importance is now additive: among same-rank
@@ -3047,10 +4445,10 @@ mod bias_curve_tests {
     #[test]
     fn importance_bonus_flips_close_ambiguous() {
         let bias = BiasCoord { lat: 0.0, lng: 0.0 };
-        let major   = hit_with_importance(2.0, 0.0, 0.0, 200);
+        let major = hit_with_importance(2.0, 0.0, 0.0, 200);
         let obscure = hit_with_importance(2.5, 0.0, 0.0, 0);
 
-        let s_major   = boosted_score(&major, Some(&bias));
+        let s_major = boosted_score(&major, Some(&bias));
         let s_obscure = boosted_score(&obscure, Some(&bias));
 
         assert!(
@@ -3071,13 +4469,16 @@ mod bias_curve_tests {
     #[test]
     fn importance_bonus_cannot_overpower_bm25() {
         let bias = BiasCoord { lat: 0.0, lng: 0.0 };
-        let weak_major   = hit_with_importance(1.0, 0.0, 0.0, 255);
+        let weak_major = hit_with_importance(1.0, 0.0, 0.0, 255);
         let strong_plain = hit_with_importance(8.0, 0.0, 0.0, 0);
 
-        let s_weak   = boosted_score(&weak_major, Some(&bias));
+        let s_weak = boosted_score(&weak_major, Some(&bias));
         let s_strong = boosted_score(&strong_plain, Some(&bias));
 
-        assert!(s_strong > s_weak, "BM25 should dominate when the gap is large");
+        assert!(
+            s_strong > s_weak,
+            "BM25 should dominate when the gap is large"
+        );
     }
 
     /// The bias-path cap (4.0 BM25 units at importance=255) is
@@ -3093,12 +4494,11 @@ mod bias_curve_tests {
         // Co-located, equal BM25 — the only differentiator is the
         // importance bonus. Score delta == bonus delta.
         let high_imp = hit_with_importance(0.0, 0.0, 0.0, 255);
-        let low_imp  = hit_with_importance(0.0, 0.0, 0.0, 0);
+        let low_imp = hit_with_importance(0.0, 0.0, 0.0, 0);
 
-        let bias_delta   = boosted_score(&high_imp, Some(&bias))
-                         - boosted_score(&low_imp, Some(&bias));
-        let unbiased_delta = boosted_score(&high_imp, None)
-                           - boosted_score(&low_imp, None);
+        let bias_delta =
+            boosted_score(&high_imp, Some(&bias)) - boosted_score(&low_imp, Some(&bias));
+        let unbiased_delta = boosted_score(&high_imp, None) - boosted_score(&low_imp, None);
 
         assert!(
             bias_delta > unbiased_delta,
@@ -3125,7 +4525,10 @@ mod bias_curve_tests {
     /// what's needed to flip this case fails loudly.
     #[test]
     fn near_bias_high_importance_place_beats_far_low_importance_place() {
-        let dc = BiasCoord { lat: 38.88, lng: -77.10 };
+        let dc = BiasCoord {
+            lat: 38.88,
+            lng: -77.10,
+        };
         // Arlington County VA PlacePoint: low BM25 (32.7), high
         // importance (97), 2 km from bias.
         let arlington_va = hit_with_importance(32.73, 38.89, -77.08, 97);
@@ -3156,10 +4559,10 @@ mod bias_curve_tests {
         let bias = BiasCoord { lat: 0.0, lng: 0.0 };
         // Both at importance=255 — only difference is distance.
         let near = hit_with_importance(10.0, 0.0, 0.0, 255);
-        let far  = hit_with_importance(10.0, 10.0, 10.0, 255); // ~1500 km away
+        let far = hit_with_importance(10.0, 10.0, 10.0, 255); // ~1500 km away
 
         let s_near_with_bias = boosted_score(&near, Some(&bias));
-        let s_far_with_bias  = boosted_score(&far,  Some(&bias));
+        let s_far_with_bias = boosted_score(&far, Some(&bias));
 
         // Near doc gets multiplier (1.0 * 1.0 * 0.5 = 0.5 lift on a
         // factor of 1.5×); far doc gets no multiplier. The gap must

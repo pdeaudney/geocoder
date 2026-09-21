@@ -166,19 +166,16 @@ export MAXMIND_LICENSE_KEY=...   # free signup: maxmind.com/en/geolite2/signup
 export GNAF_ARCHIVE_URL=https://...  # license-accepted URL from data.gov.au
 ./target/release/fetch-data --region au --wof --openaddresses au --maxmind --gnaf
 
-# WoF only, scoped to specific countries
-./target/release/fetch-data --wof --wof-countries "au gb us"
+# WoF admin and separate postalcode data, scoped to specific countries
+./target/release/fetch-data --wof --wof-postcodes --wof-countries "au gb us"
 ```
 
-OpenAddresses lives in the Requester-Pays S3 bucket
-`s3://v2.openaddresses.io` (the free HTTPS mirror was retired). A
-free-tier AWS account suffices — the egress charge is single-digit
-dollars for the global scope, cents per country. The binary uses the
-standard credential chain (env, `AWS_PROFILE`, EC2 IMDS, SSO,
-`credential_process`) so any auth flow your existing tooling expects
-will work. If AWS isn't an option, omit `--openaddresses`: OSM alone
-covers most `/reverse` queries, and G-NAF is the better address-points
-source for AU anyway.
+The `fetch-data --openaddresses` path uses OpenAddresses' Requester-Pays
+S3 bucket and requires an account with access. For selected public
+per-source GeoJSON files, `scripts/import-oa-geojson.py` downloads and
+converts them to the CSV layout expected by `build-openaddresses-index`.
+OpenAddresses sources have different licenses; check each source before
+including it in a deployment. G-NAF remains the preferred AU source.
 
 Build the indexes:
 
@@ -200,8 +197,13 @@ cargo build --release -p wof-importer
 # relation, so without this step /reverse queries in those regions
 # may return empty `country` fields. Reads the
 # whosonfirst-data-admin-*.db SQLite that `fetch-data --wof` placed
-# in ./data/ and writes wof_countries.bin into the index dir.
+# in ./data/ and writes wof_countries.bin into the index dir. When
+# --wof-postcodes was fetched, it also exports valid postal centroids
+# for the autocomplete FST; records at (0,0) are skipped.
 ./target/release/wof-importer ./data ./data/index
+
+# WoF data includes source-specific attribution terms:
+# https://whosonfirst.org/docs/licenses/
 
 # (Optional) forward search — tantivy per-country
 ./target/release/build-forward-index data/index --partition-by-country
@@ -226,20 +228,27 @@ The server starts on `0.0.0.0:3000` (REST) and `0.0.0.0:3001` (gRPC) by default.
 
 Each data source drops files in the same index directory and is loaded independently at startup — leave any component out and the server degrades gracefully.
 
-| Component | AU (single country) | Planet |
+| Component | AU (single country) | Five-country build (Sep 2026) |
 |---|---:|---:|
-| OSM reverse index (geo, addr, admin, place, street, interp, strings, i18n) | ~620 MB | ~20 GB |
-| Tantivy forward index (per-country + unified) | ~80 MB | ~2–3 GB |
-| FST autocomplete (per-country + unified) | ~25 MB | ~600 MB |
-| G-NAF address points (AU only) | ~490 MB | — |
-| OpenAddresses per-country (~60 countries; AU skipped when G-NAF present) | — | ~4–8 GB |
-| Who's on First admin fallback (per-country or planet) | ~50 MB | ~500 MB |
+| OSM reverse index (geo, addr, admin, place, street, interp, strings, i18n) | ~620 MB | 8.2 GB |
+| Tantivy forward index (per-country) | ~80 MB | 6.6 GB |
+| FST autocomplete (per-country + unified) | ~25 MB | 0.58 GB |
+| G-NAF address points (AU only) | ~490 MB | 0.54 GB |
+| OpenAddresses points (selected US/CA sources) | — | 0.21 GB |
+| Who's on First countries and postcodes | ~50 MB | 0.08 GB |
 | Postcode lookup (AU only) | <1 MB | <1 MB |
-| **Built index total** | **~1.4 GB** | **~28–33 GB** |
+| **Built index total** | **~1.4 GB** | **~16.2 GB** |
 
-Source data needed during the build is substantially larger — the raw PBF, OpenAddresses global batch (~66 GB), and WoF planet SQLite (~8.6 GB) all sit on scratch disk until ingestion finishes. Point the build at local NVMe (the `r8gd.*` packer default) if you're running worldwide.
+The five-country column is measured on the local AU/NZ/US/CA/GB index. It
+includes only five selected US/CA OpenAddresses sources. A planet build has
+not been measured, so size and RAM requirements for one should be determined
+with a representative build before capacity planning.
 
-RAM guidance: AU-only fits a `t4g.medium` class instance; planet wants ≥16 GB at query time for a warm mmap working set, and ≥256 GB during **build** because libosmium's single-threaded pass holds the node cache in memory.
+Source data needed during the build is substantially larger — PBFs, OpenAddresses inputs, and WoF SQLite snapshots sit on scratch disk until ingestion finishes. Point the build at local NVMe (the `r8gd.*` packer default) if you're running worldwide.
+
+RAM guidance: the five-country build was completed on a 64 GB machine. A
+planet build and its query-time working set have not been measured; the
+file-backed node cache can use substantially more memory than process RSS.
 
 ## HTTP API
 
@@ -605,7 +614,7 @@ In-flight queries keep the old `Arc<Index>` until they return; new queries see t
 | Binary | Purpose |
 |---|---|
 | `build-index` (C++) | Parse OSM PBF → OSM binary index |
-| `wof-importer` | WhosOnFirst SQLite → `wof_countries.bin` (runtime country-code fallback) |
+| `wof-importer` | WhosOnFirst SQLite → `wof_countries.bin` and postcode candidates for the autocomplete FST |
 | `build-forward-index` | Tantivy index for `/search`. `--partition-by-country` emits per-country indexes |
 | `build-autocomplete-fst` | FST prefix index for `/autocomplete` + `/search` fast-path |
 | `build-postcode-lookup` | G-NAF suburb-modal postcode table |

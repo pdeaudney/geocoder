@@ -19,6 +19,7 @@ mimalloc = { version = "0.1", default-features = false }
 # doesn't use rayon — but the dep is shared because the build binaries
 # live in the same crate.
 rayon = "1.10"
+csv = "1"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"

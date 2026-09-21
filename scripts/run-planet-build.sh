@@ -10,14 +10,15 @@
 # Steps (run in order, each writes a `.done/<step>` marker on success):
 #
 #     1. preflight       — verify deps, disk, swap before starting
-#     2. fetch-data      — OSM PBF + WhosOnFirst (skips OA, optional G-NAF)
+#     2. fetch-data      — OSM PBF + WoF admin/postcodes (skips OA, optional G-NAF)
 #     3. build-binaries  — cmake build of C++ indexer + cargo release of Rust
 #     4. build-index     — the long C++ reverse-index pass over the planet PBF
-#     5. forward-index   — tantivy per-country (rayon-parallelised)
-#     6. autocomplete    — FST builder
-#     7. postcode-lookup — G-NAF postcodes (AU only, skipped if no G-NAF)
-#     8. gnaf-index      — G-NAF address points (AU only, skipped if no G-NAF)
-#     9. smoke           — boot the server, verify a coord per continent
+#     5. wof-import      — WoF country fallback and postcode centroids
+#     6. forward-index   — tantivy per-country (rayon-parallelised)
+#     7. autocomplete    — FST builder
+#     8. postcode-lookup — G-NAF postcodes (AU only, skipped if no G-NAF)
+#     9. gnaf-index      — G-NAF address points (AU only, skipped if no G-NAF)
+#    10. smoke           — boot the server, verify a coord per continent
 #
 # Resume semantics: re-running the script after partial completion picks
 # up at the first not-yet-done step. To force a re-run of a step, delete
@@ -238,7 +239,7 @@ run_fetch_data() {
     cargo build --release --manifest-path server/Cargo.toml --bin fetch-data \
         2>&1 | tee "$LOG_DIR/fetch-data-build.log"
 
-    args="--region $FETCH_REGION --data-dir $DATA_DIR --wof"
+    args="--region $FETCH_REGION --data-dir $DATA_DIR --wof --wof-postcodes"
     if [ -n "${MAXMIND_LICENSE_KEY:-}" ]; then
         args="$args --maxmind"
     fi
@@ -273,6 +274,7 @@ run_build_binaries() {
     ( cd build && make -j ) 2>&1 | tee "$LOG_DIR/make.log"
     cargo build --release --manifest-path server/Cargo.toml \
         2>&1 | tee "$LOG_DIR/cargo-build.log"
+    cargo build --release -p wof-importer 2>&1 | tee "$LOG_DIR/wof-importer-build.log"
     step_done
 }
 
@@ -305,8 +307,25 @@ run_build_index() {
     step_done
 }
 
+run_wof_import() {
+    step_start "wof-import"
+    if [ "${WOF_COUNTRIES:-planet}" = "none" ]; then
+        step_skipped_intentionally "WOF_COUNTRIES=none"
+        return
+    fi
+    if ! ls "$DATA_DIR"/whosonfirst-data-postalcode-*.db >/dev/null 2>&1; then
+        err "WoF postalcode SQLite missing; re-run fetch-data before wof-import"
+        exit 1
+    fi
+    ./target/release/wof-importer "$DATA_DIR" "$INDEX_DIR" 2>&1 | tee "$LOG_DIR/wof-import.log"
+    # Existing .done markers may predate this step. Both builders consume
+    # WoF output, so their old indexes must be replaced after an import.
+    rm -f "$DONE_DIR/forward-index" "$DONE_DIR/autocomplete" "$DONE_DIR/smoke"
+    step_done
+}
+
 # ---------------------------------------------------------------------------
-# Step 5: forward-index — tantivy per-country.
+# Step 6: forward-index — tantivy per-country.
 # ---------------------------------------------------------------------------
 
 run_forward_index() {
@@ -319,7 +338,7 @@ run_forward_index() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 6: autocomplete — FST builder.
+# Step 7: autocomplete — FST builder.
 # ---------------------------------------------------------------------------
 
 run_autocomplete() {
@@ -330,7 +349,7 @@ run_autocomplete() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 7+8: G-NAF (AU only) — skipped without GNAF_ARCHIVE_URL.
+# Steps 8+9: G-NAF (AU only) — skipped without GNAF_ARCHIVE_URL.
 # ---------------------------------------------------------------------------
 
 run_postcode_lookup() {
@@ -356,7 +375,7 @@ run_gnaf_index() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 9: smoke — boot the server, hit known coords on a few continents.
+# Step 10: smoke — boot the server, hit known coords on a few continents.
 # ---------------------------------------------------------------------------
 
 run_smoke() {
@@ -432,6 +451,7 @@ run_preflight
 run_step fetch-data       run_fetch_data
 run_step build-binaries   run_build_binaries
 run_step build-index      run_build_index
+run_step wof-import       run_wof_import
 run_step forward-index    run_forward_index
 run_step autocomplete     run_autocomplete
 run_step postcode-lookup  run_postcode_lookup

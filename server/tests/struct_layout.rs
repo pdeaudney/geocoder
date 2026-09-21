@@ -9,7 +9,9 @@
 use std::mem::{align_of, size_of};
 
 use query_server::address_points::AddressPoint;
-use query_server::{AddrPoint, AdminPolygon, InterpWay, NodeCoord, PlacePoint, PoiPoint, WayHeader};
+use query_server::{
+    AddrPoint, AdminPolygon, InterpWay, NodeCoord, PlacePoint, PoiPoint, WayHeader,
+};
 
 #[test]
 fn way_header_size() {
@@ -20,10 +22,9 @@ fn way_header_size() {
 
 #[test]
 fn addr_point_size() {
-    // f32 + f32 + u32 + u32 + u32 + u32 + u32 + u8 + (3 pad) = 32
-    // (housenumber_id, street_or_place_id, unit_id, floor_id,
-    // parent_place_id, flags + pad)
-    assert_eq!(size_of::<AddrPoint>(), 32);
+    // Two coordinates, six string IDs, flags, and three padding bytes.
+    // The postcode ID is the sixth u32 and moves flags to byte 32.
+    assert_eq!(size_of::<AddrPoint>(), 36);
     assert_eq!(align_of::<AddrPoint>(), 4);
 }
 
@@ -104,12 +105,12 @@ fn place_point_field_offsets_round_trip() {
     // builder/src/build_index.cpp `struct PlacePoint`:
     //   f32 lat | f32 lng | u32 name_id | u8 rank | u8 importance | 2B pad
     let mut bytes = [0u8; 16];
-    bytes[0..4].copy_from_slice(&(-33.8688_f32).to_le_bytes());  // lat
-    bytes[4..8].copy_from_slice(&151.2093_f32.to_le_bytes());    // lng
+    bytes[0..4].copy_from_slice(&(-33.8688_f32).to_le_bytes()); // lat
+    bytes[4..8].copy_from_slice(&151.2093_f32.to_le_bytes()); // lng
     bytes[8..12].copy_from_slice(&0xCAFEBABE_u32.to_le_bytes()); // name_id
-    bytes[12] = 16;                                              // rank
-    bytes[13] = 200;                                             // importance
-    // bytes[14..16] = pad
+    bytes[12] = 16; // rank
+    bytes[13] = 200; // importance
+                     // bytes[14..16] = pad
 
     let p: PlacePoint = cast_one(&bytes);
     assert!((p.lat - -33.8688).abs() < 1e-4, "lat mismatch: {}", p.lat);
@@ -135,19 +136,22 @@ fn admin_polygon_field_offsets_round_trip() {
     // remain padding), this round-trip catches it before a 13h rebuild
     // ships an admin index where every polygon ranks at importance=0.
     let mut bytes = [0u8; 24];
-    bytes[0..4].copy_from_slice(&0xDEADBEEF_u32.to_le_bytes());   // vertex_offset
-    bytes[4..6].copy_from_slice(&0x1234_u16.to_le_bytes());       // vertex_count
-    // bytes[6..8] = pad
-    bytes[8..12].copy_from_slice(&0xCAFEBABE_u32.to_le_bytes());  // name_id
-    bytes[12] = 6;                                                // admin_level
-    bytes[13] = 200;                                              // importance
-    // bytes[14..16] = pad
-    bytes[16..20].copy_from_slice(&12345.5_f32.to_le_bytes());    // area
-    bytes[20..22].copy_from_slice(&0xABCD_u16.to_le_bytes());     // country_code
-    // bytes[22..24] = pad
+    bytes[0..4].copy_from_slice(&0xDEADBEEF_u32.to_le_bytes()); // vertex_offset
+    bytes[4..6].copy_from_slice(&0x1234_u16.to_le_bytes()); // vertex_count
+                                                            // bytes[6..8] = pad
+    bytes[8..12].copy_from_slice(&0xCAFEBABE_u32.to_le_bytes()); // name_id
+    bytes[12] = 6; // admin_level
+    bytes[13] = 200; // importance
+                     // bytes[14..16] = pad
+    bytes[16..20].copy_from_slice(&12345.5_f32.to_le_bytes()); // area
+    bytes[20..22].copy_from_slice(&0xABCD_u16.to_le_bytes()); // country_code
+                                                              // bytes[22..24] = pad
 
     let p: AdminPolygon = cast_one(&bytes);
-    assert_eq!(p.vertex_offset, 0xDEADBEEF, "vertex_offset reads wrong field");
+    assert_eq!(
+        p.vertex_offset, 0xDEADBEEF,
+        "vertex_offset reads wrong field"
+    );
     assert_eq!(p.vertex_count, 0x1234, "vertex_count reads wrong field");
     assert_eq!(p.name_id, 0xCAFEBABE, "name_id reads wrong field");
     assert_eq!(p.admin_level, 6, "admin_level reads wrong byte");
@@ -166,14 +170,14 @@ fn poi_point_field_offsets_round_trip() {
     //   f32 lat | f32 lng | u32 name_id | u32 category_id |
     //   u8 rank | u8 importance | 2B pad | u32 parent_place_id
     let mut bytes = [0u8; 24];
-    bytes[0..4].copy_from_slice(&(48.8566_f32).to_le_bytes());   // lat
-    bytes[4..8].copy_from_slice(&2.3522_f32.to_le_bytes());      // lng
+    bytes[0..4].copy_from_slice(&(48.8566_f32).to_le_bytes()); // lat
+    bytes[4..8].copy_from_slice(&2.3522_f32.to_le_bytes()); // lng
     bytes[8..12].copy_from_slice(&0xAAAAAAAA_u32.to_le_bytes()); // name_id
-    bytes[12..16].copy_from_slice(&0xBBBBBBBB_u32.to_le_bytes());// category_id
-    bytes[16] = 10;                                              // rank
-    bytes[17] = 180;                                             // importance
-    // bytes[18..20] = pad
-    bytes[20..24].copy_from_slice(&0xCCCCCCCC_u32.to_le_bytes());// parent_place_id
+    bytes[12..16].copy_from_slice(&0xBBBBBBBB_u32.to_le_bytes()); // category_id
+    bytes[16] = 10; // rank
+    bytes[17] = 180; // importance
+                     // bytes[18..20] = pad
+    bytes[20..24].copy_from_slice(&0xCCCCCCCC_u32.to_le_bytes()); // parent_place_id
 
     let p: PoiPoint = cast_one(&bytes);
     assert!((p.lat - 48.8566).abs() < 1e-4, "lat mismatch: {}", p.lat);

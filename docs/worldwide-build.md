@@ -23,7 +23,7 @@ deployments.
 |---|---|---:|
 | Australia | `australia-latest.osm.pbf` | 890 MB |
 | New Zealand | `new-zealand-latest.osm.pbf` | 377 MB |
-| Great Britain | `great-britain-latest.osm.pbf` | 2.0 GB |
+| United Kingdom | `united-kingdom-latest.osm.pbf` | ~2 GB |
 | Canada | `canada-latest.osm.pbf` | 5.9 GB |
 | USA | `us-latest.osm.pbf` | 11 GB |
 | **5-region sum** | | **~20 GB** |
@@ -31,6 +31,9 @@ deployments.
 | Europe continent | `europe-latest.osm.pbf` | ~30 GB |
 | North America continent | `north-america-latest.osm.pbf` | ~15 GB |
 | Planet | `planet-latest.osm.pbf` | ~75 GB |
+
+Use the [United Kingdom extract](https://download.geofabrik.de/europe/united-kingdom.html) for UK coverage, including Northern Ireland.
+The Great Britain extract omits Northern Ireland.
 
 Download speed from Geofabrik fluctuates between 1 MB/s (throttled)
 and 5 MB/s (healthy). Plan for ~1 hour to pull the 5-region set.
@@ -41,7 +44,7 @@ and 5 MB/s (healthy). Plan for ~1 hour to pull the 5-region set.
 |---|---:|---:|---:|
 | AU only | 890 MB | ~2 GB | 8 min |
 | AU + NZ | 1.3 GB | 751 MB (reverse only) + ~300 MB (forward + FST) | 10 min |
-| AU + NZ + GB + CA + US | ~20 GB | **6.7 GB** reverse only | **~3 h 15 min** (measured 2026-04-22 on M1 Max, 64 GB) |
+| AU + NZ + GB + CA + US | ~20 GB | **6.7 GB** reverse only | **~3 h 15 min** (measured with the Great Britain extract on 2026-04-22; excludes Northern Ireland) |
 
 Observed end-of-build totals for the 5-region combined index:
 
@@ -108,14 +111,8 @@ handles conditional GET, resumable downloads, and MD5 verification
 in one tool. Example for the 5-region set:
 
 ```bash
-cd data/pbf
-for url in \
-    https://download.geofabrik.de/australia-oceania/australia-latest.osm.pbf \
-    https://download.geofabrik.de/australia-oceania/new-zealand-latest.osm.pbf \
-    https://download.geofabrik.de/europe/great-britain-latest.osm.pbf \
-    https://download.geofabrik.de/north-america/canada-latest.osm.pbf \
-    https://download.geofabrik.de/north-america/us-latest.osm.pbf; do
-    curl -fSL -O "$url"
+for region in australia new-zealand united-kingdom canada usa; do
+    ./target/release/fetch-data --data-dir ./data --region "$region"
 done
 ```
 
@@ -137,7 +134,7 @@ mkdir -p data/index-worldwide
 ./build/build-index data/index-worldwide \
     data/pbf/australia-latest.osm.pbf \
     data/pbf/new-zealand-latest.osm.pbf \
-    data/pbf/great-britain-latest.osm.pbf \
+    data/pbf/united-kingdom-latest.osm.pbf \
     data/pbf/canada-latest.osm.pbf \
     data/pbf/us-latest.osm.pbf
 ```
@@ -155,6 +152,25 @@ preferred for larger deployments because a tantivy-wide query with
 `country_code` filter still scans the whole index; per-country cuts
 that scan dramatically.
 
+Forward search indexes address points and their exact postcodes in
+each country shard. The autocomplete build also derives one feature
+per observed postcode from address data and fills missing postcode
+features from valid Who's On First postalcode centroids. Bare postcode search
+uses that feature when available and falls back to the forward shards;
+it does not claim an arbitrary house as the postcode's identity.
+The same postcode can occur in multiple countries, so country filters
+or a geographic bias resolve that ambiguity.
+An explicit ISO alpha-2 `country_code` is the reliable way to resolve
+an ambiguous code.
+Country-name suffixes come from the loaded Who's on First country
+polygons; add those polygons when onboarding another country.
+Two-letter suffixes can also be region abbreviations (`CA` is
+California or Canada), so callers should send `country_code` when
+they mean an ISO code.
+The parser recognises common four-to-ten-character postcode shapes;
+callers should use the structured `postcode` parameter for shorter
+codes or unusual local formats.
+
 ### Autocomplete FST
 
 ```bash
@@ -164,10 +180,13 @@ that scan dramatically.
 The `both` layout emits per-country FSTs (legacy, swappable one at a
 time) and the unified FST (Radar-style, country-prefix automaton).
 Server prefers unified at query time.
+Postcodes are indexed with their usual display spacing and a compact
+alias, so `EN5 2LP` and `EN52LP` find the same feature. Postcodes absent
+from the source addresses remain absent from autocomplete and search.
 
 ### Who's on First country-polygon fallback
 
-Geofabrik's country extracts (`great-britain-latest.osm.pbf`,
+Geofabrik's country extracts (`united-kingdom-latest.osm.pbf`,
 `us-latest.osm.pbf`) don't ship their own `admin_level=2` country
 boundary relation — the relation references ways outside the extract
 window, so it's omitted. Consequence: OSM-only admin lookups return
@@ -178,19 +197,23 @@ filtering in tantivy misfiring.
 Fix (adopted from Pelias, scoped to country level only):
 
 ```bash
-# 1. Fetch the whole-planet WoF admin SQLite. ~8.6 GB bz2 → ~30 GB
-#    uncompressed, covers every country in WoF (Eurasia, Africa,
-#    Americas, Oceania, all polities). `planet` is the default
-#    scope; set WOF_COUNTRIES="au gb us" only if you deliberately
-#    want a narrow dev set.
-./scripts/fetch-test-data.sh
+# 1. Fetch separate admin and postalcode SQLite snapshots for the five countries.
+./target/release/fetch-data --data-dir ./test-data --wof --wof-postcodes \
+    --wof-countries "au nz us ca gb"
 
-# 2. Import country polygons into the index dir. Produces
-#    wof_countries.bin + wof_countries_vertices.bin + wof_countries_strings.bin.
+# 2. Import country polygons and valid postcode centroids.
+#    Produces wof_countries*.bin and wof_postcodes.tsv.
 make wof-import WOF_INDEX_DIR=./data/index-worldwide
 # or directly:
 ./target/release/wof-importer ./test-data ./data/index-worldwide
+
+# 3. Rebuild the autocomplete FST used for postcode search.
+./target/release/build-autocomplete-fst ./data/index-worldwide --layout both
 ```
+
+For later postcode-only refreshes, run `make wof-postcodes-import`
+followed by `build-autocomplete-fst`; this leaves live country polygon
+files untouched.
 
 The importer pulls only `placetype='country'` rows from WoF. After
 Douglas-Peucker simplification, the on-disk footprint is ~30 MB for
@@ -206,6 +229,15 @@ build time. If you skip this step the indexes will be missing
 coverage for any country whose extract omitted the country-level
 relation.
 
+WoF postcodes live in separate databases from WoF admin data. The importer
+skips deprecated records and invalid centroids, including 0,0. The NZ
+snapshot currently has no usable coordinates, so NZ postcode search
+continues to rely on OSM/OpenAddresses. Existing OSM, G-NAF, and
+OpenAddresses postcode candidates take precedence; WoF fills missing
+codes. The exported file starts with `#wof-postcodes-v1`; the FST builder
+rejects other layouts. Attribution: [Who's On First data and source
+licenses](https://whosonfirst.org/docs/licenses/).
+
 ### Optional: G-NAF (Australia only)
 
 G-NAF is Australia's authoritative address dataset — swaps street
@@ -219,6 +251,29 @@ non-AU regions.
 ```
 
 ### Optional: OpenAddresses (per-country for non-AU coverage)
+
+```bash
+# Public per-source GeoJSON converted to the CSV layout used by the builder.
+python3 scripts/import-oa-geojson.py \
+  us/ny/city_of_new_york us/ca/san_francisco us/va/statewide \
+  ca/on/city_of_toronto ca/ab/calgary
+./target/release/build-openaddresses-index data/openaddresses data/index-worldwide \
+  --country us,ca
+# Forward search and autocomplete must be refreshed after adding OA points.
+./target/release/build-forward-index data/index-worldwide --partition-by-country
+./target/release/build-autocomplete-fst data/index-worldwide --layout both
+```
+
+The five sources above are a **targeted US/CA sample**, not nationwide
+OpenAddresses coverage. Their terms differ: [San Francisco uses PDDL](https://opendatacommons.org/licenses/pddl/1-0/),
+[Virginia identifies its points as public domain](https://vgin.vdem.virginia.gov/datasets/virginia-address-points/about),
+and [NYC Open Data allows unrestricted reuse](https://opendata.cityofnewyork.us/wp-content/uploads/NYC_OpenData_TechnicalStandardsManual.pdf).
+The [Toronto](https://www.toronto.ca/city-government/data-research-maps/open-data/open-data-licence/)
+and [Calgary](https://data.calgary.ca/stories/s/Open-Calgary-Terms-of-Use/u45n-7awa)
+Open Government Licences require attribution. Check source terms before adding
+more; the Bucks County source prohibits commercial use and is excluded.
+
+For an already extracted OpenAddresses CSV batch, skip the conversion:
 
 ```bash
 ./target/release/build-openaddresses-index /path/to/openaddresses data/index-worldwide
@@ -256,9 +311,13 @@ make regression-worldwide   # run all 5 country subsets
 ```
 
 Reports land in `tests/regression/reports/pelias-<cc>-<UTC>.json`.
-Partial failures are expected — Pelias targets their own geocoder,
-and our coverage/tokeniser differ. The run is useful as a
-**convergence metric** more than a pass/fail gate.
+The runner checks that the forward index serves AU, NZ, US, CA, and GB before testing them.
+Set `COUNTRY_CODES` to a space-separated list to run another scope.
+Reports separate fully comparable cases, partial diagnostics, and unsupported cases.
+The converter preserves Pelias's endpoint, request filters, and top-N threshold when our API supports them.
+It never adds a country filter based on the expected answer.
+Cases requiring Pelias-only filters or response fields do not count as fully comparable.
+The comparable pass rate measures a narrow subset; partial diagnostics remain useful for tracking our own search quality.
 
 ## Updating incrementally
 

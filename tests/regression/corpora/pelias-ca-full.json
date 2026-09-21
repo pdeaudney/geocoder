@@ -1,30 +1,33 @@
 {
   "name": "pelias-ca-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Vancouver"
+            "fields": {
+              "address.city": "Vancouver",
+              "address.country": "Canada",
+              "address.country_code": "CA",
+              "address.house_number": "5",
+              "address.road": "West 4th Avenue"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-admin_lookup-19",
-      "notes": null,
+      "notes": [
+        "Problem in the QS data, so should be fixed once we move to WOF"
+      ],
+      "partial_reason": "expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "ca",
           "q": "5 West 4th Avenue Canada"
         }
       },
@@ -37,26 +40,26 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Toronto"
+            "fields": {
+              "address.city": "Toronto",
+              "address.country_code": "CA",
+              "address.house_number": "280",
+              "address.road": "Bloor Street West"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-admin_translations-25",
       "notes": "Bengali for Toronto, Japanese for Ontario, Farsi/Persian for Canada",
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "ca",
-          "q": "280 Bloor Street West \u099f\u09b0\u09cb\u09a8\u09cd\u099f\u09cb \u30aa\u30f3\u30bf\u30ea\u30aa\u5dde \u06a9\u0627\u0646\u0627\u062f\u0627"
+          "q": "280 Bloor Street West টরোন্টো オンタリオ州 کانادا"
         }
       },
       "tags": [
@@ -68,14 +71,11 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Ontario"
+            "fields": {
+              "name": "London"
+            },
+            "kind": "result_matches_within",
+            "limit": 3
           }
         ],
         "status": 200
@@ -84,29 +84,33 @@
       "notes": "test boundary circle with a query for london, and a point ner london, Ontario",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "ca",
           "q": "london"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "request parameter boundary.circle.lat, request parameter boundary.circle.lon"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "London"
+            },
+            "kind": "result_matches_within",
+            "limit": 3
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Ontario"
+            "fields": {
+              "name": "New London"
+            },
+            "kind": "result_matches_within",
+            "limit": 3
           }
         ],
         "status": 200
@@ -115,40 +119,63 @@
       "notes": "test boundary circle with a large radius",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "ca",
           "q": "london"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "request parameter boundary.circle.lat, request parameter boundary.circle.lon, request parameter boundary.circle.radius"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
+            "fields": {
+              "name": "L9E 0K7"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_postalcodes-7",
+      "notes": "postal code in Ontario, Canada. No Canadian postal code records currently",
+      "request": {
+        "method": "GET",
+        "path": "/autocomplete",
+        "query": {
+          "q": "L9E 0K7"
+        }
+      },
+      "tags": [
+        "pelias",
+        "autocomplete"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Ottawa"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Sussex Drive"
+            "fields": {
+              "address.city": "Ottawa",
+              "address.country_code": "CA",
+              "name": "490 Sussex Drive"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-international-6",
       "notes": null,
+      "partial_reason": "normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -166,25 +193,22 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Calgary"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "MacLeod Tr SE"
+            "fields": {
+              "address.city": "Calgary",
+              "address.country_code": "CA",
+              "name": "615 MacLeod Tr SE"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-international-12",
-      "notes": null,
+      "notes": [
+        "prod missing locality data. passes on prodbuild"
+      ],
+      "partial_reason": "normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -202,14 +226,18 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "CA",
+              "name": "2000 Main Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Main Street"
+            "fields": {
+              "address.country_code": "DE"
+            },
+            "kind": "result_absent"
           }
         ],
         "status": 200
@@ -220,38 +248,37 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "ca",
           "q": "2000 main st, berlin"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "boundary.country value"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Toronto"
+            "fields": {
+              "address.city": "Toronto",
+              "address.country": "Canada",
+              "address.country_code": "CA"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_city_country-21",
       "notes": null,
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "ca",
           "q": "toronto, ca"
         }
       },
@@ -264,25 +291,54 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
+            "fields": {
+              "address.country": "Canada",
+              "address.country_code": "CA"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_city_country-31",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "seattle, canada"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Toronto"
+            "fields": {
+              "address.city": "Toronto",
+              "address.country_code": "CA",
+              "address.house_number": "22",
+              "address.road": "Lloyd George Avenue"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_iso2_to_iso3-4",
       "notes": null,
+      "partial_reason": "expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "ca",
           "q": "22 Lloyd George Ave, Toronto Ontario CA"
         }
       },
@@ -295,9 +351,13 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "Canada",
+              "address.country_code": "CA",
+              "name": "Canada"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -308,27 +368,27 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "ca",
           "q": "Canada"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Newfoundland and Labrador"
+            "fields": {
+              "address.country": "Canada",
+              "address.country_code": "CA",
+              "address.state": "Newfoundland and Labrador",
+              "name": "Newfoundland and Labrador"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -339,27 +399,27 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "ca",
           "q": "Newfoundland and Labrador"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Prince Edward Island"
+            "fields": {
+              "address.country": "Canada",
+              "address.country_code": "CA",
+              "address.state": "Prince Edward Island",
+              "name": "Prince Edward Island"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -370,14 +430,14 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "ca",
           "q": "Prince Edward Island"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     }
   ]
 }

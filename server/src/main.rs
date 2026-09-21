@@ -17,7 +17,9 @@ use query_server::ip_geo::IpGeo;
 use query_server::metrics::{canonical_country, Metrics};
 use query_server::shadow::{ShadowConfig, ShadowDispatcher};
 use query_server::telemetry;
-use query_server::{Index, DEFAULT_ADMIN_CELL_LEVEL, DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL};
+use query_server::{
+    Index, DEFAULT_ADMIN_CELL_LEVEL, DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL,
+};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -145,11 +147,10 @@ struct SearchParams {
     street: Option<String>,
     #[serde(default)]
     housenumber: Option<String>,
-    /// Unit / flat / apartment number. Currently echoed back to the
-    /// caller in the response but not yet used to narrow lookups —
-    /// G-NAF's on-disk address-point format doesn't carry FLAT_NUMBER
-    /// (Phase 2 fix). Until then `unit` is purely informational.
-    /// Accepted from explicit param or inferred from AU shorthand
+    #[serde(default)]
+    postcode: Option<String>,
+    /// Unit / flat / apartment number used to refine address-point
+    /// matches. Accepted from an explicit param or AU shorthand
     /// `<unit>/<housenumber>` in freeform `q`.
     #[serde(default)]
     unit: Option<String>,
@@ -184,9 +185,8 @@ struct SearchParams {
 fn resolve_h3_res(raw: Option<&str>) -> Result<Vec<u8>, Response> {
     match raw {
         None => Ok(Vec::new()),
-        Some(s) => query_server::h3_cell::parse_h3_res(s).map_err(|msg| {
-            (StatusCode::BAD_REQUEST, msg).into_response()
-        }),
+        Some(s) => query_server::h3_cell::parse_h3_res(s)
+            .map_err(|msg| (StatusCode::BAD_REQUEST, msg).into_response()),
     }
 }
 
@@ -236,9 +236,7 @@ async fn healthz_live() -> Response {
 /// serve real traffic right now." A k8s pod that's `live=true,
 /// ready=false` is a normal cold-boot state — the kubelet leaves
 /// the container running while the LB skips routing to it.
-async fn healthz_ready(
-    ready: axum::extract::Extension<Arc<AtomicBool>>,
-) -> Response {
+async fn healthz_ready(ready: axum::extract::Extension<Arc<AtomicBool>>) -> Response {
     if ready.0.load(Ordering::Relaxed) {
         (
             [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -260,9 +258,7 @@ async fn healthz_ready(
 /// network layer (security-group / ingress rule). The body is the
 /// Prometheus text exposition format produced by
 /// `query_server::metrics::Metrics::render`.
-async fn metrics_handler(
-    metrics: axum::extract::Extension<Arc<Metrics>>,
-) -> Response {
+async fn metrics_handler(metrics: axum::extract::Extension<Arc<Metrics>>) -> Response {
     let body = metrics.0.render();
     (
         [(
@@ -288,10 +284,7 @@ async fn healthz_indexes(
     let snapshot = index.load();
 
     let mut indexes = serde_json::Map::new();
-    indexes.insert(
-        "reverse".into(),
-        serde_json::json!({ "loaded": true }),
-    );
+    indexes.insert("reverse".into(), serde_json::json!({ "loaded": true }));
     indexes.insert(
         "postcode_lookup".into(),
         serde_json::json!({
@@ -516,6 +509,7 @@ async fn validate_address(
         check_text("city", &params.city, L::STRUCTURED_FIELD),
         check_text("country_code", &params.country_code, L::COUNTRY_CODE_LIST),
         check_text_opt("housenumber", params.housenumber.as_deref(), L::HOUSENUMBER),
+        check_text_opt("unit", params.unit.as_deref(), L::STRUCTURED_FIELD),
         check_text_opt("state", params.state.as_deref(), L::STRUCTURED_FIELD),
         check_text_opt("postcode", params.postcode.as_deref(), L::POSTCODE),
     ]
@@ -538,22 +532,31 @@ async fn validate_address(
             .into_response();
     };
 
-    // Step 1: locate the street within the named city, for a coarse
-    // candidate coord. forward::search_structured applies the same fallback
-    // ladder as /search so slightly-wrong inputs still resolve.
+    // Look for an exact address point first when a number was supplied.
+    // The street document remains a fallback for data without house points.
     let structured = forward::StructuredQuery {
         street: Some(&params.street),
+        housenumber: params.housenumber.as_deref(),
+        unit: params.unit.as_deref(),
+        postcode: params.postcode.as_deref(),
         city: Some(&params.city),
         state: params.state.as_deref(),
         country_code: Some(&params.country_code),
-        kind: Some(forward::KIND_STREET),
+        kind: if params.housenumber.is_some() {
+            None
+        } else {
+            Some(forward::KIND_STREET)
+        },
         limit: 5,
         ..Default::default()
     };
     let hits = match fwd.search_structured(structured) {
         Ok(h) => h,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("search failed: {e}"))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("search failed: {e}"),
+            )
                 .into_response()
         }
     };
@@ -570,8 +573,25 @@ async fn validate_address(
     // Step 2: refine to the exact property if a housenumber was supplied.
     let idx_snap = index.load();
     let cc_bytes: Option<[u8; 2]> = parse_country_code_bytes(&params.country_code);
-    let (final_lat, final_lng, verified, confidence_reason) = if let Some(hn) = params.housenumber.as_deref()
-    {
+    let (final_lat, final_lng, verified, confidence_reason) = if top.kind == forward::KIND_ADDRESS {
+        let unit_ok =
+            requested_unit_matches(params.unit.as_deref(), top.unit.as_deref().unwrap_or(""));
+        let postcode_ok = params.postcode.as_deref().is_none_or(|requested| {
+            top.postcode.as_deref().is_some_and(|stored| {
+                forward::normalize_postcode(requested) == forward::normalize_postcode(stored)
+            })
+        });
+        (
+            top.lat,
+            top.lng,
+            unit_ok && postcode_ok,
+            if unit_ok && postcode_ok {
+                "exact"
+            } else {
+                "fallback: unit or postcode not verified"
+            },
+        )
+    } else if let Some(hn) = params.housenumber.as_deref() {
         let refine_span = tracing::info_span!(
             target: "query_server::validate",
             "validate.house_number_refine",
@@ -588,32 +608,82 @@ async fn validate_address(
             )
         });
         match resolved {
-            Some(m) => (m.lat, m.lng, true, "exact"),
-            None => (top.lat, top.lng, false, "fallback: street found, house number not in index"),
+            Some(m) => {
+                let unit_verified = requested_unit_matches(params.unit.as_deref(), m.unit);
+                let postcode_verified = params.postcode.as_deref().is_none_or(|requested| {
+                    idx_snap
+                        .query(m.lat, m.lng)
+                        .address
+                        .postcode
+                        .is_some_and(|stored| {
+                            forward::normalize_postcode(requested)
+                                == forward::normalize_postcode(stored)
+                        })
+                });
+                let verified = unit_verified && postcode_verified;
+                (
+                    m.lat,
+                    m.lng,
+                    verified,
+                    if verified {
+                        "exact"
+                    } else {
+                        "fallback: house found, unit or postcode not verified"
+                    },
+                )
+            }
+            None => (
+                top.lat,
+                top.lng,
+                false,
+                "fallback: street found, house number not in index",
+            ),
         }
     } else {
-        (top.lat, top.lng, false, "interpolated: street resolved, no house number to verify")
+        (
+            top.lat,
+            top.lng,
+            false,
+            "interpolated: street resolved, no house number to verify",
+        )
     };
     tracing::Span::current().record("geocoder.outcome", confidence_reason);
 
-    // Step 3: reverse-geocode the final coord to build the canonical form.
-    let canonical = idx_snap.query(final_lat, final_lng);
+    // Build the canonical form from the exact point when one was found;
+    // otherwise reverse-geocode the street refinement as before.
+    let normalized = if top.kind == forward::KIND_ADDRESS {
+        let direct = enrich_hit(
+            top.clone(),
+            params.housenumber.as_deref(),
+            params.unit.as_deref(),
+            &idx_snap,
+            &h3_resolutions,
+        );
+        serde_json::json!({
+            "display_name": direct["display_name"],
+            "address": direct["address"],
+        })
+    } else {
+        let canonical = idx_snap.query(final_lat, final_lng);
+        serde_json::json!({
+            "display_name": canonical.display_name,
+            "address": canonical.address,
+        })
+    };
 
     let body = serde_json::json!({
         "verified": verified,
         "confidence": if verified { "exact" } else { confidence_reason },
         "input": {
             "housenumber": params.housenumber,
+            "unit": params.unit,
             "street": params.street,
             "city": params.city,
             "state": params.state,
             "postcode": params.postcode,
             "country_code": params.country_code,
         },
-        "normalized": {
-            "display_name": canonical.display_name,
-            "address": canonical.address,
-        },
+        "normalized": normalized,
         "lat": final_lat,
         "lon": final_lng,
         // H3 describes the final (refined) coord — the thing the client
@@ -629,9 +699,27 @@ async fn validate_address(
     axum::Json(body).into_response()
 }
 
+#[cfg(feature = "forward")]
+fn requested_unit_matches(requested: Option<&str>, stored: &str) -> bool {
+    requested
+        .map(str::trim)
+        .filter(|unit| !unit.is_empty())
+        .is_none_or(|unit| stored.eq_ignore_ascii_case(unit))
+}
+
+#[cfg(all(test, feature = "forward"))]
+#[test]
+fn unrecorded_unit_is_not_verified() {
+    assert!(!requested_unit_matches(Some("Flat 3"), ""));
+    assert!(!requested_unit_matches(Some("Flat 3"), "Flat 4"));
+    assert!(requested_unit_matches(Some(" flat 3 "), "Flat 3"));
+    assert!(requested_unit_matches(None, ""));
+}
+
 /// Build a `/search`-response-shaped record from a FST fast-path hit.
-/// Reverse-geocodes the coord to fill in the full address so clients see
-/// the same response shape whether the hit came from FST or tantivy.
+/// Use reverse lookup for administrative context around the FST point.
+/// Its nearest house and postcode belong to a different feature and must
+/// not be presented as attributes of a place, street or POI hit.
 #[cfg(feature = "forward")]
 fn enrich_fst_hit(
     fst_hit: query_server::autocomplete::Hit,
@@ -640,8 +728,29 @@ fn enrich_fst_hit(
 ) -> serde_json::Value {
     let addr = index.query(fst_hit.lat, fst_hit.lng);
     let d = &addr.address;
+    let name = fst_hit.name.as_str();
+    let road = (fst_hit.kind == query_server::autocomplete::KIND_STREET).then_some(name);
+    let postcode = (fst_hit.kind == query_server::autocomplete::KIND_POSTCODE).then_some(name);
+    // UK borough boundaries can occupy the reverse index's city slot.
+    // For a postcode feature, report the encompassing London locality.
+    let city = if postcode.is_some()
+        && d.country_code.as_deref() == Some("GB")
+        && d.city
+            .is_some_and(|city| city.starts_with("London Borough of "))
+    {
+        Some("London")
+    } else {
+        d.city
+    };
+    let mut parts = vec![name];
+    for context in [city, d.state, d.country].into_iter().flatten() {
+        if !parts.iter().any(|part| part.eq_ignore_ascii_case(context)) {
+            parts.push(context);
+        }
+    }
+    let display_name = parts.join(", ");
     serde_json::json!({
-        "name": fst_hit.name,
+        "name": name,
         "kind": fst_hit.kind,
         "rank": fst_hit.rank,
         // Fast-path doesn't run BM25; report a sentinel score that clients
@@ -651,23 +760,52 @@ fn enrich_fst_hit(
         "source": "fst",
         "lat": fst_hit.lat,
         "lon": fst_hit.lng,
-        "display_name": addr.display_name,
+        "display_name": display_name,
         "address": {
-            "house_number": d.house_number.as_deref().map(str::to_owned),
-            "road": d.road,
-            "city": d.city,
+            "house_number": null,
+            "road": road,
+            "city": city,
             "state": d.state,
             "county": d.county,
-            "postcode": d.postcode,
+            "postcode": postcode,
             "country": d.country,
             "country_code": d.country_code,
         },
-        "confidence": addr.confidence,
         // FST hits and tantivy hits share the same response shape —
         // if one carries `h3` both must, otherwise clients see silent
         // inconsistency per query path.
         "h3": query_server::h3_cell::build_h3_map(fst_hit.lat, fst_hit.lng, h3_resolutions),
     })
+}
+
+#[cfg(all(test, feature = "forward"))]
+mod fst_response_tests {
+    use super::*;
+
+    #[test]
+    fn place_hit_does_not_inherit_a_nearby_address() {
+        let Ok(dir) = std::env::var("GEOCODER_INDEX_DIR") else {
+            return;
+        };
+        let fst = query_server::autocomplete::Autocomplete::open(std::path::Path::new(&dir))
+            .expect("FST open")
+            .expect("FST index");
+        let hit = fst.exact_match(b"au", "sydney").expect("Sydney");
+        let index = Index::load(
+            &dir,
+            DEFAULT_STREET_CELL_LEVEL,
+            DEFAULT_ADMIN_CELL_LEVEL,
+            DEFAULT_SEARCH_DISTANCE,
+        )
+        .expect("reverse index");
+        let response = enrich_fst_hit(hit, &index, &[]);
+        assert_eq!(response["address"]["road"], serde_json::Value::Null);
+        assert_eq!(response["address"]["house_number"], serde_json::Value::Null);
+        assert_eq!(response["address"]["postcode"], serde_json::Value::Null);
+        assert!(response["display_name"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("Sydney,")));
+    }
 }
 
 /// Parse a user-supplied country code string into the 2-byte uppercase
@@ -700,7 +838,11 @@ async fn autocomplete(
     use query_server::limits as L;
     if let Some(r) = [
         check_text("q", &params.q, L::AUTOCOMPLETE_Q),
-        check_text_opt("country_code", params.country_code.as_deref(), L::COUNTRY_CODE),
+        check_text_opt(
+            "country_code",
+            params.country_code.as_deref(),
+            L::COUNTRY_CODE,
+        ),
     ]
     .into_iter()
     .flatten()
@@ -730,9 +872,16 @@ async fn autocomplete(
         geocoder.autocomplete.fst_variant = tracing::field::Empty,
     );
     let results: Vec<query_server::autocomplete::Hit> = fst_span.in_scope(|| {
-        match params.country_code.as_deref().and_then(parse_country_code_bytes) {
+        match params
+            .country_code
+            .as_deref()
+            .and_then(parse_country_code_bytes)
+        {
             Some(cc_upper) => {
-                let cc_lower = [cc_upper[0].to_ascii_lowercase(), cc_upper[1].to_ascii_lowercase()];
+                let cc_lower = [
+                    cc_upper[0].to_ascii_lowercase(),
+                    cc_upper[1].to_ascii_lowercase(),
+                ];
                 autoc.search(&cc_lower, &params.q, limit)
             }
             None => autoc.search_any(&params.q, limit),
@@ -877,9 +1026,14 @@ async fn search(
         check_text_opt("q", params.q.as_deref(), L::SEARCH_Q),
         check_text_opt("street", params.street.as_deref(), L::STRUCTURED_FIELD),
         check_text_opt("housenumber", params.housenumber.as_deref(), L::HOUSENUMBER),
+        check_text_opt("postcode", params.postcode.as_deref(), L::POSTCODE),
         check_text_opt("city", params.city.as_deref(), L::STRUCTURED_FIELD),
         check_text_opt("state", params.state.as_deref(), L::STRUCTURED_FIELD),
-        check_text_opt("country_code", params.country_code.as_deref(), L::COUNTRY_CODE_LIST),
+        check_text_opt(
+            "country_code",
+            params.country_code.as_deref(),
+            L::COUNTRY_CODE_LIST,
+        ),
     ]
     .into_iter()
     .flatten()
@@ -929,10 +1083,14 @@ async fn search(
     let kind_filter = match params.kind.as_deref() {
         Some("place") => Some(forward::KIND_PLACE),
         Some("street") => Some(forward::KIND_STREET),
+        Some("address") => Some(forward::KIND_ADDRESS),
+        Some("postcode") => Some(query_server::autocomplete::KIND_POSTCODE as u64),
         Some(other) => {
             return (
                 StatusCode::BAD_REQUEST,
-                format!("invalid kind {other:?}; expected 'place' or 'street'"),
+                format!(
+                    "invalid kind {other:?}; expected 'place', 'street', 'address', or 'postcode'"
+                ),
             )
                 .into_response()
         }
@@ -942,7 +1100,15 @@ async fn search(
     // If the caller sent a freeform `q`, pre-parse to surface house number /
     // state / postcode hints. Structured params take precedence when both
     // are present.
-    let parsed = params.q.as_deref().map(forward::parse_freeform_query);
+    let parsed = params.q.as_deref().map(|q| {
+        forward::parse_freeform_query_in_country(
+            q,
+            params
+                .country_code
+                .as_deref()
+                .filter(|cc| !cc.contains(',')),
+        )
+    });
     let housenumber = params
         .housenumber
         .clone()
@@ -973,19 +1139,79 @@ async fn search(
         })
         .unwrap_or_default();
 
+    // Exact postcode lookups use the postcode feature in the FST. An
+    // address sampled from that postcode would claim a particular house
+    // and street even though the query identifies a whole postal area.
+    if params.street.is_none()
+        && params.city.is_none()
+        && params.state.is_none()
+        && params.housenumber.is_none()
+        && params.unit.is_none()
+        && (params.q.is_none() || params.postcode.is_none())
+        && params.kind.as_deref().is_none_or(|k| k == "postcode")
+    {
+        if let (Some(autoc), Some(code)) = (
+            autocomplete_idx.as_ref(),
+            params.postcode.as_deref().or(params.q.as_deref()),
+        ) {
+            let normalized = forward::normalize_postcode(code);
+            if (3..=10).contains(&normalized.len())
+                && code
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c.is_ascii_whitespace() || c == '-')
+            {
+                let mut ccs: Vec<[u8; 2]> = if country_codes.is_empty() {
+                    autoc.countries()
+                } else {
+                    country_codes
+                        .iter()
+                        .filter_map(|cc| parse_country_code_bytes(cc))
+                        .collect()
+                };
+                ccs.sort();
+                let mut postal_hits: Vec<_> = ccs
+                    .into_iter()
+                    .filter_map(|cc| autoc.exact_match(&cc, code))
+                    .filter(|hit| hit.kind == query_server::autocomplete::KIND_POSTCODE)
+                    .collect();
+                if let Some(bias) = bias {
+                    postal_hits.sort_by(|a, b| {
+                        query_server::geo::haversine_m(a.lat, a.lng, bias.lat, bias.lng).total_cmp(
+                            &query_server::geo::haversine_m(b.lat, b.lng, bias.lat, bias.lng),
+                        )
+                    });
+                }
+                let idx_snap = index.load();
+                let results: Vec<_> = postal_hits
+                    .into_iter()
+                    .take(limit)
+                    .map(|hit| enrich_fst_hit(hit, &idx_snap, &h3_resolutions))
+                    .collect();
+                if !results.is_empty() {
+                    let cc = results[0]["address"]["country_code"].as_str();
+                    metrics.record_request("search", cc, started.elapsed().as_secs_f64());
+                    return axum::Json(serde_json::json!({ "results": results })).into_response();
+                }
+            }
+        }
+    }
+
     // FST fast-path: a simple freeform query that exactly matches an FST
     // key (e.g. `"sydney"` → the Sydney place record) resolves in ~5 µs
     // without touching tantivy. Radar's public architecture attributes
     // ~80% of their traffic to this fast-path. Skip when the query is
     // structured (street/city/state set), when the caller asked for
-    // multiple countries, when no FST is loaded, when caller asked
-    // for limit > 1 (fast-path returns exactly one hit), or when a
-    // proximity bias is set (fast-path returns the globally-prominent
-    // pick, which contradicts the bias intent).
+    // multiple or no countries, when no FST is loaded, when caller
+    // asked for limit > 1 (fast-path returns exactly one hit), or when a
+    // proximity bias is set. An unscoped exact key may exist in several
+    // countries; the FST's shard iteration order cannot rank them.
     let is_simple_freeform = params.street.is_none()
         && params.city.is_none()
         && params.state.is_none()
-        && country_codes.len() <= 1
+        && params.postcode.is_none()
+        && housenumber.is_none()
+        && unit.is_none()
+        && country_codes.len() == 1
         && limit == 1
         && bias.is_none()
         && params.q.as_deref().is_some_and(|s| !s.trim().is_empty());
@@ -1003,18 +1229,22 @@ async fn search(
                 geocoder.autocomplete.fst_variant = tracing::field::Empty,
             );
             let fst_hit = fst_span.in_scope(|| match country_codes.first().copied() {
-                Some(cc) => parse_country_code_bytes(cc).map(|code| {
-                    let cc_lower = [code[0].to_ascii_lowercase(), code[1].to_ascii_lowercase()];
-                    autoc.exact_match(&cc_lower, q_text)
-                }).unwrap_or(None),
-                None => autoc.exact_match_any(q_text).map(|(_, h)| h),
+                Some(cc) => parse_country_code_bytes(cc)
+                    .map(|code| {
+                        let cc_lower = [code[0].to_ascii_lowercase(), code[1].to_ascii_lowercase()];
+                        autoc.exact_match(&cc_lower, q_text)
+                    })
+                    .unwrap_or(None),
+                None => None,
             });
             fst_span.record("geocoder.match", fst_hit.is_some());
             if let Some(fst_hit) = fst_hit {
                 // Honour kind filter even on the fast-path.
                 let wanted_kind = match params.kind.as_deref() {
-                    Some("place") => Some(forward::KIND_PLACE as u64),
-                    Some("street") => Some(forward::KIND_STREET as u64),
+                    Some("place") => Some(forward::KIND_PLACE),
+                    Some("street") => Some(forward::KIND_STREET),
+                    Some("address") => Some(forward::KIND_ADDRESS),
+                    Some("postcode") => Some(query_server::autocomplete::KIND_POSTCODE as u64),
                     _ => None,
                 };
                 let kind_ok = wanted_kind
@@ -1055,6 +1285,9 @@ async fn search(
             let structured = forward::StructuredQuery {
                 q: params.q.as_deref(),
                 street: params.street.as_deref(),
+                housenumber: params.housenumber.as_deref(),
+                unit: params.unit.as_deref(),
+                postcode: params.postcode.as_deref(),
                 city: params.city.as_deref(),
                 state: params.state.as_deref(),
                 country_code: Some(cc),
@@ -1065,15 +1298,17 @@ async fn search(
             match fwd.search_structured(structured) {
                 Ok(mut h) => merged.append(&mut h),
                 Err(e) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("search failed: {e}"))
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("search failed: {e}"),
+                    )
                         .into_response()
                 }
             }
         }
         merged.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            forward::boosted_score(b, bias.as_ref())
+                .total_cmp(&forward::boosted_score(a, bias.as_ref()))
         });
         merged.truncate(limit);
         merged
@@ -1082,6 +1317,9 @@ async fn search(
         let structured = forward::StructuredQuery {
             q: params.q.as_deref(),
             street: params.street.as_deref(),
+            housenumber: params.housenumber.as_deref(),
+            unit: params.unit.as_deref(),
+            postcode: params.postcode.as_deref(),
             city: params.city.as_deref(),
             state: params.state.as_deref(),
             country_code: country_codes.first().copied(),
@@ -1092,7 +1330,10 @@ async fn search(
         match fwd.search_structured(structured) {
             Ok(h) => h,
             Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, format!("search failed: {e}"))
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("search failed: {e}"),
+                )
                     .into_response()
             }
         }
@@ -1114,7 +1355,15 @@ async fn search(
     let idx_snapshot = index.load();
     let enriched: Vec<serde_json::Value> = enrich_span.in_scope(|| {
         hits.into_iter()
-            .map(|hit| enrich_hit(hit, housenumber.as_deref(), unit.as_deref(), &idx_snapshot, &h3_resolutions))
+            .map(|hit| {
+                enrich_hit(
+                    hit,
+                    housenumber.as_deref(),
+                    unit.as_deref(),
+                    &idx_snapshot,
+                    &h3_resolutions,
+                )
+            })
             .collect()
     });
 
@@ -1170,7 +1419,11 @@ async fn nearby(
     use query_server::limits as L;
     if let Some(r) = [
         check_text_opt("q", params.q.as_deref(), L::SEARCH_Q),
-        check_text_opt("country_code", params.country_code.as_deref(), L::COUNTRY_CODE_LIST),
+        check_text_opt(
+            "country_code",
+            params.country_code.as_deref(),
+            L::COUNTRY_CODE_LIST,
+        ),
     ]
     .into_iter()
     .flatten()
@@ -1231,7 +1484,10 @@ async fn nearby(
     let hits = match fwd.search_nearby(nearby_q) {
         Ok(h) => h,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("nearby failed: {e}"))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("nearby failed: {e}"),
+            )
                 .into_response()
         }
     };
@@ -1326,6 +1582,12 @@ fn enrich_hit(
         .as_deref()
         .and_then(parse_country_code_bytes);
     let (final_lat, final_lng, matched_hn, matched_unit) = match (hit.kind, housenumber) {
+        (forward::KIND_ADDRESS, _) => (
+            hit.lat,
+            hit.lng,
+            hit.housenumber.clone(),
+            hit.unit.clone().filter(|u| !u.is_empty()),
+        ),
         (forward::KIND_STREET, Some(hn)) => {
             match index.find_addr_point_in_country(
                 hn,
@@ -1351,33 +1613,73 @@ fn enrich_hit(
 
     let addr = index.query(final_lat, final_lng);
     let details = &addr.address;
+    let exact_address = hit.kind == forward::KIND_ADDRESS;
+    let located_address = exact_address || matched_hn.is_some();
+    let road = if exact_address || hit.kind == forward::KIND_STREET {
+        Some(hit.name.as_str())
+    } else {
+        None
+    };
+    let city = hit.suburb.as_deref().or(details.city);
+    let state = hit.state.as_deref().or(details.state);
+    let postcode = if exact_address {
+        hit.postcode
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .or(details.postcode)
+    } else if located_address {
+        details.postcode
+    } else {
+        None
+    };
+    let name = if located_address {
+        format!("{} {}", matched_hn.as_deref().unwrap_or(""), hit.name)
+            .trim()
+            .to_owned()
+    } else {
+        hit.name.clone()
+    };
+    // Reverse lookup at a place or POI coordinate can find a nearby
+    // unrelated house. Build the label from the forward hit's identity
+    // and admin context so a city does not display a random street.
+    let display_name = Some(
+        [
+            Some(name.as_str()),
+            city.filter(|part| !part.eq_ignore_ascii_case(&name)),
+            state,
+            postcode,
+            details.country,
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(", "),
+    );
 
-    // Prefer the unit recorded on the matched address point over the
-    // unit echoed from the caller's input. The stored value comes from
-    // G-NAF / OpenAddresses (authoritative) and is normalised the same
-    // way `addr:unit` is read from OSM. Falls back to the input unit
-    // when no AddrPoint match was found (e.g. street-only result), so
-    // callers always see their typed unit round-trip.
-    let surfaced_unit = matched_unit.as_deref().or(unit);
+    // Only return a unit that the matched source point actually
+    // records. Echoing an unmatched typed unit would imply that the
+    // location was verified down to the apartment.
+    let surfaced_unit = matched_unit.as_deref();
 
     json!({
-        "name": hit.name,
+        "name": name,
         "kind": hit.kind,
         "rank": hit.rank,
         "score": hit.score,
         "lat": final_lat,
         "lon": final_lng,
-        "display_name": addr.display_name,
+        "display_name": display_name,
         "address": {
-            "house_number": matched_hn.or_else(|| details.house_number.as_deref().map(str::to_owned)),
+            "house_number": matched_hn,
             "unit": surfaced_unit,
-            "road": details.road,
-            "city": details.city,
-            "state": details.state,
+            "road": road,
+            "city": city,
+            "state": state,
             "county": details.county,
-            "postcode": details.postcode,
+            "postcode": postcode,
             "country": details.country,
-            "country_code": details.country_code,
+            "country_code": hit.country_code.as_deref().or(details.country_code.as_deref()),
         },
         // Always use the refined coord (post house-number match) — that's
         // the coord the client will act on and should spatial-join by.
@@ -1572,11 +1874,19 @@ async fn main() {
     let data_dir = args.get(1).map(|s| s.as_str()).unwrap_or(".");
 
     let arg_value = |flag: &str| -> Option<&String> {
-        args.iter().position(|a| a == flag).and_then(|p| args.get(p + 1))
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|p| args.get(p + 1))
     };
-    let street_cell_level = arg_value("--street-level").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_STREET_CELL_LEVEL);
-    let admin_cell_level = arg_value("--admin-level").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_ADMIN_CELL_LEVEL);
-    let search_distance = arg_value("--search-distance").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_SEARCH_DISTANCE);
+    let street_cell_level = arg_value("--street-level")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_STREET_CELL_LEVEL);
+    let admin_cell_level = arg_value("--admin-level")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_ADMIN_CELL_LEVEL);
+    let search_distance = arg_value("--search-distance")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_SEARCH_DISTANCE);
 
     tracing::info!(
         target: "query_server::startup",
@@ -1642,8 +1952,8 @@ async fn main() {
     // condition documented in the env-var truth matrix. Either way the
     // handlers see Option::None and skip the shadow path entirely —
     // zero overhead in the disabled state.
-    let shadow_dispatcher: Option<Arc<ShadowDispatcher>> = ShadowConfig::from_env()
-        .map(|cfg| ShadowDispatcher::spawn(cfg, Some(metrics.clone())));
+    let shadow_dispatcher: Option<Arc<ShadowDispatcher>> =
+        ShadowConfig::from_env().map(|cfg| ShadowDispatcher::spawn(cfg, Some(metrics.clone())));
 
     // Optional MaxMind GeoLite2 loader. Missing DB → /geocode/ip returns 503.
     let ip_db: Option<Arc<IpGeo>> = match IpGeo::open(Path::new(data_dir)) {
@@ -1669,7 +1979,8 @@ async fn main() {
     };
 
     // Optional per-country FST autocomplete indexes.
-    let autocomplete_idx: Option<Arc<Autocomplete>> = match Autocomplete::open(Path::new(data_dir)) {
+    let autocomplete_idx: Option<Arc<Autocomplete>> = match Autocomplete::open(Path::new(data_dir))
+    {
         Ok(Some(a)) => {
             tracing::info!(
                 target: "query_server::startup",
@@ -1737,15 +2048,17 @@ async fn main() {
             let _ = level;
             span
         })
-        .on_response(|res: &http::Response<_>, latency: std::time::Duration, span: &tracing::Span| {
-            span.record("http.response.status_code", res.status().as_u16());
-            tracing::debug!(
-                target: "query_server::http",
-                status = res.status().as_u16(),
-                duration_ms = latency.as_secs_f64() * 1000.0,
-                "request complete"
-            );
-        })
+        .on_response(
+            |res: &http::Response<_>, latency: std::time::Duration, span: &tracing::Span| {
+                span.record("http.response.status_code", res.status().as_u16());
+                tracing::debug!(
+                    target: "query_server::http",
+                    status = res.status().as_u16(),
+                    duration_ms = latency.as_secs_f64() * 1000.0,
+                    "request complete"
+                );
+            },
+        )
         .on_failure(DefaultOnFailure::new().level(Level::WARN));
 
     // Global request-body cap. Geocoder endpoints are GET-only today
@@ -1802,8 +2115,13 @@ async fn main() {
 
     let domain_pos = args.iter().position(|a| a == "--domain");
     if let Some(pos) = domain_pos {
-        let domain = args.get(pos + 1).expect("--domain requires a value").clone();
-        let cache_dir = args.iter().position(|a| a == "--cache")
+        let domain = args
+            .get(pos + 1)
+            .expect("--domain requires a value")
+            .clone();
+        let cache_dir = args
+            .iter()
+            .position(|a| a == "--cache")
             .and_then(|p| args.get(p + 1).cloned())
             .unwrap_or_else(|| "acme-cache".to_string());
 
@@ -1820,8 +2138,12 @@ async fn main() {
         tokio::spawn(async move {
             loop {
                 match state.next().await {
-                    Some(Ok(ok)) => tracing::info!(target: "query_server::acme", event = ?ok, "ACME event"),
-                    Some(Err(err)) => tracing::warn!(target: "query_server::acme", error = ?err, "ACME error"),
+                    Some(Ok(ok)) => {
+                        tracing::info!(target: "query_server::acme", event = ?ok, "ACME event")
+                    }
+                    Some(Err(err)) => {
+                        tracing::warn!(target: "query_server::acme", error = ?err, "ACME error")
+                    }
                     None => break,
                 }
             }
@@ -1946,24 +2268,26 @@ fn spawn_grpc_server(
                 "rpc.grpc.status_code" = tracing::field::Empty,
             )
         })
-        .on_response(|res: &http::Response<_>, latency: std::time::Duration, span: &tracing::Span| {
-            // grpc-status arrives as a trailer most of the time, but
-            // some libraries set it as an initial-metadata header for
-            // unary fast-fails. Fall back to "OK" when neither is present.
-            if let Some(code) = res
-                .headers()
-                .get("grpc-status")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<i32>().ok())
-            {
-                span.record("rpc.grpc.status_code", code);
-            }
-            tracing::debug!(
-                target: "query_server::grpc",
-                duration_ms = latency.as_secs_f64() * 1000.0,
-                "rpc complete"
-            );
-        });
+        .on_response(
+            |res: &http::Response<_>, latency: std::time::Duration, span: &tracing::Span| {
+                // grpc-status arrives as a trailer most of the time, but
+                // some libraries set it as an initial-metadata header for
+                // unary fast-fails. Fall back to "OK" when neither is present.
+                if let Some(code) = res
+                    .headers()
+                    .get("grpc-status")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<i32>().ok())
+                {
+                    span.record("rpc.grpc.status_code", code);
+                }
+                tracing::debug!(
+                    target: "query_server::grpc",
+                    duration_ms = latency.as_secs_f64() * 1000.0,
+                    "rpc complete"
+                );
+            },
+        );
 
     tokio::spawn(async move {
         tracing::info!(target: "query_server::startup", addr = %addr, "starting gRPC server");

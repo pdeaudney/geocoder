@@ -1,0 +1,29 @@
+name: Rust and index review
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install native Rust dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bzip2 cmake protobuf-compiler libicu-dev pkg-config clang libclang-dev \
+            libosmium2-dev libprotozero-dev libs2-dev zlib1g-dev libbz2-dev \
+            libexpat1-dev liblz4-dev libdeflate-dev
+      - name: Build C++ indexer
+        run: |
+          cmake -S builder -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel 2
+      - run: cargo check --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets
+      # Includes binary-layout, schema rejection, and per-country shard tests.
+      - run: cargo test --workspace

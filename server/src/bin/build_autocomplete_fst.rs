@@ -25,24 +25,44 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use fst::MapBuilder;
-use query_server::autocomplete::{AutocompleteEntry, KIND_PLACE, KIND_POI, KIND_STREET};
+use query_server::autocomplete::{
+    AutocompleteEntry, KIND_PLACE, KIND_POI, KIND_POSTCODE, KIND_STREET,
+};
 use query_server::i18n::ENTITY_PLACE;
 use query_server::{
     as_typed_slice, manifest, Index, NodeCoord, PlacePoint, WayHeader, DEFAULT_ADMIN_CELL_LEVEL,
     DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL,
 };
-use serde_json::json;
 use rayon::prelude::*;
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
 /// Per-stage timing — see build-pipeline-perf-plan stage 6.
-struct Stage { name: &'static str, start: Instant }
-impl Stage { fn new(name: &'static str) -> Self { Self { name, start: Instant::now() } } }
-impl Drop for Stage { fn drop(&mut self) { eprintln!("[stage] {}: {:.3}s", self.name, self.start.elapsed().as_secs_f64()); } }
+struct Stage {
+    name: &'static str,
+    start: Instant,
+}
+impl Stage {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            start: Instant::now(),
+        }
+    }
+}
+impl Drop for Stage {
+    fn drop(&mut self) {
+        eprintln!(
+            "[stage] {}: {:.3}s",
+            self.name,
+            self.start.elapsed().as_secs_f64()
+        );
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layout {
@@ -57,7 +77,9 @@ fn main() {
     if args.len() < 2 {
         eprintln!(
             "Usage: {} <reverse-index-dir> [--country cc,cc] [--layout per-country|unified|both]",
-            args.first().map(String::as_str).unwrap_or("build-autocomplete-fst")
+            args.first()
+                .map(String::as_str)
+                .unwrap_or("build-autocomplete-fst")
         );
         std::process::exit(2);
     }
@@ -91,9 +113,7 @@ fn main() {
         Some("per-country") => Layout::PerCountry,
         Some("unified") => Layout::Unified,
         Some(other) => {
-            eprintln!(
-                "unknown --layout value {other:?}; expected per-country|unified|both"
-            );
+            eprintln!("unknown --layout value {other:?}; expected per-country|unified|both");
             std::process::exit(2);
         }
     };
@@ -114,6 +134,7 @@ fn main() {
                 "country_count": stats.country_count,
                 "total_entries": stats.total_entries,
                 "total_keys": stats.total_keys,
+                "wof_postcodes_added": stats.wof_postcodes_added,
                 "build_seconds": t0.elapsed().as_secs_f64(),
             });
             if let Err(e) = manifest::write(&dir, "autocomplete", extra) {
@@ -128,6 +149,7 @@ struct RunStats {
     country_count: usize,
     total_entries: u64,
     total_keys: u64,
+    wof_postcodes_added: usize,
 }
 
 /// Per-country staging state. Lives at module scope so `emit_unified`
@@ -161,6 +183,15 @@ struct Candidate<'a> {
     /// Used by the sequential dedup pass after par_iter for streets
     /// (places don't dedup); kept on places too for symmetry.
     name_id: u32,
+}
+
+struct PostalCandidate<'a> {
+    cc: [u8; 2],
+    name: String,
+    compact: String,
+    lat: f32,
+    lng: f32,
+    suburb: Option<&'a str>,
 }
 
 /// Romance/Germanic place names commonly carry a leading definite
@@ -220,15 +251,15 @@ fn strip_leading_article(name: &str) -> Option<String> {
     // "Y Fenni" — the FST emits BOTH the full and stripped variants,
     // so a false-strip just adds an extra (harmless) index entry.
     const ARTICLES: &[&str] = &[
-        "the",                       // English
-        "le", "la", "les",           // French
-        "el", "los", "las",          // Spanish
-        "il", "lo", "i", "gli",      // Italian
-        "o", "a", "os", "as",        // Portuguese / Galician
-        "els",                       // Catalan (overlaps les / el)
-        "der", "die", "das",         // German
-        "de", "het",                 // Dutch
-        "y", "yr",                   // Welsh
+        "the", // English
+        "le", "la", "les", // French
+        "el", "los", "las", // Spanish
+        "il", "lo", "i", "gli", // Italian
+        "o", "a", "os", "as",  // Portuguese / Galician
+        "els", // Catalan (overlaps les / el)
+        "der", "die", "das", // German
+        "de", "het", // Dutch
+        "y", "yr", // Welsh
     ];
     if ARTICLES.contains(&first_lower.as_str()) {
         Some(rest.to_string())
@@ -554,12 +585,180 @@ fn run(
         None => Vec::new(),
     };
 
+    // A postcode is a searchable feature, not an attribute of one
+    // arbitrarily chosen house. Keep one representative per country and
+    // normalised code so both spaced and unspaced input find it.
+    fn add_postcode<'a>(
+        codes: &mut HashMap<([u8; 2], String), PostalCandidate<'a>>,
+        cc: [u8; 2],
+        raw: &str,
+        lat: f32,
+        lng: f32,
+        suburb: Option<&'a str>,
+    ) {
+        let code = query_server::forward::normalize_postcode(raw);
+        if !(3..=10).contains(&code.len()) {
+            return;
+        }
+        let cc_upper = [cc[0].to_ascii_uppercase(), cc[1].to_ascii_uppercase()];
+        codes
+            .entry((cc, code.clone()))
+            .and_modify(|sample| {
+                if (lat, lng) < (sample.lat, sample.lng) {
+                    sample.lat = lat;
+                    sample.lng = lng;
+                    sample.suburb = suburb;
+                }
+            })
+            .or_insert_with(|| PostalCandidate {
+                cc,
+                name: query_server::forward::display_postcode(
+                    &code,
+                    std::str::from_utf8(&cc_upper).ok(),
+                ),
+                compact: code,
+                lat,
+                lng,
+                suburb,
+            });
+    }
+
+    let mut postcodes = HashMap::new();
+    let osm_addresses: &[query_server::AddrPoint] = as_typed_slice(&idx.addr_points);
+    // Resolve country once per code and coarse location. The location
+    // bucket preserves a postcode reused in distant countries, while
+    // avoiding a polygon lookup for every house in a postal area.
+    // ponytail: a reused code on both sides of a border inside one
+    // degree tile gets one sample; use finer tiles if observed.
+    let mut osm_samples = HashMap::new();
+    for p in osm_addresses {
+        if p.postcode_id != 0 {
+            osm_samples
+                .entry((p.postcode_id, p.lat.floor() as i16, p.lng.floor() as i16))
+                .or_insert(p);
+        }
+    }
+    let osm_codes: Vec<_> = osm_samples
+        .into_par_iter()
+        .filter_map(|((postcode_id, _, _), p)| {
+            let raw = idx.get_string(postcode_id);
+            if raw.is_empty() {
+                return None;
+            }
+            let admin = idx.find_admin(p.lat as f64, p.lng as f64);
+            let cc = admin.country_code?;
+            let cc = [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()];
+            (in_filter(cc) && !(cc == *b"au" && idx.gnaf.is_some()))
+                .then_some((cc, raw, p.lat, p.lng, admin.city))
+        })
+        .collect();
+    for (cc, raw, lat, lng, suburb) in osm_codes {
+        add_postcode(&mut postcodes, cc, raw, lat, lng, suburb);
+    }
+    if let Some(gnaf) = idx.gnaf.as_ref() {
+        if in_filter(*b"au") {
+            let mut seen = HashSet::new();
+            for p in gnaf.points() {
+                if !seen.insert(p.postcode_id) {
+                    continue;
+                }
+                add_postcode(
+                    &mut postcodes,
+                    *b"au",
+                    gnaf.string_at(p.postcode_id),
+                    p.lat,
+                    p.lng,
+                    Some(gnaf.string_at(p.locality_id)),
+                );
+            }
+        }
+    }
+    if let Some(oa) = idx.open_addresses.as_ref() {
+        for (cc, shard) in oa.shards() {
+            let cc = [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()];
+            if !in_filter(cc) || (cc == *b"au" && idx.gnaf.is_some()) {
+                continue;
+            }
+            let mut seen = HashSet::new();
+            for p in shard.points() {
+                if !seen.insert(p.postcode_id) {
+                    continue;
+                }
+                add_postcode(
+                    &mut postcodes,
+                    cc,
+                    shard.string_at(p.postcode_id),
+                    p.lat,
+                    p.lng,
+                    Some(shard.string_at(p.locality_id)),
+                );
+            }
+        }
+    }
+    // WoF postalcode SQLite is exported by wof-importer as a versioned
+    // text file. Add only codes absent from OSM/G-NAF/OpenAddresses: those
+    // sources are tied to actual addresses, while WoF supplies a postal
+    // centroid. In particular, WoF NZ codes have (0,0) and are omitted by
+    // the importer rather than inventing a location for them.
+    let postcodes_before_wof = postcodes.len();
+    let wof_path = dir.join("wof_postcodes.tsv");
+    if wof_path.exists() {
+        let reader = BufReader::new(File::open(&wof_path)
+            .map_err(|e| format!("open {}: {e}", wof_path.display()))?);
+        for (line_no, line) in reader.lines().enumerate() {
+            let line = line.map_err(|e| format!("read {} line {}: {e}", wof_path.display(), line_no + 1))?;
+            if line_no == 0 {
+                if line != "#wof-postcodes-v1\tcountry\tpostcode\tlatitude\tlongitude" {
+                    return Err(format!("{}: unsupported WoF postcode schema", wof_path.display()));
+                }
+                continue;
+            }
+            let mut fields = line.split('\t');
+            let (Some(country), Some(raw), Some(lat), Some(lng), None) =
+                (fields.next(), fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                return Err(format!("{} line {}: malformed postcode row", wof_path.display(), line_no + 1));
+            };
+            let cc_bytes = country.as_bytes();
+            if cc_bytes.len() != 2 || !cc_bytes.iter().all(u8::is_ascii_uppercase) {
+                return Err(format!("{} line {}: invalid country", wof_path.display(), line_no + 1));
+            }
+            let cc = [cc_bytes[0].to_ascii_lowercase(), cc_bytes[1].to_ascii_lowercase()];
+            if !in_filter(cc) {
+                continue;
+            }
+            let lat: f32 = lat.parse().map_err(|e| format!("{} line {}: latitude: {e}", wof_path.display(), line_no + 1))?;
+            let lng: f32 = lng.parse().map_err(|e| format!("{} line {}: longitude: {e}", wof_path.display(), line_no + 1))?;
+            if !lat.is_finite() || !lng.is_finite() || !(-90.0..=90.0).contains(&lat)
+                || !(-180.0..=180.0).contains(&lng) || (lat == 0.0 && lng == 0.0) {
+                return Err(format!("{} line {}: invalid coordinate", wof_path.display(), line_no + 1));
+            }
+            let code = query_server::forward::normalize_postcode(raw);
+            if !(3..=10).contains(&code.len()) {
+                continue;
+            }
+            postcodes.entry((cc, code.clone())).or_insert_with(|| PostalCandidate {
+                cc,
+                name: query_server::forward::display_postcode(&code, Some(country)),
+                compact: code,
+                lat,
+                lng,
+                suburb: None,
+            });
+        }
+    }
+    let wof_postcodes_added = postcodes.len() - postcodes_before_wof;
+    eprintln!("added {wof_postcodes_added} WoF postcode candidates");
+    let mut postal_candidates: Vec<_> = postcodes.into_values().collect();
+    postal_candidates.sort_by(|a, b| a.cc.cmp(&b.cc).then(a.name.cmp(&b.name)));
+
     eprintln!(
-        "[stage] autocomplete_classify: {:.3}s ({} place + {} street + {} poi candidates)",
+        "[stage] autocomplete_classify: {:.3}s ({} place + {} street + {} poi + {} postcode candidates)",
         phase1a.elapsed().as_secs_f64(),
         place_candidates.len(),
         street_candidates.len(),
         poi_candidates.len(),
+        postal_candidates.len(),
     );
 
     // Phase 1b: sequential bucket-by-country with street dedup. Cheap
@@ -576,6 +775,22 @@ fn run(
         // different blocks). Rank-10 gating already keeps the volume
         // bounded.
         by_country_cands.entry(cand.cc).or_default().push(cand);
+    }
+    for code in &postal_candidates {
+        by_country_cands
+            .entry(code.cc)
+            .or_default()
+            .push(Candidate {
+                cc: code.cc,
+                name: &code.name,
+                aliases: vec![&code.compact],
+                kind: KIND_POSTCODE,
+                rank: 12,
+                lat: code.lat,
+                lng: code.lng,
+                suburb: code.suburb,
+                name_id: 0,
+            });
     }
     let mut seen: HashSet<(u32, String, [u8; 2])> = HashSet::new();
     for cand in street_candidates {
@@ -648,7 +863,11 @@ fn run(
         );
     }
 
-    let mut stats = RunStats { country_count: ccs.len(), ..Default::default() };
+    let mut stats = RunStats {
+        country_count: ccs.len(),
+        wof_postcodes_added,
+        ..Default::default()
+    };
     for pc in by_country.values() {
         stats.total_entries += pc.entries.len() as u64;
         stats.total_keys += pc.keys.len() as u64;
@@ -656,11 +875,7 @@ fn run(
     Ok(stats)
 }
 
-fn emit_per_country(
-    dir: &std::path::Path,
-    cc: &[u8; 2],
-    pc: &PerCountry,
-) -> Result<(), String> {
+fn emit_per_country(dir: &std::path::Path, cc: &[u8; 2], pc: &PerCountry) -> Result<(), String> {
     let prefix = format!("fst_{}{}", cc[0] as char, cc[1] as char);
     let entries_path = dir.join(format!("{prefix}.bin"));
     let strings_path = dir.join(format!("{prefix}_strings.bin"));
@@ -694,8 +909,7 @@ fn emit_per_country(
         .map_err(|e| format!("rename {}: {}", strings_path.display(), e))?;
     fs::rename(&entries_tmp, &entries_path)
         .map_err(|e| format!("rename {}: {}", entries_path.display(), e))?;
-    fs::rename(&fst_tmp, &fst_path)
-        .map_err(|e| format!("rename {}: {}", fst_path.display(), e))?;
+    fs::rename(&fst_tmp, &fst_path).map_err(|e| format!("rename {}: {}", fst_path.display(), e))?;
 
     eprintln!(
         "  {}: {} entries, {} keys, {} KB strings",
@@ -734,7 +948,9 @@ fn emit_unified(
     let mut keys: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
     for cc in ccs {
-        let Some(pc) = by_country.get(cc) else { continue };
+        let Some(pc) = by_country.get(cc) else {
+            continue;
+        };
         for (key_str, per_country_id) in &pc.keys {
             let Some(src) = pc.entries.get(*per_country_id as usize) else {
                 continue;
@@ -793,8 +1009,7 @@ fn emit_unified(
         .map_err(|e| format!("rename {}: {}", strings_path.display(), e))?;
     fs::rename(&entries_tmp, &entries_path)
         .map_err(|e| format!("rename {}: {}", entries_path.display(), e))?;
-    fs::rename(&fst_tmp, &fst_path)
-        .map_err(|e| format!("rename {}: {}", fst_path.display(), e))?;
+    fs::rename(&fst_tmp, &fst_path).map_err(|e| format!("rename {}: {}", fst_path.display(), e))?;
 
     eprintln!(
         "fst_unified: {} entries across {} countries, {} keys, {} KB strings",
@@ -814,10 +1029,7 @@ fn with_tmp_suffix(p: &std::path::Path) -> PathBuf {
     PathBuf::from(tmp)
 }
 
-fn write_entries(
-    path: &std::path::Path,
-    entries: &[AutocompleteEntry],
-) -> Result<(), String> {
+fn write_entries(path: &std::path::Path, entries: &[AutocompleteEntry]) -> Result<(), String> {
     let mut f = BufWriter::new(
         File::create(path).map_err(|e| format!("create {}: {}", path.display(), e))?,
     );
@@ -831,7 +1043,8 @@ fn write_entries(
         f.write_all(bytes)
             .map_err(|e| format!("write {}: {}", path.display(), e))?;
     }
-    f.flush().map_err(|e| format!("flush {}: {}", path.display(), e))?;
+    f.flush()
+        .map_err(|e| format!("flush {}: {}", path.display(), e))?;
     Ok(())
 }
 
@@ -839,8 +1052,7 @@ fn write_fst<'a, I>(path: &std::path::Path, entries: I) -> Result<(), String>
 where
     I: IntoIterator<Item = (&'a [u8], u64)>,
 {
-    let fst_file =
-        File::create(path).map_err(|e| format!("create {}: {}", path.display(), e))?;
+    let fst_file = File::create(path).map_err(|e| format!("create {}: {}", path.display(), e))?;
     let mut builder =
         MapBuilder::new(BufWriter::new(fst_file)).map_err(|e| format!("fst builder: {e}"))?;
     for (key, id) in entries {
@@ -876,8 +1088,11 @@ mod article_strip_tests {
 
     #[test]
     fn galician_a_fonsagrada() {
-        assert_eq!(strip_leading_article("A Fonsagrada"), Some("Fonsagrada".into()));
-        assert_eq!(strip_leading_article("A Coruña"),     Some("Coruña".into()));
+        assert_eq!(
+            strip_leading_article("A Fonsagrada"),
+            Some("Fonsagrada".into())
+        );
+        assert_eq!(strip_leading_article("A Coruña"), Some("Coruña".into()));
     }
 
     #[test]
@@ -889,46 +1104,61 @@ mod article_strip_tests {
     #[test]
     fn french_le_havre_les_baux() {
         assert_eq!(strip_leading_article("Le Havre"), Some("Havre".into()));
-        assert_eq!(strip_leading_article("La Rochelle"), Some("Rochelle".into()));
-        assert_eq!(strip_leading_article("Les Baux-de-Provence"), Some("Baux-de-Provence".into()));
+        assert_eq!(
+            strip_leading_article("La Rochelle"),
+            Some("Rochelle".into())
+        );
+        assert_eq!(
+            strip_leading_article("Les Baux-de-Provence"),
+            Some("Baux-de-Provence".into())
+        );
     }
 
     #[test]
     fn spanish_el_la_los_las() {
-        assert_eq!(strip_leading_article("El Escorial"), Some("Escorial".into()));
-        assert_eq!(strip_leading_article("La Coruña"),  Some("Coruña".into()));
+        assert_eq!(
+            strip_leading_article("El Escorial"),
+            Some("Escorial".into())
+        );
+        assert_eq!(strip_leading_article("La Coruña"), Some("Coruña".into()));
         assert_eq!(strip_leading_article("Los Angeles"), Some("Angeles".into()));
-        assert_eq!(strip_leading_article("Las Vegas"),  Some("Vegas".into()));
+        assert_eq!(strip_leading_article("Las Vegas"), Some("Vegas".into()));
     }
 
     #[test]
     fn italian_apostrophe_elision() {
         assert_eq!(strip_leading_article("L'Aquila"), Some("Aquila".into()));
-        assert_eq!(strip_leading_article("L\u{2019}Aigle"), Some("Aigle".into())); // Unicode apostrophe
+        assert_eq!(
+            strip_leading_article("L\u{2019}Aigle"),
+            Some("Aigle".into())
+        ); // Unicode apostrophe
     }
 
     #[test]
     fn german_dutch_welsh() {
         assert_eq!(strip_leading_article("Der Spiegel"), Some("Spiegel".into()));
-        assert_eq!(strip_leading_article("De Wolden"),   Some("Wolden".into()));
-        assert_eq!(strip_leading_article("Y Fenni"),     Some("Fenni".into()));
-        assert_eq!(strip_leading_article("Yr Wyddgrug"), Some("Wyddgrug".into()));
+        assert_eq!(strip_leading_article("De Wolden"), Some("Wolden".into()));
+        assert_eq!(strip_leading_article("Y Fenni"), Some("Fenni".into()));
+        assert_eq!(
+            strip_leading_article("Yr Wyddgrug"),
+            Some("Wyddgrug".into())
+        );
     }
 
     #[test]
     fn no_article_no_strip() {
-        assert_eq!(strip_leading_article("Madrid"),    None);
-        assert_eq!(strip_leading_article("Berlin"),    None);
-        assert_eq!(strip_leading_article("Paris"),     None);
+        assert_eq!(strip_leading_article("Madrid"), None);
+        assert_eq!(strip_leading_article("Berlin"), None);
+        assert_eq!(strip_leading_article("Paris"), None);
         // Single-token names where the only token happens to be an
         // article are also returned as None — there's nothing to strip.
-        assert_eq!(strip_leading_article("La"),        None);
-        assert_eq!(strip_leading_article(""),          None);
+        assert_eq!(strip_leading_article("La"), None);
+        assert_eq!(strip_leading_article(""), None);
     }
 
     #[test]
     fn case_insensitive_match() {
-        assert_eq!(strip_leading_article("LA Habana"),    Some("Habana".into()));
-        assert_eq!(strip_leading_article("THE Bronx"),    Some("Bronx".into()));
+        assert_eq!(strip_leading_article("LA Habana"), Some("Habana".into()));
+        assert_eq!(strip_leading_article("THE Bronx"), Some("Bronx".into()));
     }
 }

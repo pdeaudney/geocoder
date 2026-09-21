@@ -13,6 +13,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use query_server::address_points::AddressPointIndex;
 use query_server::gnaf::GnafPoint;
 use s2::cellid::CellID;
 use s2::latlng::LatLng;
@@ -25,9 +26,27 @@ use std::time::Instant;
 /// RAII stage timer — prints `[stage] <name>: <X>s` on drop.
 /// Format matches the C++ build-index emission so a single regex
 /// can scrape both binaries' logs.
-struct Stage { name: &'static str, start: Instant }
-impl Stage { fn new(name: &'static str) -> Self { Self { name, start: Instant::now() } } }
-impl Drop for Stage { fn drop(&mut self) { eprintln!("[stage] {}: {:.3}s", self.name, self.start.elapsed().as_secs_f64()); } }
+struct Stage {
+    name: &'static str,
+    start: Instant,
+}
+impl Stage {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            start: Instant::now(),
+        }
+    }
+}
+impl Drop for Stage {
+    fn drop(&mut self) {
+        eprintln!(
+            "[stage] {}: {:.3}s",
+            self.name,
+            self.start.elapsed().as_secs_f64()
+        );
+    }
+}
 
 const DEFAULT_STREET_CELL_LEVEL: u64 = 17;
 
@@ -36,7 +55,9 @@ fn main() {
     if args.len() < 3 {
         eprintln!(
             "Usage: {} <gnaf-psv-dir> <output-dir> [--street-level N]",
-            args.first().map(String::as_str).unwrap_or("build-gnaf-index")
+            args.first()
+                .map(String::as_str)
+                .unwrap_or("build-gnaf-index")
         );
         std::process::exit(2);
     }
@@ -97,8 +118,12 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
     let pass1 = |out: &mut HashMap<String, String>| -> Result<(), String> {
         for path in list_files(psv_dir, "_STATE_psv.psv")? {
             read_psv(&path, |fields| {
-                if fields.len() < 5 { return; }
-                let (Some(pid), Some(abbr)) = (fields.first(), fields.get(4)) else { return; };
+                if fields.len() < 5 {
+                    return;
+                }
+                let (Some(pid), Some(abbr)) = (fields.first(), fields.get(4)) else {
+                    return;
+                };
                 if !pid.is_empty() && !abbr.is_empty() {
                     out.insert(pid.to_string(), abbr.to_string());
                 }
@@ -108,13 +133,16 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
     };
     let pass2 = |out: &mut HashMap<String, String>| -> Result<(), String> {
         for path in list_files(psv_dir, "_LOCALITY_psv.psv")? {
-            if path.file_name()
+            if path
+                .file_name()
                 .is_some_and(|n| n.to_string_lossy().contains("STREET_LOCALITY"))
             {
                 continue;
             }
             read_psv(&path, |fields| {
-                if fields.len() < 4 { return; }
+                if fields.len() < 4 {
+                    return;
+                }
                 let pid = fields[0];
                 let name = fields[3];
                 let retired = fields[2];
@@ -128,12 +156,16 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
     let pass3 = |out: &mut HashMap<String, String>| -> Result<(), String> {
         for path in list_files(psv_dir, "_STREET_LOCALITY_psv.psv")? {
             read_psv(&path, |fields| {
-                if fields.len() < 6 { return; }
+                if fields.len() < 6 {
+                    return;
+                }
                 let pid = fields[0];
                 let retired = fields[2];
                 let name = fields[4];
                 let type_code = fields[5];
-                if pid.is_empty() || !retired.is_empty() || name.is_empty() { return; }
+                if pid.is_empty() || !retired.is_empty() || name.is_empty() {
+                    return;
+                }
                 let display = if type_code.is_empty() {
                     title_case(name)
                 } else {
@@ -149,12 +181,20 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
         for path in list_files(psv_dir, "_ADDRESS_DEFAULT_GEOCODE_psv.psv")? {
             eprintln!("reading {}", path.display());
             read_psv(&path, |fields| {
-                if fields.len() < 7 { return; }
+                if fields.len() < 7 {
+                    return;
+                }
                 let address_pid = fields[3];
                 let retired = fields[2];
-                if address_pid.is_empty() || !retired.is_empty() { return; }
-                let Ok(lng) = fields[5].parse::<f32>() else { return; };
-                let Ok(lat) = fields[6].parse::<f32>() else { return; };
+                if address_pid.is_empty() || !retired.is_empty() {
+                    return;
+                }
+                let Ok(lng) = fields[5].parse::<f32>() else {
+                    return;
+                };
+                let Ok(lat) = fields[6].parse::<f32>() else {
+                    return;
+                };
                 out.insert(address_pid.to_string(), (lat, lng));
                 geo_rows += 1;
                 if geo_rows % 2_000_000 == 0 {
@@ -175,16 +215,32 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
     {
         let _s = Stage::new("prepasses_state_locality_street_geocode");
         rayon::scope(|s| {
-            s.spawn(|_| { r1 = pass1(&mut state_abbr); });
-            s.spawn(|_| { r2 = pass2(&mut locality_name); });
-            s.spawn(|_| { r3 = pass3(&mut street); });
-            s.spawn(|_| { r4 = pass4(&mut geocode); });
+            s.spawn(|_| {
+                r1 = pass1(&mut state_abbr);
+            });
+            s.spawn(|_| {
+                r2 = pass2(&mut locality_name);
+            });
+            s.spawn(|_| {
+                r3 = pass3(&mut street);
+            });
+            s.spawn(|_| {
+                r4 = pass4(&mut geocode);
+            });
         });
     }
-    r1?; r2?; r3?; r4?;
+    r1?;
+    r2?;
+    r3?;
+    r4?;
 
-    eprintln!("loaded {} states, {} localities, {} streets, {} geocodes",
-        state_abbr.len(), locality_name.len(), street.len(), geocode.len());
+    eprintln!(
+        "loaded {} states, {} localities, {} streets, {} geocodes",
+        state_abbr.len(),
+        locality_name.len(),
+        street.len(),
+        geocode.len()
+    );
 
     // --- Pass 5: ADDRESS_DETAIL × geocode → build output records ---
     let _pass5 = Stage::new("pass5_address_detail_join");
@@ -248,7 +304,11 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
                 // runtime: `unit_id == 0` means "no unit recorded".
                 // Interning the empty string would burn a non-zero
                 // id on every unit-less address (~14 M of them).
-                unit_id: if unit.is_empty() { 0 } else { strings.intern(&unit) },
+                unit_id: if unit.is_empty() {
+                    0
+                } else {
+                    strings.intern(&unit)
+                },
             };
             let cell = CellID::from(LatLng::from_degrees(lat as f64, lng as f64))
                 .parent(street_level)
@@ -278,10 +338,12 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
     let entries_path = out_dir.join("gnaf_entries.bin");
     let strings_path = out_dir.join("gnaf_strings.bin");
 
+    AddressPointIndex::invalidate_schema(&points_path)?;
+
     let mut points_file = File::create(&points_path)
         .map_err(|e| format!("create {}: {}", points_path.display(), e))?;
-    let mut cells_file = File::create(&cells_path)
-        .map_err(|e| format!("create {}: {}", cells_path.display(), e))?;
+    let mut cells_file =
+        File::create(&cells_path).map_err(|e| format!("create {}: {}", cells_path.display(), e))?;
     let mut entries_file = File::create(&entries_path)
         .map_err(|e| format!("create {}: {}", entries_path.display(), e))?;
 
@@ -336,6 +398,8 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
 
     let strings_bytes = strings.into_bytes();
     fs::write(&strings_path, &strings_bytes).map_err(io_err(&strings_path))?;
+    drop((points_file, cells_file, entries_file));
+    AddressPointIndex::write_schema(&points_path, &cells_path, &entries_path, &strings_path)?;
 
     Ok(Stats {
         points: records.len() as u64,
@@ -411,10 +475,7 @@ fn title_case(s: &str) -> String {
     out
 }
 
-fn state_abbr_for_path(
-    path: &Path,
-    state_abbr: &HashMap<String, String>,
-) -> Option<String> {
+fn state_abbr_for_path(path: &Path, state_abbr: &HashMap<String, String>) -> Option<String> {
     let file_name = path.file_name()?.to_str()?;
     // "NSW_ADDRESS_DETAIL_psv.psv" → "NSW"
     let prefix = file_name.split('_').next()?;

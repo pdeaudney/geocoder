@@ -13,8 +13,8 @@
 //!   2. Parse LOCALITY files → locality_pid → (locality_name, state_pid)
 //!   3. Stream ADDRESS_DETAIL files → accumulate
 //!      (locality_pid, postcode) → count
-//!   4. For each locality, pick the modal postcode (the one used by the
-//!      most addresses). Ties broken lexically.
+//!   4. For each state/locality name, pick the postcode used by the
+//!      most addresses. Ties broken lexically.
 //!   5. Emit the sorted hash-keyed lookup table.
 //!
 //! Attribution (per G-NAF CC-BY 4.0): output is derived from G-NAF data
@@ -33,9 +33,27 @@ use std::time::Instant;
 use query_server::postcode::{self, RawEntry};
 
 /// Per-stage timing — see build-pipeline-perf-plan stage 6.
-struct Stage { name: &'static str, start: Instant }
-impl Stage { fn new(name: &'static str) -> Self { Self { name, start: Instant::now() } } }
-impl Drop for Stage { fn drop(&mut self) { eprintln!("[stage] {}: {:.3}s", self.name, self.start.elapsed().as_secs_f64()); } }
+struct Stage {
+    name: &'static str,
+    start: Instant,
+}
+impl Stage {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            start: Instant::now(),
+        }
+    }
+}
+impl Drop for Stage {
+    fn drop(&mut self) {
+        eprintln!(
+            "[stage] {}: {:.3}s",
+            self.name,
+            self.start.elapsed().as_secs_f64()
+        );
+    }
+}
 
 fn main() {
     let _total = Stage::new("total");
@@ -43,7 +61,9 @@ fn main() {
     if args.len() < 3 {
         eprintln!(
             "Usage: {} <gnaf-psv-dir> <output-dir>",
-            args.first().map(String::as_str).unwrap_or("build-postcode-lookup")
+            args.first()
+                .map(String::as_str)
+                .unwrap_or("build-postcode-lookup")
         );
         std::process::exit(2);
     }
@@ -77,7 +97,10 @@ fn run(psv_dir: &Path, out_dir: &Path) -> Result<(), String> {
     let mut localities: HashMap<String, (String, String)> = HashMap::new();
     for path in list_files(psv_dir, "_LOCALITY_psv.psv")? {
         // Skip the STREET_LOCALITY suffix variant if it slipped in.
-        if path.file_name().is_some_and(|n| n.to_string_lossy().contains("STREET_LOCALITY")) {
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains("STREET_LOCALITY"))
+        {
             continue;
         }
         read_psv(&path, |fields| {
@@ -125,7 +148,11 @@ fn run(psv_dir: &Path, out_dir: &Path) -> Result<(), String> {
                 .or_insert(0) += 1;
             rows_scanned += 1;
             if rows_scanned % 1_000_000 == 0 {
-                eprintln!("  {} rows scanned, {} distinct (locality,postcode) pairs", rows_scanned, postcode_counts.len());
+                eprintln!(
+                    "  {} rows scanned, {} distinct (locality,postcode) pairs",
+                    rows_scanned,
+                    postcode_counts.len()
+                );
             }
         })?;
     }
@@ -135,21 +162,15 @@ fn run(psv_dir: &Path, out_dir: &Path) -> Result<(), String> {
         postcode_counts.len(),
     );
 
-    // --- Pass 4: modal postcode per locality ---
-    // Fold counts into per-locality best postcode. Ties: lexicographic min
-    // (stable across rebuilds).
-    let mut best: HashMap<String, (String, u32)> = HashMap::new();
-    for ((locality_pid, postcode), count) in postcode_counts {
-        best.entry(locality_pid)
-            .and_modify(|(existing_pc, existing_count)| {
-                if count > *existing_count || (count == *existing_count && postcode < *existing_pc) {
-                    *existing_pc = postcode.clone();
-                    *existing_count = count;
-                }
-            })
-            .or_insert((postcode, count));
-    }
-    eprintln!("resolved modal postcode for {} localities", best.len());
+    // Several G-NAF locality PIDs can have the same state and name.
+    // The runtime can only query that combined key, so choose its modal
+    // postcode using all address rows instead of keeping an arbitrary PID.
+    let (best, skipped_no_state) =
+        modal_postcodes_by_key(postcode_counts, &localities, &state_abbrevs);
+    eprintln!(
+        "resolved modal postcode for {} state/locality keys",
+        best.len()
+    );
 
     // --- Pass 5: emit records ---
     // Build (hash, postcode) pairs; dedupe strings into a pool.
@@ -167,44 +188,21 @@ fn run(psv_dir: &Path, out_dir: &Path) -> Result<(), String> {
     };
 
     let mut entries: Vec<RawEntry> = Vec::with_capacity(best.len());
-    let mut emitted = 0u32;
-    let mut skipped_no_state = 0u32;
-    for (locality_pid, (postcode, _)) in best {
-        let Some((locality_name, state_pid)) = localities.get(&locality_pid) else {
-            continue;
-        };
-        let Some(state_abbr) = state_abbrevs.get(state_pid) else {
-            skipped_no_state += 1;
-            continue;
-        };
-        let key = postcode::lookup_hash(state_abbr, locality_name);
+    for (key, (postcode, _)) in best {
         let offset = intern(&postcode, &mut strings);
         entries.push(RawEntry {
             key_hash: key,
             postcode_offset: offset,
             _pad: 0,
         });
-        emitted += 1;
     }
     eprintln!(
-        "emitting {} entries ({} skipped due to missing state)",
-        emitted, skipped_no_state
+        "emitting {} entries ({} postcode pairs skipped due to missing state)",
+        entries.len(),
+        skipped_no_state
     );
 
     entries.sort_by_key(|e| e.key_hash);
-    // Detect hash collisions — at this scale any collision indicates a
-    // data problem (duplicate localities that survived earlier filters).
-    let mut collisions = 0u32;
-    for w in entries.windows(2) {
-        if w[0].key_hash == w[1].key_hash && w[0].postcode_offset != w[1].postcode_offset {
-            collisions += 1;
-        }
-    }
-    if collisions > 0 {
-        eprintln!("WARN: {} hash collisions with different postcodes (first wins)", collisions);
-    }
-    // Dedup — keep first of each key_hash.
-    entries.dedup_by_key(|e| e.key_hash);
 
     let entries_path = out_dir.join("postcode_lookup.bin");
     let strings_path = out_dir.join("postcode_lookup_strings.bin");
@@ -228,6 +226,40 @@ fn run(psv_dir: &Path, out_dir: &Path) -> Result<(), String> {
         strings.len(),
     );
     Ok(())
+}
+
+fn modal_postcodes_by_key(
+    postcode_counts: HashMap<(String, String), u32>,
+    localities: &HashMap<String, (String, String)>,
+    state_abbrevs: &HashMap<String, String>,
+) -> (HashMap<u64, (String, u32)>, u32) {
+    let mut counts: HashMap<(u64, String), u32> = HashMap::new();
+    let mut skipped_no_state = 0;
+    for ((locality_pid, postcode), count) in postcode_counts {
+        let Some((locality_name, state_pid)) = localities.get(&locality_pid) else {
+            continue;
+        };
+        let Some(state_abbr) = state_abbrevs.get(state_pid) else {
+            skipped_no_state += 1;
+            continue;
+        };
+        let key = postcode::lookup_hash(state_abbr, locality_name);
+        *counts.entry((key, postcode)).or_default() += count;
+    }
+
+    let mut best: HashMap<u64, (String, u32)> = HashMap::new();
+    for ((key, postcode), count) in counts {
+        best.entry(key)
+            .and_modify(|(existing_pc, existing_count)| {
+                if count > *existing_count || (count == *existing_count && postcode < *existing_pc)
+                {
+                    *existing_pc = postcode.clone();
+                    *existing_count = count;
+                }
+            })
+            .or_insert((postcode, count));
+    }
+    (best, skipped_no_state)
 }
 
 fn list_files(dir: &Path, suffix: &str) -> Result<Vec<PathBuf>, String> {
@@ -269,4 +301,30 @@ where
         on_row(&fields);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_locality_ids_choose_combined_modal_postcode() {
+        let localities = HashMap::from([
+            ("a".into(), ("Example".into(), "state".into())),
+            ("b".into(), ("Example".into(), "state".into())),
+            ("c".into(), ("Example".into(), "state".into())),
+        ]);
+        let states = HashMap::from([("state".into(), "NSW".into())]);
+        let counts = HashMap::from([
+            (("a".into(), "2000".into()), 5),
+            (("b".into(), "2000".into()), 4),
+            (("c".into(), "2001".into()), 7),
+        ]);
+        let (best, skipped) = modal_postcodes_by_key(counts, &localities, &states);
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            best[&postcode::lookup_hash("NSW", "Example")],
+            ("2000".into(), 9)
+        );
+    }
 }

@@ -11,8 +11,8 @@
 //! unset so the suite passes on machines without a built index.
 
 use query_server::{
-    Address, AddressDetails, Index, PoiMatch, DEFAULT_ADMIN_CELL_LEVEL,
-    DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL,
+    Address, AddressDetails, Index, PoiMatch, DEFAULT_ADMIN_CELL_LEVEL, DEFAULT_SEARCH_DISTANCE,
+    DEFAULT_STREET_CELL_LEVEL,
 };
 
 fn empty_address() -> Address<'static> {
@@ -60,7 +60,10 @@ fn address_with_poi_renders_expected_keys() {
     // tooling) will key on these names.
     assert!(json.contains("\"poi\""), "poi key present: {json}");
     assert!(json.contains("\"name\":\"Sydney Opera House\""), "{json}");
-    assert!(json.contains("\"category\":\"tourism:attraction\""), "{json}");
+    assert!(
+        json.contains("\"category\":\"tourism:attraction\""),
+        "{json}"
+    );
     assert!(json.contains("\"distance_m\":0.42"), "{json}");
 }
 
@@ -171,7 +174,9 @@ fn find_poi_distance_is_reported_in_metres() {
     if pois.is_empty() {
         return;
     }
-    let p = &pois[0];
+    // POI lookup prefers a lower rank before distance. Choose the
+    // globally lowest rank so no nearby POI can displace this point.
+    let p = pois.iter().min_by_key(|p| p.rank).unwrap();
     // Querying at the POI's own coord should report distance ~0 m.
     // Floating-point round-trip plus the 111_320-m approximation
     // means we tolerate a centimetre of slop.

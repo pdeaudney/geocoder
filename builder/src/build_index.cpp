@@ -1,12 +1,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <initializer_list>
+#include <iterator>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -27,6 +30,7 @@
 
 #include <s2/s2cell_id.h>
 #include <s2/s2latlng.h>
+#include <s2/s2latlng_rect.h>
 #include <s2/s2region_coverer.h>
 #include <s2/s2polyline.h>
 #include <s2/s2polygon.h>
@@ -55,7 +59,7 @@ struct WayHeader {
 };
 
 // AddrPoint flag bits stored in `AddrPoint.flags`. These let one
-// 32-byte record represent both `addr:street` and `addr:place`
+// 36-byte record represent both `addr:street` and `addr:place`
 // addresses (and also `addr:full` / `addr:housename` overlays) without
 // forking the on-disk format. Mirrors `FLAG_*` constants in
 // `server/src/lib.rs`.
@@ -76,6 +80,9 @@ struct AddrPoint {
     // 0 if absent. Forward indexer prefers this over geometric
     // find_admin() enrichment when non-zero. Populated in commit 3.
     uint32_t parent_place_id;
+    // Tagged addr:postcode. Kept on the point so forward search can
+    // require the exact postal area instead of guessing from a nearby way.
+    uint32_t postcode_id;
     uint8_t flags;
     uint8_t _pad[3];
 };
@@ -183,7 +190,6 @@ struct I18nName {
 };
 
 static const uint32_t INTERIOR_FLAG = 0x80000000u;
-static const uint32_t ID_MASK = 0x7FFFFFFFu;
 
 // --- On-disk layout pins ------------------------------------------------
 // The runtime reader (server/src/lib.rs + server/tests/struct_layout.rs)
@@ -191,7 +197,7 @@ static const uint32_t ID_MASK = 0x7FFFFFFFu;
 // drift in a C++ `sizeof` would serve garbled records. These asserts
 // catch it at compile time on both sides of the bridge.
 static_assert(sizeof(WayHeader)    == 12, "on-disk layout drift: WayHeader");
-static_assert(sizeof(AddrPoint)    == 32, "on-disk layout drift: AddrPoint");
+static_assert(sizeof(AddrPoint)    == 36, "on-disk layout drift: AddrPoint");
 static_assert(sizeof(InterpWay)    == 24, "on-disk layout drift: InterpWay");
 static_assert(sizeof(AdminPolygon) == 24, "on-disk layout drift: AdminPolygon");
 static_assert(sizeof(NodeCoord)    == 8,  "on-disk layout drift: NodeCoord");
@@ -218,6 +224,15 @@ template <typename T>
 
 class StringPool {
 public:
+    StringPool() {
+        // Every optional *_id uses zero for "missing". Reserve byte zero
+        // for the empty string before any OSM tag is interned; otherwise
+        // the first real tag also gets ID zero and appears wherever an
+        // optional field is absent.
+        data_.push_back('\0');
+        index_[""] = 0;
+    }
+
     uint32_t intern(const std::string& s) {
         auto it = index_.find(s);
         if (it != index_.end()) {
@@ -247,7 +262,7 @@ private:
 
 // --- Collected data ---
 
-static StringPool strings;
+static StringPool string_pool;
 
 // All cell→[ids] maps below use ankerl::unordered_dense::segmented_map.
 // Segmented (vs the regular `map`) means the underlying buckets array
@@ -353,21 +368,29 @@ static std::vector<std::pair<S2CellId, bool>> cover_polygon(const std::vector<st
     }
     if (points.size() < 3) return {};
 
-    // Build S2Loop (must be CCW), skip invalid polygons
+    // A simplified OSM ring can self-intersect even when the original
+    // ring was valid. Keep a bounding-box covering in that case: every
+    // cell is only a candidate, and the reader still checks the point
+    // against the stored ring. Without this fallback, the polygon is
+    // written but has zero cell entries (Ontario/NSW/Florida did this).
+    S2LatLngRect bounds = S2LatLngRect::Empty();
+    for (const auto& [lat, lng] : vertices) {
+        bounds.AddPoint(S2LatLng::FromDegrees(lat, lng));
+    }
     S2Error error;
     auto loop = std::make_unique<S2Loop>(points, S2Debug::DISABLE);
     loop->Normalize();
-    if (loop->FindValidationError(&error)) return {};
-
-    S2Polygon polygon(std::move(loop));
+    const bool valid = !loop->FindValidationError(&error);
+    std::unique_ptr<S2Polygon> polygon;
+    if (valid) polygon = std::make_unique<S2Polygon>(std::move(loop));
 
     S2RegionCoverer::Options options;
     options.set_max_level(kAdminCellLevel);
     options.set_max_cells(200);
 
     S2RegionCoverer coverer(options);
-    S2CellUnion covering = coverer.GetCovering(polygon);
-    S2CellUnion interior = coverer.GetInteriorCovering(polygon);
+    S2CellUnion covering = polygon ? coverer.GetCovering(*polygon) : coverer.GetCovering(bounds);
+    S2CellUnion interior = polygon ? coverer.GetInteriorCovering(*polygon) : S2CellUnion();
 
     // Build set of interior cell IDs for fast lookup
     std::unordered_set<uint64_t> interior_set;
@@ -589,7 +612,7 @@ static void emit_alias(uint8_t entity_type, uint32_t entity_id,
     rec.alias_type = alias_type;
     rec.lang_code = lang_code;
     rec.entity_id = entity_id;
-    rec.name_id = strings.intern(value);
+    rec.name_id = string_pool.intern(value);
     i18n_names.push_back(rec);
     i18n_count_total++;
 }
@@ -992,7 +1015,7 @@ static bool extract_poi(const Tags& tags,
     category.reserve(std::strlen(matched_key) + 1 + std::strlen(matched_val));
     category.append(matched_key).push_back(':');
     category.append(matched_val);
-    category_id_out = strings.intern(category);
+    category_id_out = string_pool.intern(category);
 
     bool has_wiki = (tags["wikidata"] != nullptr) ||
                     (tags["wikipedia"] != nullptr);
@@ -1002,7 +1025,7 @@ static bool extract_poi(const Tags& tags,
     if (!parent) parent = tags["addr:suburb"];
     if (!parent) parent = tags["addr:locality"];
     if (!parent) parent = tags["is_in:city"];
-    parent_place_id_out = (parent && *parent) ? strings.intern(parent) : 0;
+    parent_place_id_out = (parent && *parent) ? string_pool.intern(parent) : 0;
     return true;
 }
 
@@ -1016,7 +1039,7 @@ static uint32_t add_poi_point(double lat, double lng,
     PoiPoint pt{};
     pt.lat = static_cast<float>(lat);
     pt.lng = static_cast<float>(lng);
-    pt.name_id = strings.intern(name);
+    pt.name_id = string_pool.intern(name);
     pt.category_id = category_id;
     pt.rank = rank;
     pt.importance = importance;
@@ -1098,7 +1121,7 @@ static uint32_t add_place_point(double lat, double lng, uint8_t rank,
     place_points.push_back({
         static_cast<float>(lat),
         static_cast<float>(lng),
-        strings.intern(name),
+        string_pool.intern(name),
         rank,
         importance,
         {0, 0},
@@ -1280,16 +1303,18 @@ static void add_addr_point_full(double lat, double lng,
                                 const char* unit,
                                 const char* floor,
                                 const char* parent,
+                                const char* postcode,
                                 uint8_t flags) {
     uint32_t addr_id = checked_u32(addr_points.size(), "addr_points id");
     AddrPoint pt{};
     pt.lat = static_cast<float>(lat);
     pt.lng = static_cast<float>(lng);
-    pt.housenumber_id = strings.intern(housenumber);
-    pt.street_or_place_id = strings.intern(street_or_place);
-    pt.unit_id   = (unit   && *unit)   ? strings.intern(unit)   : 0;
-    pt.floor_id  = (floor  && *floor)  ? strings.intern(floor)  : 0;
-    pt.parent_place_id = (parent && *parent) ? strings.intern(parent) : 0;
+    pt.housenumber_id = string_pool.intern(housenumber);
+    pt.street_or_place_id = string_pool.intern(street_or_place);
+    pt.unit_id   = (unit   && *unit)   ? string_pool.intern(unit)   : 0;
+    pt.floor_id  = (floor  && *floor)  ? string_pool.intern(floor)  : 0;
+    pt.parent_place_id = (parent && *parent) ? string_pool.intern(parent) : 0;
+    pt.postcode_id = (postcode && *postcode) ? string_pool.intern(postcode) : 0;
     pt.flags = flags;
     addr_points.push_back(pt);
 
@@ -1333,6 +1358,7 @@ static void add_addr_point_full(double lat, double lng,
 //   parent_place slot: `addr:city` || `addr:suburb` ||
 //     `addr:locality` || `addr:state`. Forward indexer prefers this
 //     interned name over a geometric find_admin() lookup when set.
+//   postcode slot: verbatim `addr:postcode` for exact forward matching.
 template <typename Tags>
 static bool process_address_tags(double lat, double lng, const Tags& tags,
                                   const char* assoc_street_fallback = nullptr) {
@@ -1350,6 +1376,7 @@ static bool process_address_tags(double lat, double lng, const Tags& tags,
     if (!parent) parent   = tags["addr:suburb"];
     if (!parent) parent   = tags["addr:locality"];
     if (!parent) parent   = tags["addr:state"];
+    const char* postcode  = tags["addr:postcode"];
 
     // CZ/SK conscription/street number compose. The local convention
     // writes the conscription number first, then a slash, then the
@@ -1417,7 +1444,7 @@ static bool process_address_tags(double lat, double lng, const Tags& tags,
 
     add_addr_point_full(lat, lng,
                         hn_norm.c_str(), primary,
-                        unit_final, floor_tag, parent,
+                        unit_final, floor_tag, parent, postcode,
                         flags);
     return true;
 }
@@ -1511,7 +1538,7 @@ static uint32_t add_admin_polygon(const std::vector<std::pair<double,double>>& v
     AdminPolygon poly{};
     poly.vertex_offset = vertex_offset;
     poly.vertex_count = static_cast<uint16_t>(std::min(simplified.size(), size_t(65535)));
-    poly.name_id = strings.intern(name);
+    poly.name_id = string_pool.intern(name);
     poly.admin_level = admin_level;
     poly.importance = importance;
     poly.area = polygon_area(simplified);
@@ -1569,14 +1596,14 @@ public:
         //
         // Copy the interned string into a stack-owned std::string
         // before passing the pointer down: process_address_tags
-        // reaches add_addr_point_full which calls strings.intern() on
+        // reaches add_addr_point_full which calls string_pool.intern() on
         // unrelated strings, and any of those calls may grow the
-        // strings.data() vector and invalidate a raw pointer into it.
+        // string_pool.data() vector and invalidate a raw pointer into it.
         std::string assoc_buf;
         const char* assoc = nullptr;
         auto it = node_to_assoc_street.find(static_cast<int64_t>(node.id()));
         if (it != node_to_assoc_street.end()) {
-            assoc_buf = strings.data().data() + it->second;
+            assoc_buf = string_pool.data().data() + it->second;
             assoc = assoc_buf.c_str();
         }
         process_address_tags(lat, lng, node.tags(), assoc);
@@ -1792,21 +1819,10 @@ public:
         // The inner-ring count is printed in the summary so an operator
         // can tell how much of their build is affected.
         //
-        // Pre-pass to materialise outer-ring vertex sets + decide
-        // whether to collapse them. Cities like Greensboro NC have a
-        // single boundary relation with 41 outer rings (annexation
-        // parcels + ETJ + city limits), each currently written as a
-        // separate AdminPolygon with the same name + importance.
-        // Forward search for "Greensboro" then sees 41 same-score
-        // candidates scattered across the metro and the bias re-rank
-        // can pick a fragment over the canonical city polygon. Collapse
-        // to the largest ring when admin_level >= 4 AND there are more
-        // than `kCollapseRingThreshold` rings — that captures
-        // pathological proliferation while preserving legitimate
-        // multi-island geometry (Indonesia at admin_level=2 is
-        // excluded by the level gate; Hawaii Maui County at
-        // admin_level=6 with 3 islands stays under the threshold).
-        std::vector<std::vector<std::pair<double,double>>> outer_vertex_sets;
+        // Keep every outer ring here. This file also drives reverse
+        // geocoding: dropping detached city parcels or secondary islands
+        // would make their admin lookup fail. The Rust forward-index
+        // builder deduplicates same-name polygons only for search results.
         for (const auto& outer_ring : area.outer_rings()) {
             std::vector<std::pair<double,double>> vertices;
             for (const auto& node_ref : outer_ring) {
@@ -1814,34 +1830,6 @@ public:
                     vertices.emplace_back(node_ref.location().lat(), node_ref.location().lon());
                 }
             }
-            if (vertices.size() >= 3) {
-                outer_vertex_sets.push_back(std::move(vertices));
-            }
-            for (const auto& inner_ring : area.inner_rings(outer_ring)) {
-                (void)inner_ring;
-                inner_ring_count_++;
-            }
-        }
-
-        constexpr size_t kCollapseRingThreshold = 10;
-        if (admin_level >= 4 && outer_vertex_sets.size() > kCollapseRingThreshold) {
-            // Keep only the largest ring by polygon_area.
-            size_t largest_idx = 0;
-            float largest_area = polygon_area(outer_vertex_sets[0]);
-            for (size_t i = 1; i < outer_vertex_sets.size(); ++i) {
-                float a = polygon_area(outer_vertex_sets[i]);
-                if (a > largest_area) {
-                    largest_area = a;
-                    largest_idx = i;
-                }
-            }
-            std::vector<std::vector<std::pair<double,double>>> collapsed;
-            collapsed.push_back(std::move(outer_vertex_sets[largest_idx]));
-            outer_vertex_sets = std::move(collapsed);
-            collapsed_admin_count_++;
-        }
-
-        for (const auto& vertices : outer_vertex_sets) {
             if (vertices.size() >= 3) {
                 uint8_t importance = compute_place_importance(area.tags());
                 uint32_t poly_id = add_admin_polygon(
@@ -1851,6 +1839,10 @@ public:
                     collect_i18n_names(area.tags(), ENTITY_ADMIN, poly_id);
                     maybe_emit_english_exonym(area.tags(), ENTITY_ADMIN, poly_id);
                 }
+            }
+            for (const auto& inner_ring : area.inner_rings(outer_ring)) {
+                (void)inner_ring;
+                inner_ring_count_++;
             }
         }
 
@@ -1865,7 +1857,6 @@ public:
     uint64_t interp_count() const { return interp_count_; }
     uint64_t admin_count() const { return admin_count_; }
     uint64_t inner_ring_count() const { return inner_ring_count_; }
-    uint64_t collapsed_admin_count() const { return collapsed_admin_count_; }
 
 private:
     uint64_t way_count_ = 0;
@@ -1873,7 +1864,6 @@ private:
     uint64_t interp_count_ = 0;
     uint64_t admin_count_ = 0;
     uint64_t inner_ring_count_ = 0;
-    uint64_t collapsed_admin_count_ = 0;
 
     void process_building_address(const osmium::Way& way) {
         const auto& wnodes = way.nodes();
@@ -1890,14 +1880,14 @@ private:
         if (valid == 0) return;
 
         // See node() for the rationale on copying into a std::string
-        // before passing the pointer — strings.intern() inside
+        // before passing the pointer: string_pool.intern() inside
         // add_addr_point_full can invalidate a raw pointer into
-        // strings.data().
+        // string_pool.data().
         std::string assoc_buf;
         const char* assoc = nullptr;
         auto it = way_to_assoc_street.find(static_cast<int64_t>(way.id()));
         if (it != way_to_assoc_street.end()) {
-            assoc_buf = strings.data().data() + it->second;
+            assoc_buf = string_pool.data().data() + it->second;
             assoc = assoc_buf.c_str();
         }
         if (process_address_tags(sum_lat / valid, sum_lng / valid, way.tags(), assoc)) {
@@ -1950,7 +1940,7 @@ private:
         InterpWay iw{};
         iw.node_offset = node_offset;
         iw.node_count = static_cast<uint8_t>(std::min(wnodes.size(), size_t(255)));
-        iw.street_id = strings.intern(street);
+        iw.street_id = string_pool.intern(street);
         iw.start_number = 0;
         iw.end_number = 0;
         iw.interpolation = interp_type;
@@ -1996,7 +1986,7 @@ private:
         WayHeader header{};
         header.node_offset = node_offset;
         header.node_count = static_cast<uint8_t>(std::min(wnodes.size(), size_t(255)));
-        header.name_id = strings.intern(name);
+        header.name_id = string_pool.intern(name);
         ways.push_back(header);
 
         std::unordered_set<uint64_t> way_cells;
@@ -2067,11 +2057,11 @@ static void resolve_interpolation_endpoints() {
         auto it_end = addr_by_coord.find(end_key);
 
         if (it_start != addr_by_coord.end()) {
-            const char* hn = strings.data().data() + addr_points[it_start->second].housenumber_id;
+            const char* hn = string_pool.data().data() + addr_points[it_start->second].housenumber_id;
             iw.start_number = parse_house_number(hn);
         }
         if (it_end != addr_by_coord.end()) {
-            const char* hn = strings.data().data() + addr_points[it_end->second].housenumber_id;
+            const char* hn = string_pool.data().data() + addr_points[it_end->second].housenumber_id;
             iw.end_number = parse_house_number(hn);
         }
 
@@ -2303,6 +2293,9 @@ static void write_index(const std::string& output_dir) {
     auto addr_offsets   = write_entries(iw, "addr_entries.bin",   sorted_geo_cells, cell_to_addrs);
     auto interp_offsets = write_entries(iw, "interp_entries.bin", sorted_geo_cells, cell_to_interps);
 
+    // Write the 20-byte GeoCell record field by field. A native C++
+    // struct would pad its u64 + three u32 fields to 24 bytes, while
+    // the Rust reader expects the packed 20-byte sequence below.
     {
         std::ofstream f = open_tmp_out(iw, "geo_cells.bin");
         for (uint64_t cell_id : sorted_geo_cells) {
@@ -2412,24 +2405,28 @@ static void write_index(const std::string& output_dir) {
     }
     {
         std::ofstream f = open_tmp_out(iw, "strings.bin");
-        f.write(strings.data().data(), strings.data().size());
-        std::cerr << "strings.bin: " << strings.data().size() << " bytes" << std::endl;
+        f.write(string_pool.data().data(), string_pool.data().size());
+        std::cerr << "strings.bin: " << string_pool.data().size() << " bytes" << std::endl;
     }
 
     // Every .tmp has been written successfully; atomically swap them
     // into the live names. Destructor would remove them if this throws.
+    // An old manifest must not validate files while commit_all() is
+    // replacing them one by one. Existing mmap readers keep their old
+    // mappings; new readers fail closed until the new manifest appears.
+    const std::string manifest_path = output_dir + "/manifest_reverse.json";
+    std::filesystem::remove(manifest_path);
     iw.commit_all();
 
-    // manifest_reverse.json — written *after* commit_all so a partial
-    // build never publishes a manifest claiming success. Mirrors the
-    // Rust-side `manifest::write` helper. Operators read these files
-    // before / after a rebuild to verify the new binary actually
-    // changed the data instead of burning a multi-hour rebuild on a
-    // binary that has the same code as the previous one. The macros
-    // are defined in git_version.h, regenerated at every build.
+    // The manifest is part of the read contract, not just a build log.
+    // It records the C++ record sizes, named field offsets, and lengths
+    // of every reverse-index file. Rust checks these before mmap casting,
+    // so an old volume or a mixed-generation build fails at startup
+    // instead of returning plausible but wrong addresses. Publish it
+    // last through a temporary file.
     {
-        const std::string manifest_path = output_dir + "/manifest_reverse.json";
-        std::ofstream f(manifest_path);
+        const std::string manifest_tmp = manifest_path + ".tmp";
+        std::ofstream f(manifest_tmp);
         const auto unix_now = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         const std::string dirty_raw = GEOCODER_GIT_DIRTY;
@@ -2453,13 +2450,55 @@ static void write_index(const std::string& output_dir) {
           << "    \"admin_cells\": " << cell_to_admin.size() << ",\n"
           << "    \"place_cells\": " << cell_to_places.size() << ",\n"
           << "    \"poi_cells\": " << cell_to_pois.size() << "\n"
-          << "  }\n"
-          << "}\n";
-        if (!f) {
-            std::cerr << "warning: failed to write " << manifest_path << std::endl;
-        } else {
-            std::cerr << "wrote " << manifest_path << std::endl;
+          << "  },\n"
+          << "  \"schema\": {\n"
+          << "    \"version\": 3,\n"
+          << "    \"byte_order\": \"little\",\n"
+          << "    \"string_pool_zero_empty\": true,\n"
+          << "    \"records\": {\n";
+        auto layout = [&](const char* name, size_t size,
+                          std::initializer_list<std::pair<const char*, size_t>> fields,
+                          bool last = false) {
+            f << "      \"" << name << "\": {\"size\": " << size << ", \"fields\": {";
+            bool first = true;
+            for (const auto& [field, offset] : fields) {
+                if (!first) f << ", ";
+                f << "\"" << field << "\": " << offset;
+                first = false;
+            }
+            f << "}}" << (last ? "\n" : ",\n");
+        };
+        layout("WayHeader", sizeof(WayHeader), {{"node_offset:u32", offsetof(WayHeader, node_offset)}, {"node_count:u8", offsetof(WayHeader, node_count)}, {"name_id:u32", offsetof(WayHeader, name_id)}});
+        layout("AddrPoint", sizeof(AddrPoint), {{"lat:f32", offsetof(AddrPoint, lat)}, {"lng:f32", offsetof(AddrPoint, lng)}, {"housenumber_id:u32", offsetof(AddrPoint, housenumber_id)}, {"street_or_place_id:u32", offsetof(AddrPoint, street_or_place_id)}, {"unit_id:u32", offsetof(AddrPoint, unit_id)}, {"floor_id:u32", offsetof(AddrPoint, floor_id)}, {"parent_place_id:u32", offsetof(AddrPoint, parent_place_id)}, {"postcode_id:u32", offsetof(AddrPoint, postcode_id)}, {"flags:u8", offsetof(AddrPoint, flags)}});
+        layout("InterpWay", sizeof(InterpWay), {{"node_offset:u32", offsetof(InterpWay, node_offset)}, {"node_count:u8", offsetof(InterpWay, node_count)}, {"street_id:u32", offsetof(InterpWay, street_id)}, {"start_number:u32", offsetof(InterpWay, start_number)}, {"end_number:u32", offsetof(InterpWay, end_number)}, {"interpolation:u8", offsetof(InterpWay, interpolation)}});
+        layout("AdminPolygon", sizeof(AdminPolygon), {{"vertex_offset:u32", offsetof(AdminPolygon, vertex_offset)}, {"vertex_count:u16", offsetof(AdminPolygon, vertex_count)}, {"name_id:u32", offsetof(AdminPolygon, name_id)}, {"admin_level:u8", offsetof(AdminPolygon, admin_level)}, {"importance:u8", offsetof(AdminPolygon, importance)}, {"area:f32", offsetof(AdminPolygon, area)}, {"country_code:u16", offsetof(AdminPolygon, country_code)}});
+        layout("NodeCoord", sizeof(NodeCoord), {{"lat:f32", offsetof(NodeCoord, lat)}, {"lng:f32", offsetof(NodeCoord, lng)}});
+        layout("PlacePoint", sizeof(PlacePoint), {{"lat:f32", offsetof(PlacePoint, lat)}, {"lng:f32", offsetof(PlacePoint, lng)}, {"name_id:u32", offsetof(PlacePoint, name_id)}, {"rank:u8", offsetof(PlacePoint, rank)}, {"importance:u8", offsetof(PlacePoint, importance)}});
+        layout("PoiPoint", sizeof(PoiPoint), {{"lat:f32", offsetof(PoiPoint, lat)}, {"lng:f32", offsetof(PoiPoint, lng)}, {"name_id:u32", offsetof(PoiPoint, name_id)}, {"category_id:u32", offsetof(PoiPoint, category_id)}, {"rank:u8", offsetof(PoiPoint, rank)}, {"importance:u8", offsetof(PoiPoint, importance)}, {"parent_place_id:u32", offsetof(PoiPoint, parent_place_id)}});
+        layout("I18nName", sizeof(I18nName), {{"entity_type:u8", offsetof(I18nName, entity_type)}, {"alias_type:u8", offsetof(I18nName, alias_type)}, {"lang_code:u16", offsetof(I18nName, lang_code)}, {"entity_id:u32", offsetof(I18nName, entity_id)}, {"name_id:u32", offsetof(I18nName, name_id)}, {"_pad1:u32", offsetof(I18nName, _pad1)}});
+        // These two cell layouts are serialized field by field above,
+        // so their on-disk sizes exclude native C++ struct padding.
+        layout("GeoCell", 20, {{"cell_id:u64", 0}, {"street_offset:u32", 8}, {"addr_offset:u32", 12}, {"interp_offset:u32", 16}});
+        layout("CellOffset", 12, {{"cell_id:u64", 0}, {"entry_offset:u32", 8}}, true);
+        f << "    },\n    \"files\": {\n";
+        constexpr const char* files[] = {
+            "addr_entries.bin", "addr_points.bin", "admin_cells.bin", "admin_entries.bin",
+            "admin_polygons.bin", "admin_vertices.bin", "geo_cells.bin", "i18n_names.bin",
+            "interp_entries.bin", "interp_nodes.bin", "interp_ways.bin", "place_cells.bin",
+            "place_entries.bin", "place_points.bin", "poi_cells.bin", "poi_entries.bin",
+            "poi_points.bin", "street_entries.bin", "street_nodes.bin", "street_ways.bin",
+            "strings.bin"
+        };
+        for (size_t i = 0; i < std::size(files); ++i) {
+            f << "      \"" << files[i] << "\": "
+              << std::filesystem::file_size(output_dir + "/" + files[i])
+              << (i + 1 == std::size(files) ? "\n" : ",\n");
         }
+        f << "    }\n  }\n}\n";
+        f.close();
+        if (!f) throw std::runtime_error("failed to write " + manifest_tmp);
+        std::filesystem::rename(manifest_tmp, manifest_path);
+        std::cerr << "wrote " << manifest_path << std::endl;
     }
 }
 
@@ -2541,7 +2580,7 @@ static int run_build(int argc, char* argv[]) {
                 if (!type || std::strcmp(type, "associatedStreet") != 0) return;
                 const char* street_name = rel.tags()["name"];
                 if (!street_name || !*street_name) return;
-                uint32_t name_id = strings.intern(street_name);
+                uint32_t name_id = string_pool.intern(street_name);
                 relations_seen++;
                 for (const auto& member : rel.members()) {
                     const char* role = member.role();
@@ -2618,12 +2657,6 @@ static int run_build(int argc, char* argv[]) {
                   << " inner rings (holes) seen; not indexed — area ranking"
                   << " resolves enclaves, pure hole attribution is a known"
                   << " limitation" << std::endl;
-    }
-    if (handler.collapsed_admin_count() > 0) {
-        std::cerr << "  " << handler.collapsed_admin_count()
-                  << " admin areas collapsed to largest outer ring (>10"
-                  << " rings, admin_level >= 4); fixes Greensboro-style"
-                  << " name proliferation in forward search" << std::endl;
     }
     std::cerr << "  " << place_count_total << " place=* points" << std::endl;
     std::cerr << "  " << poi_count_total << " POIs" << std::endl;

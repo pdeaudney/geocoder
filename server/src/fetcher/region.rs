@@ -1,11 +1,12 @@
 //! OSM region preset → (URL, dest filename) set.
 //!
-//! 14 presets:
+//! 16 presets:
 //!
 //!   - 9 Geofabrik continent extracts (the `--region all-continents`
 //!     fan-out): africa, antarctica, asia, australia-oceania,
 //!     central-america, europe, north-america, russia, south-america
-//!   - 4 Geofabrik sub-region shortcuts: australia, new-zealand, niue, usa
+//!   - 6 Geofabrik sub-region shortcuts: australia, new-zealand, niue,
+//!     united-kingdom, canada, usa
 //!   - 1 planet stream from planet.openstreetmap.org
 //!
 //! `oceania` is an alias for `australia-oceania` — the full continent
@@ -38,6 +39,8 @@ pub enum Region {
     Australia,
     NewZealand,
     Niue,
+    UnitedKingdom,
+    Canada,
     Usa,
     Planet,
     AllContinents,
@@ -67,8 +70,9 @@ impl Region {
                 .map(|r| r.urls().pop().expect("single-URL region"))
                 .collect(),
             Region::Planet => vec![Url::parse(PLANET).expect("static planet URL is valid")],
-            single => vec![Url::parse(&single.geofabrik_url())
-                .expect("static Geofabrik URL is valid")],
+            single => {
+                vec![Url::parse(&single.geofabrik_url()).expect("static Geofabrik URL is valid")]
+            }
         }
     }
 
@@ -88,6 +92,8 @@ impl Region {
             Region::Australia => "australia-oceania/australia-latest.osm.pbf",
             Region::NewZealand => "australia-oceania/new-zealand-latest.osm.pbf",
             Region::Niue => "australia-oceania/niue-latest.osm.pbf",
+            Region::UnitedKingdom => "europe/united-kingdom-latest.osm.pbf",
+            Region::Canada => "north-america/canada-latest.osm.pbf",
             Region::Usa => "north-america/us-latest.osm.pbf",
             Region::Planet | Region::AllContinents => {
                 panic!("geofabrik_url() called on Planet/AllContinents")
@@ -154,11 +160,13 @@ impl FromStr for Region {
             "au" | "australia" => Ok(Region::Australia),
             "nz" | "new-zealand" => Ok(Region::NewZealand),
             "niue" => Ok(Region::Niue),
+            "uk" | "gb" | "united-kingdom" => Ok(Region::UnitedKingdom),
+            "ca" | "canada" => Ok(Region::Canada),
             "usa" | "us" => Ok(Region::Usa),
             "planet" => Ok(Region::Planet),
             "all-continents" => Ok(Region::AllContinents),
             other => Err(anyhow!(
-                "unknown region '{other}' (expected one of: africa, antarctica, asia, oceania, australia-oceania, central-america, europe, north-america, russia, south-america, au, nz, usa, planet, all-continents)"
+                "unknown region '{other}' (expected one of: africa, antarctica, asia, oceania, australia-oceania, central-america, europe, north-america, russia, south-america, au, nz, uk, ca, usa, planet, all-continents)"
             )),
         }
     }
@@ -222,6 +230,14 @@ mod tests {
                 &["https://download.geofabrik.de/australia-oceania/niue-latest.osm.pbf"],
             ),
             (
+                Region::UnitedKingdom,
+                &["https://download.geofabrik.de/europe/united-kingdom-latest.osm.pbf"],
+            ),
+            (
+                Region::Canada,
+                &["https://download.geofabrik.de/north-america/canada-latest.osm.pbf"],
+            ),
+            (
                 Region::Usa,
                 &["https://download.geofabrik.de/north-america/us-latest.osm.pbf"],
             ),
@@ -231,10 +247,8 @@ mod tests {
             ),
         ];
         for (region, expected) in cases {
-            let actual: Vec<String> =
-                region.urls().into_iter().map(|u| u.to_string()).collect();
-            let expected_owned: Vec<String> =
-                expected.iter().map(|s| s.to_string()).collect();
+            let actual: Vec<String> = region.urls().into_iter().map(|u| u.to_string()).collect();
+            let expected_owned: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
             assert_eq!(actual, expected_owned, "region={region:?}");
         }
     }
@@ -265,6 +279,13 @@ mod tests {
             Region::from_str("oceania").unwrap().urls(),
             Region::AustraliaOceania.urls()
         );
+    }
+
+    #[test]
+    fn english_country_aliases_resolve_to_country_extracts() {
+        assert_eq!(Region::from_str("uk").unwrap(), Region::UnitedKingdom);
+        assert_eq!(Region::from_str("gb").unwrap(), Region::UnitedKingdom);
+        assert_eq!(Region::from_str("ca").unwrap(), Region::Canada);
     }
 
     #[test]

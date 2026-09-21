@@ -22,9 +22,27 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 /// Per-stage timing — see build-pipeline-perf-plan stage 6.
-struct Stage { name: &'static str, start: Instant }
-impl Stage { fn new(name: &'static str) -> Self { Self { name, start: Instant::now() } } }
-impl Drop for Stage { fn drop(&mut self) { eprintln!("[stage] {}: {:.3}s", self.name, self.start.elapsed().as_secs_f64()); } }
+struct Stage {
+    name: &'static str,
+    start: Instant,
+}
+impl Stage {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            start: Instant::now(),
+        }
+    }
+}
+impl Drop for Stage {
+    fn drop(&mut self) {
+        eprintln!(
+            "[stage] {}: {:.3}s",
+            self.name,
+            self.start.elapsed().as_secs_f64()
+        );
+    }
+}
 
 fn main() {
     let _total = Stage::new("total");
@@ -59,51 +77,78 @@ fn main() {
         .map(|p| std::collections::HashSet::from([p, p + 1]))
         .unwrap_or_default();
 
+    let dest = args
+        .iter()
+        .enumerate()
+        .skip(2)
+        .find(|(i, a)| !a.starts_with("--") && !consumed.contains(i))
+        .map(|(_, a)| PathBuf::from(a))
+        .unwrap_or_else(|| {
+            if partition {
+                source.clone()
+            } else {
+                source.join("tantivy")
+            }
+        });
+
     let t0 = std::time::Instant::now();
     let result: Result<serde_json::Value, String> = if partition {
-        eprintln!("Building per-country tantivy indexes under {} (heap={} MB)", source.display(), heap_mb);
-        forward::build_partitioned_with_heap(&source, &source, heap_bytes).map(|stats| {
+        eprintln!(
+            "Building per-country tantivy indexes under {} (heap={} MB)",
+            dest.display(),
+            heap_mb
+        );
+        forward::build_partitioned_with_heap(&source, &dest, heap_bytes).map(|stats| {
             let mut countries: Vec<_> = stats.keys().collect();
             countries.sort();
             let mut total_places: u64 = 0;
             let mut total_streets: u64 = 0;
+            let mut total_addresses: u64 = 0;
             let mut by_country = serde_json::Map::new();
             for cc in countries {
                 let s = &stats[cc];
                 eprintln!(
-                    "  tantivy_{}{}: {} places + {} streets",
-                    cc[0] as char, cc[1] as char, s.places, s.streets
+                    "  tantivy_{}{}: {} places + {} streets/POIs + {} addresses",
+                    cc[0] as char, cc[1] as char, s.places, s.streets, s.addresses
                 );
                 total_places += s.places as u64;
                 total_streets += s.streets as u64;
+                total_addresses += s.addresses as u64;
                 let key = format!("{}{}", cc[0] as char, cc[1] as char);
-                by_country.insert(key, json!({ "places": s.places, "streets": s.streets }));
+                by_country.insert(
+                    key,
+                    json!({ "places": s.places, "streets": s.streets, "addresses": s.addresses }),
+                );
             }
-            eprintln!("Built {} country indexes in {:.1}s", stats.len(), t0.elapsed().as_secs_f64());
+            eprintln!(
+                "Built {} country indexes in {:.1}s",
+                stats.len(),
+                t0.elapsed().as_secs_f64()
+            );
             json!({
                 "layout": "per-country",
                 "country_count": stats.len(),
                 "total_places": total_places,
                 "total_streets": total_streets,
+                "total_addresses": total_addresses,
                 "tantivy_heap_mb": heap_mb,
                 "build_seconds": t0.elapsed().as_secs_f64(),
                 "by_country": by_country,
             })
         })
     } else {
-        let dest = args
-            .iter()
-            .enumerate()
-            .skip(2)
-            .find(|(i, a)| !a.starts_with("--") && !consumed.contains(i))
-            .map(|(_, a)| PathBuf::from(a))
-            .unwrap_or_else(|| source.join("tantivy"));
-        eprintln!("Building monolithic forward index: {} -> {} (heap={} MB)", source.display(), dest.display(), heap_mb);
+        eprintln!(
+            "Building monolithic forward index: {} -> {} (heap={} MB)",
+            source.display(),
+            dest.display(),
+            heap_mb
+        );
         forward::build_with_heap(&source, &dest, heap_bytes).map(|stats| {
             eprintln!(
-                "Indexed {} places + {} streets in {:.1}s",
+                "Indexed {} places + {} streets/POIs + {} addresses in {:.1}s",
                 stats.places,
                 stats.streets,
+                stats.addresses,
                 t0.elapsed().as_secs_f64()
             );
             json!({
@@ -111,6 +156,7 @@ fn main() {
                 "dest": dest.display().to_string(),
                 "places": stats.places,
                 "streets": stats.streets,
+                "addresses": stats.addresses,
                 "tantivy_heap_mb": heap_mb,
                 "build_seconds": t0.elapsed().as_secs_f64(),
             })
@@ -123,7 +169,9 @@ fn main() {
             std::process::exit(1);
         }
         Ok(extra) => {
-            if let Err(e) = manifest::write(&source, "forward", extra) {
+            if let Err(e) =
+                manifest::write(if partition { &dest } else { &source }, "forward", extra)
+            {
                 eprintln!("warning: failed to write manifest_forward.json: {e}");
             }
         }

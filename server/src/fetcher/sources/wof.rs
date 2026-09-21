@@ -39,11 +39,32 @@ pub async fn fetch_wof(
     scope: &str,
     opts: &FetchOpts,
 ) -> Result<Vec<WofResult>> {
+    fetch_dataset(client, data_dir, scope, opts, "admin").await
+}
+
+/// Postalcode data lives in separate WoF repositories from admin data.
+/// The same distribution host publishes their SQLite snapshots.
+pub async fn fetch_wof_postcodes(
+    client: &Client,
+    data_dir: &Path,
+    scope: &str,
+    opts: &FetchOpts,
+) -> Result<Vec<WofResult>> {
+    fetch_dataset(client, data_dir, scope, opts, "postalcode").await
+}
+
+async fn fetch_dataset(
+    client: &Client,
+    data_dir: &Path,
+    scope: &str,
+    opts: &FetchOpts,
+    dataset: &str,
+) -> Result<Vec<WofResult>> {
     tokio::fs::create_dir_all(data_dir)
         .await
         .with_context(|| format!("creating {}", data_dir.display()))?;
 
-    let scopes = parse_scope(scope);
+    let scopes = parse_scope(scope, dataset);
     if scopes.is_empty() {
         return Ok(vec![]);
     }
@@ -55,26 +76,21 @@ pub async fn fetch_wof(
     Ok(out)
 }
 
-fn parse_scope(scope: &str) -> Vec<String> {
+fn parse_scope(scope: &str, dataset: &str) -> Vec<String> {
     match scope.trim() {
         "" | "none" => vec![],
-        "planet" => vec!["admin".to_string()],
-        // Country list: "au nz" → ["admin-au", "admin-nz"]. Split on
+        "planet" => vec![dataset.to_string()],
+        // Country list: "au nz" → ["postalcode-au", "postalcode-nz"]. Split on
         // whitespace and commas so either form works.
         list => list
             .split([' ', ','])
             .filter(|s| !s.is_empty())
-            .map(|cc| format!("admin-{}", cc.to_lowercase()))
+            .map(|cc| format!("{dataset}-{}", cc.to_lowercase()))
             .collect(),
     }
 }
 
-async fn fetch_one(
-    client: &Client,
-    data_dir: &Path,
-    suffix: &str,
-    opts: &FetchOpts,
-) -> WofResult {
+async fn fetch_one(client: &Client, data_dir: &Path, suffix: &str, opts: &FetchOpts) -> WofResult {
     // suffix examples: "admin" (planet), "admin-au" (per-country)
     let filename_compressed = format!("whosonfirst-data-{suffix}-latest.db.bz2");
     let filename_db = format!("whosonfirst-data-{suffix}-latest.db");
@@ -141,34 +157,42 @@ async fn fetch_one(
 /// path the build pipeline reads).
 async fn decompress_in_place(input_bz2: &Path, dest_db: &Path) -> Result<FetchOutcome> {
     let decoder = pick_bzip2_decoder().await?;
+    // bzip2 writes next to its input. Use a different basename so a
+    // refresh cannot collide with the live database before it is complete.
+    let staged_bz2 = path_with_suffix(dest_db, "refresh.bz2");
+    let decompressed = strip_bz2_suffix(&staged_bz2)
+        .ok_or_else(|| anyhow!("input is not a .bz2 file: {}", staged_bz2.display()))?;
+    // A prior interrupted refresh may have left either staging file.
+    let _ = tokio::fs::remove_file(&staged_bz2).await;
+    let _ = tokio::fs::remove_file(&decompressed).await;
+    tokio::fs::rename(input_bz2, &staged_bz2)
+        .await
+        .with_context(|| format!("rename {} -> {}", input_bz2.display(), staged_bz2.display()))?;
     tracing::info!(
         decoder,
-        input = %input_bz2.display(),
+        input = %staged_bz2.display(),
         "decompressing WoF .bz2"
     );
-    let status = Command::new(&decoder)
+    let status = Command::new(decoder)
         .arg("-d")
-        .arg(input_bz2)
+        .arg(&staged_bz2)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .status()
         .await
-        .with_context(|| format!("running {decoder} -d {}", input_bz2.display()))?;
+        .with_context(|| format!("running {decoder} -d {}", staged_bz2.display()))?;
     if !status.success() {
         return Err(anyhow!("{decoder} -d failed with exit {status}"));
     }
     // The decoder strips `.bz2` and writes the result alongside.
-    let decompressed = strip_bz2_suffix(input_bz2)
-        .ok_or_else(|| anyhow!("input is not a .bz2 file: {}", input_bz2.display()))?;
-    tokio::fs::rename(&decompressed, dest_db).await.with_context(|| {
-        format!(
-            "rename {} -> {}",
-            decompressed.display(),
-            dest_db.display()
-        )
-    })?;
-    let bytes = tokio::fs::metadata(dest_db).await.map(|m| m.len()).unwrap_or(0);
+    tokio::fs::rename(&decompressed, dest_db)
+        .await
+        .with_context(|| format!("rename {} -> {}", decompressed.display(), dest_db.display()))?;
+    let bytes = tokio::fs::metadata(dest_db)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
     Ok(FetchOutcome::Downloaded { bytes })
 }
 
@@ -209,20 +233,24 @@ mod tests {
 
     #[test]
     fn scope_planet_yields_admin_only() {
-        assert_eq!(parse_scope("planet"), vec!["admin"]);
+        assert_eq!(parse_scope("planet", "admin"), vec!["admin"]);
+        assert_eq!(parse_scope("planet", "postalcode"), vec!["postalcode"]);
     }
 
     #[test]
     fn scope_none_or_empty_yields_nothing() {
-        assert!(parse_scope("none").is_empty());
-        assert!(parse_scope("").is_empty());
-        assert!(parse_scope("   ").is_empty());
+        assert!(parse_scope("none", "admin").is_empty());
+        assert!(parse_scope("", "admin").is_empty());
+        assert!(parse_scope("   ", "admin").is_empty());
     }
 
     #[test]
     fn scope_country_list_lowercases_and_prefixes() {
-        assert_eq!(parse_scope("AU NZ"), vec!["admin-au", "admin-nz"]);
-        assert_eq!(parse_scope("au,nz, fj"), vec!["admin-au", "admin-nz", "admin-fj"]);
+        assert_eq!(parse_scope("AU NZ", "admin"), vec!["admin-au", "admin-nz"]);
+        assert_eq!(
+            parse_scope("au,nz, fj", "admin"),
+            vec!["admin-au", "admin-nz", "admin-fj"]
+        );
     }
 
     #[test]
@@ -232,5 +260,25 @@ mod tests {
             Some(PathBuf::from("/tmp/foo"))
         );
         assert_eq!(strip_bz2_suffix(Path::new("/tmp/foo")), None);
+    }
+
+    #[tokio::test]
+    async fn refresh_replaces_existing_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("admin.db");
+        let compressed = dir.path().join("admin.db.bz2");
+        let fresh = dir.path().join("fresh.db");
+        tokio::fs::write(&db, b"old").await.unwrap();
+        tokio::fs::write(&fresh, b"new").await.unwrap();
+        let output = Command::new("bzip2")
+            .arg("-c")
+            .arg(&fresh)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        tokio::fs::write(&compressed, output.stdout).await.unwrap();
+        decompress_in_place(&compressed, &db).await.unwrap();
+        assert_eq!(tokio::fs::read(&db).await.unwrap(), b"new");
     }
 }

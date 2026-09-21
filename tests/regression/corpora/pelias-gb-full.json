@@ -1,14 +1,24 @@
 {
   "name": "pelias-gb-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "United Kingdom",
+              "address.country_code": "GB",
+              "address.county": "Cardiff"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
+          },
+          {
+            "fields": {
+              "address.state": "Caerdydd#cardiff"
+            },
+            "kind": "result_absent"
           }
         ],
         "status": 200
@@ -19,22 +29,32 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "gb",
           "q": "Cardiff, GBR"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "United Kingdom",
+              "address.country_code": "GB",
+              "address.county": "Newport"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
+          },
+          {
+            "fields": {
+              "address.state": "Casnewydd#Newport"
+            },
+            "kind": "result_absent"
           }
         ],
         "status": 200
@@ -45,48 +65,52 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "gb",
           "q": "ringland"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "M11 4DQ"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_postalcodes-8",
       "notes": "postal code in Manchester, England",
+      "partial_reason": "expected field country_a, expected field layer, expected field postalcode",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "gb",
           "q": "M11 4DQ"
         }
       },
       "tags": [
         "pelias",
-        "search"
+        "autocomplete"
       ]
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "M11 4DQ"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -95,86 +119,89 @@
       "notes": "postal code in Manchester, England with additional filters",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "gb",
           "q": "M11 4DQ"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "London"
+            "fields": {
+              "name": "EN5 2LP"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_postalcodes-11",
       "notes": "postal code in London, England",
+      "partial_reason": "expected field borough, expected field country_a, expected field layer, expected field locality, expected field postalcode",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "gb",
           "q": "EN52LP"
         }
       },
       "tags": [
         "pelias",
-        "search"
+        "autocomplete"
       ]
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "London"
+            "fields": {
+              "name": "E8 1DN"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_postalcodes-12",
       "notes": "postal code in London, England",
+      "partial_reason": "expected field borough, expected field country_a, expected field layer, expected field locality, expected field postalcode",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "gb",
           "q": "E81DN"
         }
       },
       "tags": [
         "pelias",
-        "search"
+        "autocomplete"
       ]
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "Rushendon Furlong"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": 51.83567,
+            "expected_lng": -0.636911,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 500.0
           }
         ],
         "status": 200
@@ -183,40 +210,35 @@
       "notes": null,
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "gb",
           "q": "rushendon furlong, england"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "London"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Grosvenor Square"
+            "fields": {
+              "address.city": "London",
+              "address.country_code": "GB",
+              "name": "24 Grosvenor Square"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-international-7",
       "notes": null,
+      "partial_reason": "normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -234,25 +256,25 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "London"
+            "fields": {
+              "address.city": "London",
+              "address.country_code": "GB",
+              "address.postcode": "EN5 2LP",
+              "name": "EN5 2LP"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_postalcodes-11",
       "notes": "postal code in London, England",
+      "partial_reason": "expected field borough, expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "gb",
           "q": "EN52LP"
         }
       },
@@ -265,25 +287,25 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "London"
+            "fields": {
+              "address.city": "London",
+              "address.country_code": "GB",
+              "address.postcode": "E8 1DN",
+              "name": "E8 1DN"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_postalcodes-12",
       "notes": "postal code in London, England",
+      "partial_reason": "expected field borough, expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "gb",
           "q": "E81DN"
         }
       },
@@ -296,9 +318,20 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "GB",
+              "address.road": "Rushendon Furlong",
+              "name": "Rushendon Furlong"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": 51.83567,
+            "expected_lng": -0.636911,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 500.0
           }
         ],
         "status": 200
@@ -309,22 +342,33 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "gb",
           "q": "rushendon furlong, england"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "GB",
+              "address.road": "Broadway Market",
+              "name": "Broadway Market"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": 51.536884,
+            "expected_lng": -0.061607,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 500.0
           }
         ],
         "status": 200
@@ -335,22 +379,86 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "gb",
           "q": "Broadway Market, London"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "United Kingdom",
+              "address.country_code": "GB",
+              "name": "Anguilla"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_dependencies-1",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "Anguilla"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "United Kingdom",
+              "address.country_code": "GB",
+              "name": "Bermuda"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_dependencies-2",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "Bermuda"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "United Kingdom",
+              "address.country_code": "GB",
+              "name": "London"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -361,14 +469,14 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "gb",
           "q": "London, England"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     }
   ]
 }

@@ -29,8 +29,10 @@ impl Gnaf {
     /// `Ok(None)` when the files aren't present — lets callers treat
     /// G-NAF as optional.
     pub fn open(dir: &Path) -> Result<Option<Self>, String> {
-        Ok(AddressPointIndex::open_with_prefix_labeled(dir, "gnaf", "gnaf")?
-            .map(|inner| Gnaf { inner }))
+        Ok(
+            AddressPointIndex::open_with_prefix_labeled(dir, "gnaf", "gnaf")?
+                .map(|inner| Gnaf { inner }),
+        )
     }
 
     pub fn find_by_housenumber(
@@ -54,5 +56,13 @@ impl Gnaf {
 
     pub fn find_nearest(&self, lat: f64, lng: f64, street_level: u64) -> Option<GnafMatch<'_>> {
         self.inner.find_nearest(lat, lng, street_level)
+    }
+
+    pub fn points(&self) -> &[GnafPoint] {
+        self.inner.points()
+    }
+
+    pub fn string_at(&self, id: u32) -> &str {
+        self.inner.string_at(id)
     }
 }

@@ -53,6 +53,7 @@ const FST_WALK_CAP: usize = 10_000;
 pub const KIND_PLACE: u8 = 1;
 pub const KIND_STREET: u8 = 2;
 pub const KIND_POI: u8 = 3;
+pub const KIND_POSTCODE: u8 = 5;
 
 /// Fixed-size record stored in `fst_<cc>.bin`. Mirrors the tantivy
 /// schema fields clients actually need for a typeahead hit.
@@ -90,11 +91,15 @@ impl AutocompleteCountry {
         if !fst_path.exists() || !entries_path.exists() || !strings_path.exists() {
             return Ok(None);
         }
-        let fst_file = File::open(fst_path)
-            .map_err(|e| format!("open {}: {}", fst_path.display(), e))?;
+        let fst_file =
+            File::open(fst_path).map_err(|e| format!("open {}: {}", fst_path.display(), e))?;
         let fst_mmap = unsafe { Mmap::map(&fst_file) }
             .map_err(|e| format!("mmap {}: {}", fst_path.display(), e))?;
-        crate::log_loaded_file("autocomplete", &fst_path.display().to_string(), fst_mmap.len() as u64);
+        crate::log_loaded_file(
+            "autocomplete",
+            &fst_path.display().to_string(),
+            fst_mmap.len() as u64,
+        );
         let map = Map::new(fst_mmap).map_err(|e| format!("parse FST: {e}"))?;
 
         let entries = unsafe { Mmap::map(&File::open(entries_path).map_err(io)?) }.map_err(io)?;
@@ -110,7 +115,11 @@ impl AutocompleteCountry {
             strings.len() as u64,
         );
 
-        Ok(Some(AutocompleteCountry { map, entries, strings }))
+        Ok(Some(AutocompleteCountry {
+            map,
+            entries,
+            strings,
+        }))
     }
 
     /// Exact-key lookup — returns the single highest-rank entry the FST
@@ -189,7 +198,11 @@ fn entry_to_hit(entry: &AutocompleteEntry, strings: &[u8]) -> Hit {
     let suburb = read_cstr(strings, entry.suburb_offset);
     Hit {
         name: read_cstr(strings, entry.name_offset).to_owned(),
-        suburb: if suburb.is_empty() { None } else { Some(suburb.to_owned()) },
+        suburb: if suburb.is_empty() {
+            None
+        } else {
+            Some(suburb.to_owned())
+        },
         kind: entry.kind,
         rank: entry.rank,
         lat: entry.lat as f64,
@@ -286,7 +299,10 @@ impl Autocomplete {
         if unified.is_none() && per_country.is_empty() {
             return Ok(None);
         }
-        Ok(Some(Autocomplete { unified, per_country }))
+        Ok(Some(Autocomplete {
+            unified,
+            per_country,
+        }))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -337,26 +353,6 @@ impl Autocomplete {
         result
     }
 
-    /// Country-agnostic exact match. Iterates per-country FSTs to preserve
-    /// the `(cc, hit)` return shape. Expensive — use only when no country
-    /// hint is available.
-    pub fn exact_match_any(&self, q: &str) -> Option<(&[u8; 2], Hit)> {
-        let key = normalise_prefix(q);
-        if key.len() < FST_MIN_PREFIX_LEN {
-            return None;
-        }
-        for (cc, idx) in &self.per_country {
-            if let Some(hit) = idx.get_exact(q) {
-                tracing::Span::current().record(
-                    "geocoder.autocomplete.fst_variant",
-                    format!("per_country_{}", String::from_utf8_lossy(cc)).as_str(),
-                );
-                return Some((cc, hit));
-            }
-        }
-        None
-    }
-
     /// Prefix search within a specific country. Tries unified first
     /// (via `CountryPrefixAutomaton`), falls through to the per-country
     /// FST if unified isn't loaded.
@@ -376,7 +372,11 @@ impl Autocomplete {
         let hits = country.starts_with(&normalise_prefix(q), limit);
         span.record(
             "geocoder.autocomplete.fst_variant",
-            format!("per_country_{}", String::from_utf8_lossy(&lower(country_code))).as_str(),
+            format!(
+                "per_country_{}",
+                String::from_utf8_lossy(&lower(country_code))
+            )
+            .as_str(),
         );
         hits
     }
@@ -426,11 +426,8 @@ pub fn normalise_prefix(q: &str) -> String {
 ///   mount / mt                 →  mt
 ///   fort / ft                  →  ft
 ///
-/// Only the LEADING tokens of a multi-token phrase are folded — never
-/// the trailing token. That preserves the convention in OSM where `St`
-/// at the end of a street name means "Street" (e.g. `Main St`) and
-/// `St` at the start means "Saint" (e.g. `St Kilda`). Single-token
-/// inputs are returned unchanged.
+/// Leading `St` means Saint, while trailing `St` means Street.
+/// Single-token inputs are returned unchanged.
 ///
 /// MUST be applied identically at FST build, FST query, Tantivy build,
 /// and Tantivy query — see `tests/abbrev_symmetry.rs`.
@@ -446,7 +443,11 @@ pub fn fold_place_abbreviations(s: &str) -> String {
             out.push(' ');
         }
         let mapped = if i == last {
-            *tok
+            if *tok == "st" {
+                "street"
+            } else {
+                *tok
+            }
         } else {
             match *tok {
                 "saint" | "sainte" | "st" | "ste" => "st",
@@ -468,10 +469,14 @@ pub fn fold_place_abbreviations(s: &str) -> String {
 /// FST builder can share it — see `bin/build_autocomplete_fst.rs`.
 pub fn ascii_fold_char(ch: char) -> String {
     match ch {
-        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => "a".into(),
+        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => {
+            "a".into()
+        }
         'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => "e".into(),
         'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => "i".into(),
-        'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ø' | 'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' | 'Ø' => "o".into(),
+        'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ø' | 'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' | 'Ø' => {
+            "o".into()
+        }
         'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => "u".into(),
         'ñ' | 'Ñ' => "n".into(),
         'ç' | 'Ç' => "c".into(),
@@ -676,7 +681,12 @@ impl UnifiedAutocomplete {
         let entries = unsafe { Mmap::map(&File::open(&entries_path).map_err(io)?) }.map_err(io)?;
         let strings = unsafe { Mmap::map(&File::open(&strings_path).map_err(io)?) }.map_err(io)?;
         let countries = Self::collect_countries(&map);
-        Ok(Some(UnifiedAutocomplete { map, entries, strings, countries }))
+        Ok(Some(UnifiedAutocomplete {
+            map,
+            entries,
+            strings,
+            countries,
+        }))
     }
 
     /// One-shot forward walk to enumerate the 2-byte key prefixes present
@@ -725,7 +735,9 @@ impl UnifiedAutocomplete {
         let auto = CountryPrefixAutomaton::equals(*country_code, &key);
         let mut stream = self.map.search(auto).into_stream();
         let (_, id) = stream.next()?;
-        self.records().get(id as usize).map(|e| entry_to_hit(e, &self.strings))
+        self.records()
+            .get(id as usize)
+            .map(|e| entry_to_hit(e, &self.strings))
     }
 
     /// Prefix walk within a specific country via the country-prefix
@@ -773,8 +785,7 @@ mod tests {
     #[test]
     fn normalises_prefixes() {
         assert_eq!(normalise_prefix("Éliz"), "eliz");
-        // "St" stays literal as a trailing token (Street, not Saint).
-        assert_eq!(normalise_prefix("  MAIN  St  "), "main st");
+        assert_eq!(normalise_prefix("  MAIN  St  "), "main street");
         assert_eq!(normalise_prefix(""), "");
     }
 
@@ -794,9 +805,8 @@ mod tests {
         assert_eq!(normalise_prefix("Fort Worth"), "ft worth");
         assert_eq!(normalise_prefix("Ft Worth"), "ft worth");
 
-        // Trailing `St`/`Mt`/`Ft` are NOT collapsed (they're suffixes,
-        // not Saint-style prefixes).
-        assert_eq!(normalise_prefix("Hampton St"), "hampton st");
+        // Trailing St is Street. Mt and Ft remain as written.
+        assert_eq!(normalise_prefix("Hampton St"), "hampton street");
         assert_eq!(normalise_prefix("Camp Mt"), "camp mt");
 
         // Single-token queries are returned unchanged (no position to apply).

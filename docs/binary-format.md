@@ -134,7 +134,7 @@ layout. Run `sizeof/alignof` in Rust to verify locally:
 | Struct | Size | Align | File |
 |---|---:|---:|---|
 | `WayHeader` | 12 | 4 | `street_ways.bin`, `interp_ways.bin` |
-| `AddrPoint` | 32 | 4 | `addr_points.bin` |
+| `AddrPoint` | 36 | 4 | `addr_points.bin` |
 | `InterpWay` | 24 | 4 | `interp_ways.bin` |
 | `AdminPolygon` | 24 | 4 | `admin_polygons.bin` |
 | `NodeCoord` | 8 | 4 | `street_nodes.bin`, `admin_vertices.bin`, `interp_nodes.bin`, `wof_countries_vertices.bin` |
@@ -143,13 +143,27 @@ layout. Run `sizeof/alignof` in Rust to verify locally:
 | `I18nRecord` | 16 | 4 | `i18n_names.bin` |
 | `WofCountry` | 24 | 4 | `wof_countries.bin` |
 | `AutocompleteEntry` | 20 | 4 | `fst_<cc>.bin`, `fst_unified.bin` |
-| `AddressPoint` (G-NAF / OA) | 24 | 4 | `gnaf_points.bin`, `oa_<cc>_points.bin` |
+| `AddressPoint` (G-NAF / OA) | 28 | 4 | `gnaf_points.bin`, `oa_<cc>_points.bin` |
 | `RawEntry` (postcode lookup) | 16 | 8 | `postcode_lookup.bin` |
-| `GeoCellOffsets` | 16 | 8 | `*_cells.bin` |
+| `GeoCell` (serialized fields) | 20 | n/a | `geo_cells.bin` |
+| `CellOffset` (serialized fields) | 12 | n/a | `admin_cells.bin`, `place_cells.bin`, `poi_cells.bin`, G-NAF/OA cells |
 
 All alignments ≤ 8 and every primitive field is a fixed-width
 integer or float. No `usize`, no pointers. This is what makes
 cross-architecture portability work.
+
+`manifest_reverse.json` stores the C++ record sizes, field offsets,
+byte order, and byte lengths of the reverse-index files.
+Schema version 2 added `AddrPoint.postcode_id` at byte offset 28.
+Schema version 3 reserves string-pool offset zero for the empty string;
+the reader checks both the version and the first byte of `strings.bin`.
+Both changes require a fresh reverse build.
+The Rust reader compares them with its compiled layouts and current
+file lengths before mapping records.
+Each G-NAF and OpenAddresses shard has a matching
+`<prefix>_points.schema.json` with the same checks for `AddressPoint`.
+Indexes built before these schemas were added must be rebuilt; the
+reader will reject them rather than guess at the byte layout.
 
 ## Core files (always present)
 
@@ -242,14 +256,20 @@ pub struct AddrPoint {
     pub lat: f32,
     pub lng: f32,
     pub housenumber_id: u32,   // into strings.bin
-    pub street_id: u32,        // index into street_ways.bin (join key)
+    pub street_or_place_id: u32, // street/place name in strings.bin
+    pub unit_id: u32,          // optional unit in strings.bin
+    pub floor_id: u32,         // optional floor in strings.bin
+    pub parent_place_id: u32,  // optional tagged locality in strings.bin
+    pub postcode_id: u32,      // optional addr:postcode in strings.bin
+    pub flags: u8,             // addr:place / housename bits
+    pub _pad: [u8; 3],
 }
 ```
 
-The `street_id` is a WayHeader index, so
-`street_ways.bin[addr.street_id].name_id` gives the street name
-in `strings.bin`. Used by `/search?housenumber=...` to refine a
-street centroid to the specific address point.
+Address points store their own street or place name, house number,
+optional locality, and postcode. Forward search indexes these fields
+at the point's coordinates. The reverse reader checks the manifest's
+record size, field offsets, and file length before mapping this file.
 
 ### `interp_ways.bin` + `interp_nodes.bin` + `interp_entries.bin`
 
@@ -327,6 +347,7 @@ pub struct AddressPoint {
     pub street_id: u32,       // into gnaf_strings.bin (*not* street_ways)
     pub locality_id: u32,
     pub postcode_id: u32,
+    pub unit_id: u32,       // unit / flat number, 0 when absent
 }
 ```
 
@@ -370,6 +391,14 @@ Plugs the hole where Geofabrik country extracts omit their own
 `admin_level=2` relation (UK, US). Written by `tools/wof-importer`
 which reads Who's on First admin SQLite files, extracts
 `placetype='country'` polygons, Douglas-Peucker simplifies, dedupes.
+
+Separate WoF postalcode SQLite files are exported as `wof_postcodes.tsv`,
+an input to `build-autocomplete-fst`. Its first line is exactly
+`#wof-postcodes-v1\tcountry\tpostcode\tlatitude\tlongitude`; the FST
+builder refuses any other header. Rows have an ISO alpha-2 country code,
+source postcode, and WGS84 centroid. Records with invalid coordinates
+or (0,0) are omitted. The TSV is not opened by the server; the resulting
+postcodes live in the existing FST files.
 
 **`WofCountry` — `wof_countries.bin`**:
 ```rust
@@ -521,8 +550,12 @@ fst_unified_strings.bin ◀── fst_unified.bin ◀── fst_unified.fst
 
 ## Versioning and compatibility rules
 
-We don't write a format version header to the files. What we
-guarantee across releases:
+The raw `.bin` files have no inline header. The reverse index requires
+`manifest_reverse.json`, and each G-NAF/OpenAddresses address-point shard
+requires its `*_points.schema.json` sidecar. The reader compares version,
+field offsets, byte order, and file lengths before mapping those files.
+These checks detect layout drift and missing or truncated files; they do not
+verify the contents of same-length files. Compatibility rules:
 
 **Stable (backwards-compatible to change)**:
 - Adding optional new files: allowed. Readers use

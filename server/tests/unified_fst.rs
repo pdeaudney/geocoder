@@ -9,13 +9,43 @@
 //!   (regression guard during the migration).
 
 use fst::{Automaton, IntoStreamer, Map, MapBuilder, Streamer};
-use query_server::autocomplete::{Autocomplete, AutocompleteEntry, CountryPrefixAutomaton, CpaState};
+use query_server::autocomplete::{
+    Autocomplete, AutocompleteEntry, CountryPrefixAutomaton, CpaState, KIND_POSTCODE,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn load() -> Option<Autocomplete> {
     let dir = std::env::var("GEOCODER_INDEX_DIR").ok()?;
     Autocomplete::open(&PathBuf::from(dir)).ok().flatten()
+}
+
+#[test]
+fn postcodes_are_features_in_the_five_country_index() {
+    let Some(fst) = load() else { return };
+    for (cc, typed, expected) in [
+        (*b"au", "3000", "3000"),
+        (*b"gb", "EN52LP", "EN5 2LP"),
+        (*b"us", "90210", "90210"),
+    ] {
+        let hit = fst
+            .exact_match(&cc, typed)
+            .unwrap_or_else(|| panic!("{typed} postcode indexed"));
+        assert_eq!(hit.kind, KIND_POSTCODE, "{typed}");
+        assert_eq!(hit.name, expected);
+    }
+}
+
+#[test]
+fn wof_gb_postcode_fills_missing_code() {
+    let Some(dir) = std::env::var_os("GEOCODER_INDEX_DIR").map(PathBuf::from) else { return };
+    if !dir.join("wof_postcodes.tsv").exists() { return; }
+    let fst = Autocomplete::open(&dir).unwrap().expect("autocomplete index");
+    let hit = fst.exact_match(b"gb", "E8 1DN").expect("WoF postcode indexed");
+    assert_eq!(hit.kind, KIND_POSTCODE);
+    assert_eq!(hit.name, "E8 1DN");
+    assert!((hit.lat - 51.544871).abs() < 0.02, "unexpected postcode location");
+    assert!((hit.lng + 0.060249).abs() < 0.02, "unexpected postcode location");
 }
 
 // --- Pure automaton tests (no index required) ---
@@ -227,14 +257,13 @@ fn runtime_uses_per_country_when_unified_absent() {
 #[test]
 fn has_country_reflects_unified_coverage() {
     let dir = make_test_dir("has_country");
-    write_layout(
-        &dir,
-        LayoutKind::Unified,
-        &[("ausydney", "SYD", "")],
-    );
+    write_layout(&dir, LayoutKind::Unified, &[("ausydney", "SYD", "")]);
     let a = Autocomplete::open(&dir).expect("open").expect("some");
     assert!(a.has_country(b"au"));
-    assert!(!a.has_country(b"us"), "unified covers only AU; must not lie");
+    assert!(
+        !a.has_country(b"us"),
+        "unified covers only AU; must not lie"
+    );
     assert!(!a.has_country(b"fr"));
     cleanup(&dir);
 }
@@ -248,7 +277,10 @@ fn exact_match_rejects_short_normalised_key() {
     write_layout(&dir, LayoutKind::Unified, &[("ausy", "SY", "")]);
     let a = Autocomplete::open(&dir).expect("open").expect("some");
     assert!(a.exact_match(b"au", "é").is_none());
-    assert!(a.exact_match(b"au", "sy").is_some(), "control: 2-byte key works");
+    assert!(
+        a.exact_match(b"au", "sy").is_some(),
+        "control: 2-byte key works"
+    );
     cleanup(&dir);
 }
 
@@ -257,7 +289,9 @@ fn exact_match_rejects_short_normalised_key() {
 #[test]
 fn runtime_exact_match_resolves_sydney() {
     let Some(a) = load() else { return };
-    let hit = a.exact_match(b"au", "sydney").expect("Sydney should resolve");
+    let hit = a
+        .exact_match(b"au", "sydney")
+        .expect("Sydney should resolve");
     assert!(hit.name.to_ascii_lowercase().contains("sydney"));
     assert!(hit.rank <= 19, "should be a place, got rank {}", hit.rank);
 }
@@ -269,15 +303,17 @@ fn runtime_prefix_walk_still_returns_results() {
     // "alys*" streets come first alphabetically.
     let hits = a.search(b"au", "alyss", 5);
     assert!(!hits.is_empty());
-    assert!(hits.iter().any(|h| h.name.to_ascii_lowercase().contains("alysse")));
+    assert!(hits
+        .iter()
+        .any(|h| h.name.to_ascii_lowercase().contains("alysse")));
 }
 
 #[test]
 fn runtime_country_filter_rejects_wrong_country() {
     let Some(a) = load() else { return };
-    // Our test index only has AU. A us-filtered query for "sydney"
-    // should return None even though "sydney" exists under AU.
-    assert!(a.exact_match(b"us", "sydney").is_none());
+    // Alysse Close is in the AU corpus; Sydney also exists in the US.
+    assert!(a.exact_match(b"au", "alysse close").is_some());
+    assert!(a.exact_match(b"us", "alysse close").is_none());
 }
 
 // --- Synthetic test helpers ---
