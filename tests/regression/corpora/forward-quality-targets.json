@@ -1,0 +1,86 @@
+{
+  "name": "forward-quality-targets",
+  "description": "Real US/CA addresses from the Pelias failure triage. Check the result's location and stable address fields without requiring Pelias's display spelling.",
+  "cases": [
+    {
+      "id": "us-direction-southeast",
+      "request": { "method": "GET", "path": "/search", "query": { "q": "186 Tuskegee St SE Atlanta GA" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "result_matches_within", "limit": 1, "fields": { "address.country_code": "US", "address.house_number": "186", "address.postcode": "30315" } },
+        { "kind": "result_coord_within", "limit": 1, "expected_lat": 33.728779, "expected_lng": -84.381759, "max_m": 150 }
+      ] }
+    },
+    {
+      "id": "us-direction-west",
+      "request": { "method": "GET", "path": "/search", "query": { "q": "30 W 26th St, New York, NY 10010" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "result_matches_within", "limit": 1, "fields": { "address.country_code": "US", "address.house_number": "30", "address.postcode": "10010" } },
+        { "kind": "result_coord_within", "limit": 1, "expected_lat": 40.74421, "expected_lng": -73.99037, "max_m": 150 }
+      ] }
+    },
+    {
+      "id": "us-conflicting-zip",
+      "request": { "method": "GET", "path": "/search", "query": { "q": "267 e 10th st, new york, ny 10010" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "result_matches_within", "limit": 1, "fields": { "address.country_code": "US", "address.house_number": "267", "address.postcode": "10009" } },
+        { "kind": "result_coord_within", "limit": 1, "expected_lat": 40.72842, "expected_lng": -73.98313, "max_m": 150 }
+      ] }
+    },
+    {
+      "id": "us-hyphenated-house",
+      "request": { "method": "GET", "path": "/search", "query": { "q": "85-23 168th Place queens ny" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "result_matches_within", "limit": 1, "fields": { "address.country_code": "US", "address.house_number": "85-23" } },
+        { "kind": "result_coord_within", "limit": 1, "expected_lat": 40.71323, "expected_lng": -73.79507, "max_m": 150 }
+      ] }
+    },
+    {
+      "id": "us-sf-jackson-oa",
+      "request": { "method": "GET", "path": "/search", "query": { "q": "3577 Jackson St San Francisco, CA 94118" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "result_matches_within", "limit": 1, "fields": { "address.country_code": "US", "address.house_number": "3577", "address.postcode": "94118" } },
+        { "kind": "result_coord_within", "limit": 1, "expected_lat": 37.7897992, "expected_lng": -122.4536603, "max_m": 150 }
+      ] }
+    },
+    {
+      "id": "us-va-kensington-oa",
+      "request": { "method": "GET", "path": "/search", "query": { "q": "15364 Kensington Park Dr, Woodbridge, VA" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "result_matches_within", "limit": 1, "fields": { "address.country_code": "US", "address.house_number": "15364" } },
+        { "kind": "result_coord_within", "limit": 1, "expected_lat": 38.624117, "expected_lng": -77.2821749, "max_m": 150 }
+      ] }
+    },
+    {
+      "id": "us-sf-california-oa",
+      "request": { "method": "GET", "path": "/search", "query": { "q": "101 california, san francisco" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "result_matches_within", "limit": 1, "fields": { "address.country_code": "US", "address.house_number": "101", "address.postcode": "94111" } },
+        { "kind": "result_coord_within", "limit": 1, "expected_lat": 37.7930401, "expected_lng": -122.3980316, "max_m": 150 }
+      ] }
+    },
+    {
+      "id": "ca-mixed-script-admin",
+      "request": { "method": "GET", "path": "/search", "query": { "q": "280 Bloor Street West টরোন্টো オンタリオ州 کانادا" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "result_matches_within", "limit": 1, "fields": { "address.country_code": "CA", "address.house_number": "280" } },
+        { "kind": "result_coord_within", "limit": 1, "expected_lat": 43.6676, "expected_lng": -79.40086, "max_m": 150 }
+      ] }
+    },
+    {
+      "id": "ca-trail-abbreviation",
+      "request": { "method": "GET", "path": "/search", "query": { "q": "615 MacLeod Trail S.E. 10th Floor Calgary T2G 4T8", "country_code": "ca" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "result_matches_within", "limit": 1, "fields": { "address.country_code": "CA", "address.house_number": "615", "address.postcode": "T2G 4T8" } },
+        { "kind": "result_coord_within", "limit": 1, "expected_lat": 51.0467, "expected_lng": -114.0583, "max_m": 150 }
+      ] }
+    },
+    {
+      "id": "us-place-case-variant",
+      "request": { "method": "GET", "path": "/search", "query": { "q": "truth or consequences, usa" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "result_matches_within", "limit": 1, "fields": { "address.country_code": "US" } },
+        { "kind": "result_coord_within", "limit": 1, "expected_lat": 33.12835, "expected_lng": -107.2529, "max_m": 1000 }
+      ] }
+    }
+  ]
+}

@@ -8,14 +8,16 @@
 //!
 //! Four files per index:
 //!
-//! - `<prefix>_points.bin` — fixed-size 24-byte records:
+//! - `<prefix>_points.bin`: fixed-size 28-byte records:
 //!   ```text
 //!   struct AddressPoint {
 //!       f32 lat, f32 lng,
 //!       u32 housenumber_id, u32 street_id,
-//!       u32 locality_id,    u32 postcode_id,
+//!       u32 locality_id,    u32 postcode_id, u32 unit_id,
 //!   }
 //!   ```
+//! - `<prefix>_points.schema.json`: version, field offsets and file lengths;
+//!   the reader checks it before interpreting any binary records.
 //! - `<prefix>_cells.bin` — sorted `(u64 cell_id, u32 entry_offset)` pairs
 //!   at `street_cell_level`. Same layout as `admin_cells.bin`.
 //! - `<prefix>_entries.bin` — per-cell `(u16 count, u32 point_ids...)`.
@@ -31,7 +33,8 @@
 //! abbreviations, postcode normalisation) stays in the caller.
 
 use memmap2::Mmap;
-use std::fs::File;
+use serde_json::{json, Value};
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 /// Fixed-size record in `<prefix>_points.bin`.
@@ -80,16 +83,93 @@ pub struct AddressPointIndex {
 }
 
 impl AddressPointIndex {
-    /// Open an index by explicit file paths. Returns `Ok(None)` when any
-    /// of the four files is missing — callers treat this as "no index for
-    /// that country" and fall back to whatever comes next in the ladder.
+    fn schema_path(points_path: &Path) -> PathBuf {
+        points_path.with_extension("schema.json")
+    }
+
+    /// Call before replacing a shard's files so a concurrent reader cannot
+    /// accept a stale schema while the four files are being rewritten.
+    pub fn invalidate_schema(points_path: &Path) -> Result<(), String> {
+        let path = Self::schema_path(points_path);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("remove {}: {e}", path.display())),
+        }
+    }
+
+    fn schema(
+        points_path: &Path,
+        cells_path: &Path,
+        entries_path: &Path,
+        strings_path: &Path,
+    ) -> Result<Value, String> {
+        let len = |path: &Path| -> Result<u64, String> {
+            fs::metadata(path)
+                .map(|m| m.len())
+                .map_err(|e| format!("stat {}: {e}", path.display()))
+        };
+        Ok(json!({
+            "format": "geocoder-address-points",
+            "version": 2,
+            "byte_order": "little",
+            "record": {
+                "size": std::mem::size_of::<AddressPoint>(),
+                "fields": [
+                    ["lat", "f32", std::mem::offset_of!(AddressPoint, lat)],
+                    ["lng", "f32", std::mem::offset_of!(AddressPoint, lng)],
+                    ["housenumber_id", "u32", std::mem::offset_of!(AddressPoint, housenumber_id)],
+                    ["street_id", "u32", std::mem::offset_of!(AddressPoint, street_id)],
+                    ["locality_id", "u32", std::mem::offset_of!(AddressPoint, locality_id)],
+                    ["postcode_id", "u32", std::mem::offset_of!(AddressPoint, postcode_id)],
+                    ["unit_id", "u32", std::mem::offset_of!(AddressPoint, unit_id)],
+                ],
+            },
+            "cells": {"stride": 12, "fields": [
+                ["cell_id", "u64", 0], ["entry_offset", "u32", 8],
+            ]},
+            "entries": {"count": "u16", "point_id": "u32"},
+            "strings": {"encoding": "utf8-nul", "offset_zero": "empty"},
+            "files": {
+                "points": len(points_path)?,
+                "cells": len(cells_path)?,
+                "entries": len(entries_path)?,
+                "strings": len(strings_path)?,
+            },
+        }))
+    }
+
+    /// Publish the schema only after all four files have been written.
+    pub fn write_schema(
+        points_path: &Path,
+        cells_path: &Path,
+        entries_path: &Path,
+        strings_path: &Path,
+    ) -> Result<(), String> {
+        let path = Self::schema_path(points_path);
+        let tmp = path.with_extension("schema.json.tmp");
+        let schema = Self::schema(points_path, cells_path, entries_path, strings_path)?;
+        let bytes = serde_json::to_vec_pretty(&schema).map_err(|e| e.to_string())?;
+        fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        fs::rename(&tmp, &path).map_err(|e| format!("rename {}: {e}", path.display()))
+    }
+
+    /// Open an index by explicit file paths. Returns `Ok(None)` when all
+    /// four files are absent. A partial or old index is an error, since
+    /// silently skipping it would hide a broken deployment.
     pub fn open(
         points_path: &Path,
         cells_path: &Path,
         entries_path: &Path,
         strings_path: &Path,
     ) -> Result<Option<Self>, String> {
-        Self::open_labeled("address_points", points_path, cells_path, entries_path, strings_path)
+        Self::open_labeled(
+            "address_points",
+            points_path,
+            cells_path,
+            entries_path,
+            strings_path,
+        )
     }
 
     /// Same as [`open`], but tags the manifest entries with a caller-supplied
@@ -103,8 +183,53 @@ impl AddressPointIndex {
         strings_path: &Path,
     ) -> Result<Option<Self>, String> {
         let paths = [points_path, cells_path, entries_path, strings_path];
-        if paths.iter().any(|p| !p.exists()) {
+        if paths.iter().all(|p| !p.exists()) {
+            if Self::schema_path(points_path).exists() {
+                return Err(format!(
+                    "{}: schema exists without address-point files",
+                    points_path.display()
+                ));
+            }
             return Ok(None);
+        }
+        let schema_path = Self::schema_path(points_path);
+        let bytes = fs::read(&schema_path).map_err(|e| {
+            format!(
+                "{}: missing/unreadable address-point schema ({e}); rebuild this index",
+                schema_path.display()
+            )
+        })?;
+        let actual: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("{}: invalid schema: {e}", schema_path.display()))?;
+        let expected = Self::schema(points_path, cells_path, entries_path, strings_path)?;
+        if actual != expected {
+            return Err(format!(
+                "{}: address-point schema or file lengths do not match this reader; rebuild this index",
+                schema_path.display()
+            ));
+        }
+        let points_len = fs::metadata(points_path).map_err(|e| e.to_string())?.len() as usize;
+        if points_len == 0 || points_len % std::mem::size_of::<AddressPoint>() != 0 {
+            return Err(format!(
+                "{}: invalid point record length",
+                points_path.display()
+            ));
+        }
+        let cells_len = fs::metadata(cells_path).map_err(|e| e.to_string())?.len();
+        if cells_len == 0 || cells_len % 12 != 0 {
+            return Err(format!(
+                "{}: invalid cell record length",
+                cells_path.display()
+            ));
+        }
+        if fs::metadata(entries_path).map_err(|e| e.to_string())?.len() < 2 {
+            return Err(format!(
+                "{}: missing cell entry header",
+                entries_path.display()
+            ));
+        }
+        if !cfg!(target_endian = "little") {
+            return Err("address-point index requires a little-endian host".into());
         }
         let mmap = |p: &Path| -> Result<Mmap, String> {
             let f = File::open(p).map_err(|e| format!("open {}: {}", p.display(), e))?;
@@ -112,12 +237,19 @@ impl AddressPointIndex {
             crate::log_loaded_file(index_label, &p.display().to_string(), m.len() as u64);
             Ok(m)
         };
-        Ok(Some(AddressPointIndex {
+        let index = AddressPointIndex {
             points: mmap(points_path)?,
             cells: mmap(cells_path)?,
             entries: mmap(entries_path)?,
             strings: mmap(strings_path)?,
-        }))
+        };
+        if index.strings.first() != Some(&0) {
+            return Err(format!(
+                "{}: missing empty-string sentinel",
+                strings_path.display()
+            ));
+        }
+        Ok(Some(index))
     }
 
     /// Convenience: open an index given a directory and a filename prefix
@@ -204,9 +336,7 @@ impl AddressPointIndex {
         let neighbours = origin.all_neighbors(street_level);
 
         let hn_needle = housenumber.trim();
-        let street_needle = street_hint
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+        let street_needle = street_hint.map(str::trim).filter(|s| !s.is_empty());
         let unit_needle = unit_hint.map(str::trim).filter(|s| !s.is_empty());
 
         let cos_lat = near_lat.to_radians().cos();
@@ -288,29 +418,22 @@ impl AddressPointIndex {
         let neighbours = origin.all_neighbors(street_level);
 
         let cos_lat = lat.to_radians().cos();
-        let mut candidate_ids: Vec<u32> = Vec::new();
+        let mut best: Option<(f64, &AddressPoint)> = None;
         for cell in std::iter::once(origin).chain(neighbours.into_iter()) {
             let Some(entry_offset) = lookup_cell_offset(&self.cells, cell.0) else {
                 continue;
             };
-            for_each_point_in_cell(&self.entries, entry_offset, |id| candidate_ids.push(id));
-        }
-
-        let mut best: Option<(f64, &AddressPoint)> = None;
-        for id in candidate_ids {
-            let Some(p) = points.get(id as usize) else {
-                continue;
-            };
-            let dlat = (p.lat as f64 - lat).to_radians();
-            let dlng = (p.lng as f64 - lng).to_radians();
-            let dist = dlat * dlat + dlng * dlng * cos_lat * cos_lat;
-            let take = match best {
-                None => true,
-                Some((best_dist, _)) => dist < best_dist,
-            };
-            if take {
-                best = Some((dist, p));
-            }
+            for_each_point_in_cell(&self.entries, entry_offset, |id| {
+                let Some(p) = points.get(id as usize) else {
+                    return;
+                };
+                let dlat = (p.lat as f64 - lat).to_radians();
+                let dlng = (p.lng as f64 - lng).to_radians();
+                let dist = dlat * dlat + dlng * dlng * cos_lat * cos_lat;
+                if best.map_or(true, |(best_dist, _)| dist < best_dist) {
+                    best = Some((dist, p));
+                }
+            });
         }
         best.map(|(_, p)| self.hydrate(p))
     }

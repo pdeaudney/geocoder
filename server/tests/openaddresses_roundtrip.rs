@@ -3,8 +3,8 @@
 //! the emitted per-country index, and verify find_by_housenumber /
 //! find_nearest resolve correctly.
 //!
-//! Uses a made-up ISO code so we don't collide with any real country's
-//! real index when running the whole suite.
+//! Uses a temporary directory, including a made-up ISO code for the
+//! original roundtrip case and four production country codes for routing.
 
 use query_server::openaddresses::{oa_prefix, OpenAddresses};
 use std::fs;
@@ -12,33 +12,11 @@ use std::path::Path;
 use std::process::Command;
 
 fn build_tool() -> &'static str {
-    // Invoked after `cargo build --release` has populated target/.
-    // Path is relative to the workspace root; tests run from
-    // server/ by default.
-    concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/build-openaddresses-index")
-}
-
-fn ensure_tool_built() {
-    if !Path::new(build_tool()).exists() {
-        let status = Command::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "--manifest-path",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
-                "--bin",
-                "build-openaddresses-index",
-            ])
-            .status()
-            .expect("cargo build");
-        assert!(status.success(), "cargo build failed");
-    }
+    env!("CARGO_BIN_EXE_build-openaddresses-index")
 }
 
 #[test]
 fn tiny_synthetic_batch_roundtrips_through_build_and_query() {
-    ensure_tool_built();
-
     // Use a temp dir so parallel runs of this test don't stomp on each
     // other, and so the emitted bin files don't pollute the repo.
     let tmp = tempdir();
@@ -56,6 +34,22 @@ fn tiny_synthetic_batch_roundtrips_through_build_and_query() {
 150.9804,-33.7372,12,Alysse Close,,Baulkham Hills,,NSW,2153,t3,h3\n\
 150.9808,-33.7373,14,Alysse Close,,Baulkham Hills,,NSW,2153,t4,h4\n";
     fs::write(country_dir.join("test.csv"), csv).expect("write test.csv");
+
+    // These four countries use the same on-disk format but distinct shards.
+    // A successful lookup must use the requested country's file set.
+    for (cc, lon, lat, postcode) in [
+        ("nz", 174.7633, -36.8485, "1010"),
+        ("us", -74.0060, 40.7128, "10007"),
+        ("ca", -79.3832, 43.6532, "M5H2N2"),
+        ("gb", -0.1276, 51.5072, "SW1A1AA"),
+    ] {
+        let dir = csv_root.join(cc);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("test.csv"),
+            format!("LON,LAT,NUMBER,STREET,UNIT,CITY,DISTRICT,REGION,POSTCODE,ID,HASH\n{lon},{lat},11,Example Street,,Example City,,,{postcode},id,hash\n"),
+        ).unwrap();
+    }
 
     // Run the builder with --skip "" so the default AU skip doesn't
     // interfere with our "tt" country.
@@ -81,6 +75,18 @@ fn tiny_synthetic_batch_roundtrips_through_build_and_query() {
         .expect("per-country index should load");
     assert!(oa.has_country(b"tt"));
     assert!(!oa.has_country(b"zz"));
+    for (cc, lon, lat, postcode) in [
+        (b"nz", 174.7633, -36.8485, "1010"),
+        (b"us", -74.0060, 40.7128, "10007"),
+        (b"ca", -79.3832, 43.6532, "M5H2N2"),
+        (b"gb", -0.1276, 51.5072, "SW1A1AA"),
+    ] {
+        assert!(oa.has_country(cc));
+        let hit = oa
+            .find_by_housenumber(cc, "11", Some("Example"), None, lat, lon, 17)
+            .unwrap();
+        assert_eq!(hit.postcode, postcode);
+    }
 
     // Exact housenumber lookup should return the address's registered coord.
     let m = oa
@@ -97,19 +103,32 @@ fn tiny_synthetic_batch_roundtrips_through_build_and_query() {
     let n = oa
         .find_nearest(b"tt", -33.7371, 150.9802, 17)
         .expect("nearest should hit");
-    assert!(matches!(n.housenumber, "11" | "12"), "unexpected {}", n.housenumber);
+    assert!(
+        matches!(n.housenumber, "11" | "12"),
+        "unexpected {}",
+        n.housenumber
+    );
 
     // Wrong country code returns None.
-    assert!(oa.find_by_housenumber(b"zz", "11", None, None, -33.7371, 150.9800, 17).is_none());
+    assert!(oa
+        .find_by_housenumber(b"zz", "11", None, None, -33.7371, 150.9800, 17)
+        .is_none());
 
     cleanup(&tmp);
 }
 
+#[test]
+fn partial_country_shard_fails_to_load() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("oa_gb_cells.bin"), [0u8; 12]).unwrap();
+    let err = OpenAddresses::open(dir.path())
+        .err()
+        .expect("a missing points file must not silently remove GB coverage");
+    assert!(err.contains("schema"), "{err}");
+}
+
 fn tempdir() -> std::path::PathBuf {
-    let base = std::env::temp_dir().join(format!(
-        "oa-roundtrip-{}",
-        std::process::id()
-    ));
+    let base = std::env::temp_dir().join(format!("oa-roundtrip-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).expect("mkdir tempdir");
     base

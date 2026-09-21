@@ -3,9 +3,8 @@
 corpus so our Rust adapter can filter the whole thing by country in
 one pass.
 
-Output schema mirrors Pelias:
-    {"name": "pelias-combined", "endpoint": "search",
-     "tests": [ ...all tests concatenated... ]}
+Each merged case retains its original endpoint, ranking threshold, and
+expectation metadata so the adapter can reject unsupported semantics.
 
 Test IDs are prefixed with the source filename so collisions across
 files don't drop cases.
@@ -29,11 +28,7 @@ def main() -> int:
         print(f"not a dir: {src_dir}", file=sys.stderr)
         return 2
 
-    combined = {
-        "name": "pelias-combined",
-        "endpoint": "search",
-        "tests": [],
-    }
+    combined = {"name": "pelias-combined", "tests": []}
     seen_ids = set()
     for fname in sorted(os.listdir(src_dir)):
         if not fname.endswith(".json"):
@@ -53,17 +48,14 @@ def main() -> int:
             if new_id in seen_ids:
                 continue
             seen_ids.add(new_id)
-            # Keep fields the adapter reads; drop noisy Pelias-only
-            # fields to shrink the intermediate file.
-            combined["tests"].append(
-                {
-                    "id": new_id,
-                    "status": t.get("status"),
-                    "in": t.get("in"),
-                    "expected": t.get("expected"),
-                    "description": t.get("description"),
-                }
-            )
+            merged = dict(t)
+            merged["id"] = new_id
+            merged["endpoint"] = t.get("endpoint") or d.get("endpoint") or "search"
+            merged["priorityThresh"] = t.get("priorityThresh", d.get("priorityThresh", 1))
+            merged["distanceThresh"] = t.get("distanceThresh", d.get("distanceThresh"))
+            merged["normalizers"] = t.get("normalizers", d.get("normalizers"))
+            merged["weights"] = t.get("weights", d.get("weights"))
+            combined["tests"].append(merged)
 
     json.dump(combined, sys.stdout)
     print(f"merged {len(combined['tests'])} tests from {src_dir}", file=sys.stderr)

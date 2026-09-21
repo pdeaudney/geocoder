@@ -70,13 +70,15 @@ impl Geocoder for GeocoderService {
         // (main.rs `reverse_geocode`). Empty string falls through to
         // the default — `query_with_lang` treats `None` as "no
         // override" and `pack_lang_code` rejects sub-2-char tags.
-        let lang = if r.lang.is_empty() { None } else { Some(r.lang.as_str()) };
+        let lang = if r.lang.is_empty() {
+            None
+        } else {
+            Some(r.lang.as_str())
+        };
         let address = snap.query_with_lang(r.lat, r.lon, lang);
         let mut pb = into_pb_address(address);
         pb.h3 = build_h3_proto(r.lat, r.lon, &h3_res);
-        Ok(Response::new(AddressResponse {
-            address: Some(pb),
-        }))
+        Ok(Response::new(AddressResponse { address: Some(pb) }))
     }
 
     #[cfg(feature = "forward")]
@@ -97,7 +99,11 @@ impl Geocoder for GeocoderService {
         check_text("housenumber", &r.housenumber, crate::limits::HOUSENUMBER)?;
         check_text("city", &r.city, crate::limits::STRUCTURED_FIELD)?;
         check_text("state", &r.state, crate::limits::STRUCTURED_FIELD)?;
-        check_text("country_code", &r.country_code, crate::limits::COUNTRY_CODE_LIST)?;
+        check_text(
+            "country_code",
+            &r.country_code,
+            crate::limits::COUNTRY_CODE_LIST,
+        )?;
         let bias = match (r.bias_lat, r.bias_lng) {
             (None, None) => None,
             (Some(_), None) | (None, Some(_)) => {
@@ -122,10 +128,11 @@ impl Geocoder for GeocoderService {
         let kind_filter = match r.kind.as_str() {
             "place" => Some(fwd::KIND_PLACE),
             "street" => Some(fwd::KIND_STREET),
+            "address" => Some(fwd::KIND_ADDRESS),
             "" => None,
             other => {
                 return Err(Status::invalid_argument(format!(
-                    "invalid kind {other:?}; expected 'place' or 'street'"
+                    "invalid kind {other:?}; expected 'place', 'street', or 'address'"
                 )))
             }
         };
@@ -143,6 +150,9 @@ impl Geocoder for GeocoderService {
         let structured = fwd::StructuredQuery {
             q: empty_to_none(&r.q),
             street: empty_to_none(&r.street),
+            housenumber: empty_to_none(&r.housenumber),
+            unit: None,
+            postcode: None,
             city: empty_to_none(&r.city),
             state: empty_to_none(&r.state),
             country_code: empty_to_none(&r.country_code),
@@ -159,7 +169,10 @@ impl Geocoder for GeocoderService {
         let mut out = Vec::with_capacity(hits.len());
         for hit in hits {
             let cc_bytes = parse_cc(&r.country_code);
-            let (lat, lon, matched_hn) = if let Some(hn) = housenumber.as_deref() {
+            let (lat, lon, matched_hn) = if hit.kind == fwd::KIND_ADDRESS {
+                (hit.lat, hit.lng, hit.housenumber.clone())
+            } else if hit.kind == fwd::KIND_STREET && housenumber.is_some() {
+                let hn = housenumber.as_deref().unwrap();
                 match snap.find_addr_point_in_country(
                     hn,
                     Some(&hit.name),
@@ -175,16 +188,66 @@ impl Geocoder for GeocoderService {
                 (hit.lat, hit.lng, None)
             };
             let enriched = snap.query(lat, lon);
-            let details = into_pb_details(&enriched.address, matched_hn.as_deref());
+            let mut details = into_pb_details(&enriched.address, matched_hn.as_deref());
+            let exact = hit.kind == fwd::KIND_ADDRESS;
+            if let Some(city) = &hit.suburb {
+                details.city = city.clone();
+            }
+            if let Some(state) = &hit.state {
+                details.state = state.clone();
+            }
+            if let Some(cc) = &hit.country_code {
+                details.country_code = cc.clone();
+            }
+            if exact {
+                details.road = hit.name.clone();
+                if let Some(postcode) = &hit.postcode {
+                    details.postcode = postcode.clone();
+                }
+            } else {
+                if hit.kind == fwd::KIND_STREET {
+                    details.road = hit.name.clone();
+                } else {
+                    details.road.clear();
+                }
+                if matched_hn.is_none() {
+                    details.house_number.clear();
+                    details.postcode.clear();
+                }
+            }
+            let name = if exact || matched_hn.is_some() {
+                format!("{} {}", details.house_number, hit.name)
+                    .trim()
+                    .to_owned()
+            } else {
+                hit.name
+            };
+            // A nearby reverse address must not become the label for a
+            // place or POI hit. Use the forward identity and admin fields.
+            let display_name = [
+                name.as_str(),
+                if details.city.eq_ignore_ascii_case(&name) {
+                    ""
+                } else {
+                    &details.city
+                },
+                &details.state,
+                &details.postcode,
+                &details.country,
+            ]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
             let h3 = build_h3_proto(lat, lon, &h3_res);
             out.push(PbSearchHit {
-                name: hit.name,
+                name,
                 kind: hit.kind as u32,
                 rank: hit.rank as u32,
                 score: hit.score,
                 lat,
                 lon,
-                display_name: enriched.display_name.unwrap_or_default(),
+                display_name,
                 address: Some(details),
                 h3,
             });
@@ -219,7 +282,11 @@ impl Geocoder for GeocoderService {
     ) -> Result<Response<NearbyResponse>, Status> {
         let r = req.into_inner();
         check_text("q", &r.q, crate::limits::SEARCH_Q)?;
-        check_text("country_code", &r.country_code, crate::limits::COUNTRY_CODE_LIST)?;
+        check_text(
+            "country_code",
+            &r.country_code,
+            crate::limits::COUNTRY_CODE_LIST,
+        )?;
         let span = tracing::Span::current();
         span.record("geocoder.lat", r.lat);
         span.record("geocoder.lng", r.lng);
@@ -323,7 +390,11 @@ impl Geocoder for GeocoderService {
         check_text("city", &r.city, crate::limits::STRUCTURED_FIELD)?;
         check_text("state", &r.state, crate::limits::STRUCTURED_FIELD)?;
         check_text("postcode", &r.postcode, crate::limits::POSTCODE)?;
-        check_text("country_code", &r.country_code, crate::limits::COUNTRY_CODE_LIST)?;
+        check_text(
+            "country_code",
+            &r.country_code,
+            crate::limits::COUNTRY_CODE_LIST,
+        )?;
         let span = tracing::Span::current();
         if !r.country_code.is_empty() {
             span.record("geocoder.country_code", r.country_code.as_str());
@@ -385,8 +456,10 @@ impl Geocoder for GeocoderService {
             (top.lat, top.lng, false, "interpolated".to_string())
         };
         let canonical = snap.query(lat, lon);
-        tracing::Span::current()
-            .record("geocoder.outcome", if verified { "exact" } else { "fallback" });
+        tracing::Span::current().record(
+            "geocoder.outcome",
+            if verified { "exact" } else { "fallback" },
+        );
         let h3 = build_h3_proto(lat, lon, &h3_res);
         Ok(Response::new(ValidateResponse {
             verified,
@@ -432,7 +505,11 @@ impl Geocoder for GeocoderService {
             n => n.min(50) as usize,
         };
         let hits = if let Some(cc) = parse_cc(&r.country_code) {
-            a.search(&[cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()], &r.q, limit)
+            a.search(
+                &[cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()],
+                &r.q,
+                limit,
+            )
         } else {
             a.search_any(&r.q, limit)
         };
@@ -536,8 +613,7 @@ impl Geocoder for GeocoderService {
                 Status::invalid_argument("ip is required when no peer address is available")
             })?
         } else {
-            r.ip
-                .parse()
+            r.ip.parse()
                 .map_err(|_| Status::invalid_argument(format!("invalid ip {:?}", r.ip)))?
         };
         tracing::Span::current().record("geocoder.client_ip", tracing::field::display(&ip));

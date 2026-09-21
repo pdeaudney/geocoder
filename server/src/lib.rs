@@ -19,10 +19,10 @@ pub mod autocomplete;
 pub mod fetcher;
 pub mod geo;
 pub mod gnaf;
+pub mod h3_cell;
 pub mod housenumber;
 pub mod i18n;
 pub mod ip_geo;
-pub mod h3_cell;
 pub mod limits;
 pub mod manifest;
 pub mod metrics;
@@ -98,6 +98,9 @@ pub struct AddrPoint {
     /// 0 if absent. Forward indexer prefers this over geometric
     /// `find_admin()` enrichment when non-zero.
     pub parent_place_id: u32,
+    /// Tagged `addr:postcode`, 0 if absent. Search uses the value on
+    /// this exact point rather than a postcode inferred nearby.
+    pub postcode_id: u32,
     pub flags: u8,
     pub _pad: [u8; 3],
 }
@@ -298,7 +301,9 @@ fn mmap_file(path: &str) -> Result<Mmap, String> {
 }
 
 fn mmap_file_optional(path: &str) -> Option<Mmap> {
-    let mmap = File::open(path).ok().and_then(|f| unsafe { Mmap::map(&f).ok() })?;
+    let mmap = File::open(path)
+        .ok()
+        .and_then(|f| unsafe { Mmap::map(&f).ok() })?;
     log_loaded_file("reverse", path, mmap.len() as u64);
     Some(mmap)
 }
@@ -366,7 +371,12 @@ fn mmap_nonempty(path: &str, role: &str) -> Result<Mmap, String> {
 }
 
 impl Index {
-    pub fn load(dir: &str, street_cell_level: u64, admin_cell_level: u64, search_distance: f64) -> Result<Self, String> {
+    pub fn load(
+        dir: &str,
+        street_cell_level: u64,
+        admin_cell_level: u64,
+        search_distance: f64,
+    ) -> Result<Self, String> {
         Self::load_with_admin_config(
             dir,
             street_cell_level,
@@ -383,6 +393,7 @@ impl Index {
         search_distance: f64,
         admin_config: AdminConfig,
     ) -> Result<Self, String> {
+        manifest::verify_reverse(Path::new(dir))?;
         let meters_to_rad = search_distance / 111_320.0;
         let max_distance_sq = meters_to_rad * meters_to_rad;
         let postcode_lookup = PostcodeLookup::open(Path::new(dir))?;
@@ -395,23 +406,57 @@ impl Index {
         // need to be non-empty; the reader validates per-cell structure
         // on each access.
         let geo_cells = mmap_records(&format!("{}/geo_cells.bin", dir), 20, "GeoCell")?;
-        let street_entries = mmap_nonempty(&format!("{}/street_entries.bin", dir), "street entries")?;
-        let street_ways = mmap_records(&format!("{}/street_ways.bin", dir), std::mem::size_of::<WayHeader>(), "WayHeader")?;
-        let street_nodes = mmap_records(&format!("{}/street_nodes.bin", dir), std::mem::size_of::<NodeCoord>(), "NodeCoord")?;
+        let street_entries =
+            mmap_nonempty(&format!("{}/street_entries.bin", dir), "street entries")?;
+        let street_ways = mmap_records(
+            &format!("{}/street_ways.bin", dir),
+            std::mem::size_of::<WayHeader>(),
+            "WayHeader",
+        )?;
+        let street_nodes = mmap_records(
+            &format!("{}/street_nodes.bin", dir),
+            std::mem::size_of::<NodeCoord>(),
+            "NodeCoord",
+        )?;
         let addr_entries = mmap_nonempty(&format!("{}/addr_entries.bin", dir), "addr entries")?;
-        let addr_points = mmap_records(&format!("{}/addr_points.bin", dir), std::mem::size_of::<AddrPoint>(), "AddrPoint")?;
-        let interp_entries = mmap_nonempty(&format!("{}/interp_entries.bin", dir), "interp entries")?;
-        let interp_ways = mmap_records(&format!("{}/interp_ways.bin", dir), std::mem::size_of::<InterpWay>(), "InterpWay")?;
-        let interp_nodes = mmap_records(&format!("{}/interp_nodes.bin", dir), std::mem::size_of::<NodeCoord>(), "NodeCoord")?;
+        let addr_points = mmap_records(
+            &format!("{}/addr_points.bin", dir),
+            std::mem::size_of::<AddrPoint>(),
+            "AddrPoint",
+        )?;
+        let interp_entries =
+            mmap_nonempty(&format!("{}/interp_entries.bin", dir), "interp entries")?;
+        let interp_ways = mmap_records(
+            &format!("{}/interp_ways.bin", dir),
+            std::mem::size_of::<InterpWay>(),
+            "InterpWay",
+        )?;
+        let interp_nodes = mmap_records(
+            &format!("{}/interp_nodes.bin", dir),
+            std::mem::size_of::<NodeCoord>(),
+            "NodeCoord",
+        )?;
         let admin_cells = mmap_nonempty(&format!("{}/admin_cells.bin", dir), "admin cells")?;
         let admin_entries = mmap_nonempty(&format!("{}/admin_entries.bin", dir), "admin entries")?;
-        let admin_polygons = mmap_records(&format!("{}/admin_polygons.bin", dir), std::mem::size_of::<AdminPolygon>(), "AdminPolygon")?;
-        let admin_vertices = mmap_records(&format!("{}/admin_vertices.bin", dir), std::mem::size_of::<NodeCoord>(), "NodeCoord")?;
+        let admin_polygons = mmap_records(
+            &format!("{}/admin_polygons.bin", dir),
+            std::mem::size_of::<AdminPolygon>(),
+            "AdminPolygon",
+        )?;
+        let admin_vertices = mmap_records(
+            &format!("{}/admin_vertices.bin", dir),
+            std::mem::size_of::<NodeCoord>(),
+            "NodeCoord",
+        )?;
         // Place files are optional (old indexes may not have them); when
         // present, they still have to be well-formed.
         let place_points_path = format!("{}/place_points.bin", dir);
         let place_points = if Path::new(&place_points_path).exists() {
-            Some(mmap_records(&place_points_path, std::mem::size_of::<PlacePoint>(), "PlacePoint")?)
+            Some(mmap_records(
+                &place_points_path,
+                std::mem::size_of::<PlacePoint>(),
+                "PlacePoint",
+            )?)
         } else {
             None
         };
@@ -423,7 +468,11 @@ impl Index {
         // POI documents.
         let poi_points_path = format!("{}/poi_points.bin", dir);
         let poi_points = if Path::new(&poi_points_path).exists() {
-            Some(mmap_records(&poi_points_path, std::mem::size_of::<PoiPoint>(), "PoiPoint")?)
+            Some(mmap_records(
+                &poi_points_path,
+                std::mem::size_of::<PoiPoint>(),
+                "PoiPoint",
+            )?)
         } else {
             None
         };
@@ -465,6 +514,13 @@ impl Index {
     }
 
     pub fn get_string(&self, offset: u32) -> &str {
+        // Zero is the missing-value sentinel in every optional OSM
+        // string field. Older builders also assigned it to their first
+        // real string, so treating it as empty avoids false units and
+        // postcodes while those indexes are replaced.
+        if offset == 0 {
+            return "";
+        }
         let bytes = &self.strings[offset as usize..];
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
         std::str::from_utf8(&bytes[..end]).unwrap_or("")
@@ -493,13 +549,19 @@ impl Index {
     }
 
     fn for_each_entry(entries: &[u8], offset: u32, mut f: impl FnMut(u32)) {
-        if offset == NO_DATA { return; }
+        if offset == NO_DATA {
+            return;
+        }
         let offset = offset as usize;
-        if offset + 2 > entries.len() { return; }
+        if offset + 2 > entries.len() {
+            return;
+        }
 
         let id_count = Self::read_u16(entries, offset) as usize;
         let data_start = offset + 2;
-        if data_start + id_count * 4 > entries.len() { return; }
+        if data_start + id_count * 4 > entries.len() {
+            return;
+        }
 
         for i in 0..id_count {
             f(Self::read_u32(entries, data_start + i * 4));
@@ -509,8 +571,14 @@ impl Index {
     fn lookup_geo_cell(cells: &[u8], cell_id: u64) -> GeoCellOffsets {
         let entry_size: usize = 20;
         let count = cells.len() / entry_size;
-        let empty = GeoCellOffsets { street: NO_DATA, addr: NO_DATA, interp: NO_DATA };
-        if count == 0 { return empty; }
+        let empty = GeoCellOffsets {
+            street: NO_DATA,
+            addr: NO_DATA,
+            interp: NO_DATA,
+        };
+        if count == 0 {
+            return empty;
+        }
 
         let mut lo = 0usize;
         let mut hi = count;
@@ -535,7 +603,9 @@ impl Index {
     fn lookup_admin_cell(cells: &[u8], cell_id: u64) -> u32 {
         let entry_size: usize = 12;
         let count = cells.len() / entry_size;
-        if count == 0 { return NO_DATA; }
+        if count == 0 {
+            return NO_DATA;
+        }
 
         let mut lo = 0usize;
         let mut hi = count;
@@ -553,7 +623,15 @@ impl Index {
         NO_DATA
     }
 
-    pub fn query_geo(&self, lat: f64, lng: f64) -> (Option<(f64, &AddrPoint)>, Option<(f64, &str, u32)>, Option<(f64, &WayHeader)>) {
+    pub fn query_geo(
+        &self,
+        lat: f64,
+        lng: f64,
+    ) -> (
+        Option<(f64, &AddrPoint)>,
+        Option<(f64, &str, u32)>,
+        Option<(f64, &WayHeader)>,
+    ) {
         let cell = cell_id_at_level(lat, lng, self.street_cell_level);
         let neighbors = cell_neighbors_at_level(cell, self.street_cell_level);
 
@@ -620,9 +698,12 @@ impl Index {
 
                 for i in 0..nodes.len() - 1 {
                     let dist = point_to_segment_distance(
-                        lat, lng,
-                        nodes[i].lat as f64, nodes[i].lng as f64,
-                        nodes[i + 1].lat as f64, nodes[i + 1].lng as f64,
+                        lat,
+                        lng,
+                        nodes[i].lat as f64,
+                        nodes[i].lng as f64,
+                        nodes[i + 1].lat as f64,
+                        nodes[i + 1].lng as f64,
                         cos_lat,
                     );
                     if dist < best_street_dist {
@@ -634,7 +715,9 @@ impl Index {
 
             Self::for_each_entry(&self.interp_entries, offsets.interp, |id| {
                 let iw = &all_interps[id as usize];
-                if iw.start_number == 0 || iw.end_number == 0 { return; }
+                if iw.start_number == 0 || iw.end_number == 0 {
+                    return;
+                }
 
                 let offset = iw.node_offset as usize;
                 let count = iw.node_count as usize;
@@ -694,30 +777,46 @@ impl Index {
         const ID_MASK: u32 = 0x7FFFFFFF;
 
         for c in std::iter::once(cell).chain(neighbors.into_iter()) {
-            Self::for_each_entry(&self.admin_entries, Self::lookup_admin_cell(&self.admin_cells, c), |id| {
-                let is_interior = (id & INTERIOR_FLAG) != 0;
-                let poly_id = (id & ID_MASK) as usize;
-                if poly_id >= all_polygons.len() { return; }
-                let poly = &all_polygons[poly_id];
-                let level = poly.admin_level as usize;
-                if level >= 12 { return; }
+            Self::for_each_entry(
+                &self.admin_entries,
+                Self::lookup_admin_cell(&self.admin_cells, c),
+                |id| {
+                    let is_interior = (id & INTERIOR_FLAG) != 0;
+                    let poly_id = (id & ID_MASK) as usize;
+                    if poly_id >= all_polygons.len() {
+                        return;
+                    }
+                    let poly = &all_polygons[poly_id];
+                    let level = poly.admin_level as usize;
+                    if level >= 12 {
+                        return;
+                    }
 
-                if let Some((best_area, _)) = best_by_level[level] {
-                    if poly.area >= best_area { return; }
-                }
+                    if let Some((best_area, _)) = best_by_level[level] {
+                        if poly.area >= best_area {
+                            return;
+                        }
+                    }
 
-                let offset = poly.vertex_offset as usize;
-                let count = poly.vertex_count as usize;
-                // Defensive: reject out-of-range vertex slices from a
-                // corrupt admin_polygons.bin / admin_vertices.bin pair
-                // rather than panicking the worker.
-                if offset + count > all_vertices.len() || count < 3 {
-                    return;
-                }
-                if is_interior || point_in_polygon_f64(lat, lng, &all_vertices[offset..offset + count]) {
-                    best_by_level[level] = Some((poly.area, poly));
-                }
-            });
+                    let offset = poly.vertex_offset as usize;
+                    let count = poly.vertex_count as usize;
+                    // Defensive: reject out-of-range vertex slices from a
+                    // corrupt admin_polygons.bin / admin_vertices.bin pair
+                    // rather than panicking the worker.
+                    if offset + count > all_vertices.len() || count < 3 {
+                        return;
+                    }
+                    // The interior flag proves containment only for the cell
+                    // carrying it. We also scan neighbouring cells to catch
+                    // boundary polygons; trusting their flags would assign a
+                    // point to a neighbouring state or city across the border.
+                    if (is_interior && c == cell)
+                        || point_in_polygon_f64(lat, lng, &all_vertices[offset..offset + count])
+                    {
+                        best_by_level[level] = Some((poly.area, poly));
+                    }
+                },
+            );
         }
 
         let mut result = AdminResult::default();
@@ -766,7 +865,9 @@ impl Index {
         // `server/config/admin-mapping.json` for the defaults and per-country
         // overrides.
         for level in 0..12usize {
-            let Some((_, poly)) = best_by_level[level] else { continue };
+            let Some((_, poly)) = best_by_level[level] else {
+                continue;
+            };
             if poly.admin_level == 2 {
                 continue; // already handled above
             }
@@ -818,6 +919,29 @@ impl Index {
         result
     }
 
+    /// Admin context with the same nearby-place city fallback used by
+    /// reverse responses. Forward documents must index this city too,
+    /// otherwise an address displayed as "Ottawa" cannot be found by
+    /// a query that includes Ottawa.
+    pub fn find_admin_with_place(&self, lat: f64, lng: f64) -> AdminResult<'_> {
+        let mut admin = self.find_admin(lat, lng);
+        if admin.city.is_none() && admin.country.is_some() {
+            if let Some(place) = self.find_place(lat, lng) {
+                let place_admin = self.find_admin(place.lat, place.lng);
+                let same_state = admin
+                    .state
+                    .is_none_or(|state| place_admin.state == Some(state));
+                let same_country = admin
+                    .country_code
+                    .is_none_or(|cc| place_admin.country_code == Some(cc));
+                if same_state && same_country {
+                    admin.city = Some(place.name);
+                }
+            }
+        }
+        admin
+    }
+
     /// Nearest-neighbour lookup over `place=*` points within the 9-cell
     /// admin neighbourhood, preferring more prominent features: a nearby
     /// city beats a closer hamlet, a nearby suburb beats a closer farm.
@@ -867,6 +991,8 @@ impl Index {
         best.map(|(_, _, p)| PlaceMatch {
             name: self.get_string(p.name_id),
             rank: p.rank,
+            lat: p.lat as f64,
+            lng: p.lng as f64,
         })
     }
 
@@ -1040,7 +1166,11 @@ impl Index {
             ) {
                 span.record(
                     "geocoder.address.source",
-                    format!("open_addresses_{}", String::from_utf8_lossy(cc).to_ascii_lowercase()).as_str(),
+                    format!(
+                        "open_addresses_{}",
+                        String::from_utf8_lossy(cc).to_ascii_lowercase()
+                    )
+                    .as_str(),
                 );
                 return Some(AddrPointMatch {
                     lat: m.lat,
@@ -1066,9 +1196,7 @@ impl Index {
         if hn_needle.is_empty() {
             return None;
         }
-        let street_hint = street_name_hint
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+        let street_hint = street_name_hint.map(str::trim).filter(|s| !s.is_empty());
         let unit_needle = unit_hint.map(str::trim).filter(|s| !s.is_empty());
 
         let cos_lat = near_lat.to_radians().cos();
@@ -1152,8 +1280,16 @@ impl Index {
                 lng: p.lng as f64,
                 housenumber: self.get_string(p.housenumber_id),
                 street: if is_place { "" } else { primary },
-                unit: if p.unit_id != 0 { self.get_string(p.unit_id) } else { "" },
-                floor: if p.floor_id != 0 { self.get_string(p.floor_id) } else { "" },
+                unit: if p.unit_id != 0 {
+                    self.get_string(p.unit_id)
+                } else {
+                    ""
+                },
+                floor: if p.floor_id != 0 {
+                    self.get_string(p.floor_id)
+                } else {
+                    ""
+                },
                 parent_place: if is_place {
                     primary
                 } else if p.parent_place_id != 0 {
@@ -1166,7 +1302,11 @@ impl Index {
         });
         tracing::Span::current().record(
             "geocoder.address.source",
-            if result.is_some() { "osm_addr_points" } else { "none" },
+            if result.is_some() {
+                "osm_addr_points"
+            } else {
+                "none"
+            },
         );
         result
     }
@@ -1177,8 +1317,12 @@ impl Index {
     pub fn query_with_lang(&self, lat: f64, lng: f64, lang: Option<&str>) -> Address<'_> {
         let (mut address, admin) = self.query_and_admin(lat, lng);
         let Some(lang) = lang else { return address };
-        let Some(code) = pack_lang_code(lang) else { return address };
-        let Some(i18n) = self.i18n_names.as_ref() else { return address };
+        let Some(code) = pack_lang_code(lang) else {
+            return address;
+        };
+        let Some(i18n) = self.i18n_names.as_ref() else {
+            return address;
+        };
 
         // Apply the i18n override for each admin field that carries a
         // poly_id. Fields set via place=* fallback have no poly_id and
@@ -1225,24 +1369,7 @@ impl Index {
     fn query_and_admin(&self, lat: f64, lng: f64) -> (Address<'_>, AdminResult<'_>) {
         let max_dist = self.max_distance_sq;
 
-        let mut admin = self.find_admin(lat, lng);
-
-        // Fallback: if admin boundaries didn't produce a city, look up the
-        // nearest `place=*` point. This fills the gap in rural areas where
-        // admin polygons don't cover every populated place. Only applies
-        // when we have *some* admin context (country/state) — offshore
-        // queries still return nothing.
-        if admin.city.is_none() && admin.country.is_some() {
-            if let Some(place) = self.find_place(lat, lng) {
-                // Rank 16 = city/town/village → city. Rank 19 = suburb — put
-                // in city too since our schema has no dedicated suburb field
-                // and the suburb is still the right postal locality.
-                admin.city = Some(place.name);
-                // Hamlets (rank 20) and other rare ranks fall through
-                // unchanged; the match arm above runs for any rank.
-                let _ = place.rank;
-            }
-        }
+        let mut admin = self.find_admin_with_place(lat, lng);
 
         // Postcode fallback ladder, in decreasing accuracy:
         //   1. G-NAF nearest address point (exact per-address postcode, AU)
@@ -1265,6 +1392,11 @@ impl Index {
             .as_ref()
             .map(|c| [c[0].to_ascii_lowercase(), c[1].to_ascii_lowercase()]);
         let is_au = country_code_lower.as_ref().is_some_and(|c| c == b"au");
+        let oa_match = self.open_addresses.as_ref().and_then(|oa| {
+            country_code_lower
+                .as_ref()
+                .and_then(|cc| oa.find_nearest(cc, lat, lng, self.street_cell_level))
+        });
 
         if admin.postcode.is_none() && is_au {
             if let Some(gnaf) = &self.gnaf {
@@ -1276,21 +1408,15 @@ impl Index {
             }
         }
         if admin.postcode.is_none() {
-            if let (Some(oa), Some(cc)) = (&self.open_addresses, country_code_lower.as_ref()) {
-                if let Some(m) = oa.find_nearest(cc, lat, lng, self.street_cell_level) {
-                    if !m.postcode.is_empty() {
-                        admin.postcode = Some(m.postcode);
-                    }
-                }
+            if let Some(m) = oa_match.as_ref().filter(|m| !m.postcode.is_empty()) {
+                admin.postcode = Some(m.postcode);
             }
         }
         if admin.postcode.is_none() && is_au {
             if let (Some(lookup), Some(cc_bytes), Some(locality)) =
                 (&self.postcode_lookup, admin.country_code, admin.city)
             {
-                if let Some(state_abbr) =
-                    country_to_state_abbreviation(&cc_bytes, admin.state)
-                {
+                if let Some(state_abbr) = country_to_state_abbreviation(&cc_bytes, admin.state) {
                     admin.postcode = lookup.postcode(state_abbr, locality);
                 }
             }
@@ -1307,9 +1433,35 @@ impl Index {
         // `fallback` = only the street centroid / admin polygon hit.
         let mut confidence_level: Option<&'static str> = None;
 
-        if let Some((dist, point)) = addr {
+        // An OA address at the requested coordinate should beat a different
+        // OSM house farther down the street. The existing OSM path wins ties.
+        let oa_address = oa_match.as_ref().filter(|m| {
+            if m.housenumber.is_empty() || m.street.is_empty() {
+                return false;
+            }
+            let dist = dist_sq(
+                (m.lat - lat).to_radians(),
+                (m.lng - lng).to_radians(),
+                lat.to_radians().cos(),
+            );
+            dist < max_dist && addr.map_or(true, |(osm_dist, _)| dist < osm_dist)
+        });
+        if let Some(m) = oa_address {
+            house_number = Some(Cow::Borrowed(m.housenumber));
+            road = Some(m.street);
+            if !m.postcode.is_empty() {
+                admin.postcode = Some(m.postcode);
+            }
+            if admin.city.is_none() && !m.locality.is_empty() {
+                admin.city = Some(m.locality);
+            }
+            confidence_level = Some(confidence::EXACT);
+        } else if let Some((dist, point)) = addr {
             if dist < max_dist {
                 house_number = Some(Cow::Borrowed(self.get_string(point.housenumber_id)));
+                if admin.postcode.is_none() && point.postcode_id != 0 {
+                    admin.postcode = Some(self.get_string(point.postcode_id));
+                }
                 // For addr:place addresses, street_or_place_id holds
                 // the place name; surface it as the city/locality
                 // (handled by the AddrPointMatch path / admin merge
@@ -1382,7 +1534,9 @@ impl Index {
             county: admin.county,
             postcode: admin.postcode,
             country: admin.country,
-            country_code: admin.country_code.map(|c| String::from_utf8_lossy(&c).into_owned()),
+            country_code: admin
+                .country_code
+                .map(|c| String::from_utf8_lossy(&c).into_owned()),
         };
         let display_name = format_address(&address);
         let out = Address {
@@ -1477,9 +1631,12 @@ pub fn dist_sq(dlat: f64, dlng: f64, cos_lat: f64) -> f64 {
 }
 
 pub fn point_to_segment_with_t(
-    px: f64, py: f64,
-    ax: f64, ay: f64,
-    bx: f64, by: f64,
+    px: f64,
+    py: f64,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
     cos_lat: f64,
 ) -> (f64, f64) {
     let dx = bx - ax;
@@ -1500,9 +1657,12 @@ pub fn point_to_segment_with_t(
 }
 
 pub fn point_to_segment_distance(
-    px: f64, py: f64,
-    ax: f64, ay: f64,
-    bx: f64, by: f64,
+    px: f64,
+    py: f64,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
     cos_lat: f64,
 ) -> f64 {
     point_to_segment_with_t(px, py, ax, ay, bx, by, cos_lat).0
@@ -1582,7 +1742,9 @@ pub fn point_in_polygon(lat: f32, lng: f32, vertices: &[NodeCoord]) -> bool {
 pub fn point_in_polygon_f64(lat: f64, lng: f64, vertices: &[NodeCoord]) -> bool {
     let mut inside = false;
     let n = vertices.len();
-    if n == 0 { return false; }
+    if n == 0 {
+        return false;
+    }
     let mut j = n - 1;
 
     for i in 0..n {
@@ -1633,6 +1795,8 @@ pub struct AdminResult<'a> {
 pub struct PlaceMatch<'a> {
     pub name: &'a str,
     pub rank: u8,
+    pub lat: f64,
+    pub lng: f64,
 }
 
 /// Result of `find_poi`: a nearby POI with its name, category
@@ -1722,9 +1886,8 @@ pub mod confidence {
 
 pub fn format_rules(country_code: Option<&str>) -> (bool, bool, bool) {
     match country_code {
-        Some("US") | Some("CA") | Some("AU") | Some("NZ")
-        | Some("GB") | Some("IE") | Some("ZA") | Some("IN")
-        | Some("NG") | Some("KE") | Some("GH") | Some("PK")
+        Some("US") | Some("CA") | Some("AU") | Some("NZ") | Some("GB") | Some("IE")
+        | Some("ZA") | Some("IN") | Some("NG") | Some("KE") | Some("GH") | Some("PK")
         | Some("PH") | Some("TH") | Some("MY") => (false, false, true),
 
         Some("JP") | Some("KR") | Some("CN") | Some("TW") => (false, true, true),
@@ -1738,7 +1901,8 @@ pub fn format_address(addr: &AddressDetails<'_>) -> Option<String> {
         return None;
     }
 
-    let (number_after, postcode_before_city, include_state) = format_rules(addr.country_code.as_deref());
+    let (number_after, postcode_before_city, include_state) =
+        format_rules(addr.country_code.as_deref());
 
     // Conservative upper bound sized to fit a typical full address without
     // reallocation. One allocation (the backing buffer) covers the whole call.
@@ -1826,5 +1990,9 @@ pub fn format_address(addr: &AddressDetails<'_>) -> Option<String> {
         out.push_str(country);
     }
 
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }

@@ -9,13 +9,34 @@ use query_server::{
 
 fn load_index() -> Option<Index> {
     let dir = std::env::var("GEOCODER_INDEX_DIR").ok()?;
-    Index::load(
-        &dir,
-        DEFAULT_STREET_CELL_LEVEL,
-        DEFAULT_ADMIN_CELL_LEVEL,
-        DEFAULT_SEARCH_DISTANCE,
+    assert!(
+        std::path::Path::new(&dir).exists(),
+        "GEOCODER_INDEX_DIR does not exist: {dir}"
+    );
+    Some(
+        Index::load(
+            &dir,
+            DEFAULT_STREET_CELL_LEVEL,
+            DEFAULT_ADMIN_CELL_LEVEL,
+            DEFAULT_SEARCH_DISTANCE,
+        )
+        .expect("load reverse index"),
     )
-    .ok()
+}
+
+#[test]
+fn major_state_polygons_cover_their_capitals() {
+    let Some(index) = load_index() else { return };
+    for (name, lat, lng, expected) in [
+        ("Sydney", -33.8688, 151.2093, "New South Wales"),
+        ("Melbourne", -37.8136, 144.9631, "Victoria"),
+        ("Brisbane", -27.4698, 153.0251, "Queensland"),
+        ("Toronto", 43.6532, -79.3832, "Ontario"),
+        ("New York", 40.7580, -73.9855, "New York"),
+        ("Miami", 25.7617, -80.1918, "Florida"),
+    ] {
+        assert_eq!(index.find_admin(lat, lng).state, Some(expected), "{name}");
+    }
 }
 
 #[test]
@@ -50,10 +71,10 @@ fn dump_admin_levels_for_au_fixtures() {
     // *contains* the query point, grouped by level.
     let fixtures = [
         ("sydney_cbd", -33.8745, 151.2090),
-        ("bondi",      -33.8915, 151.2767),
-        ("melbourne",  -37.8183, 144.9671),
-        ("canberra",   -35.3080, 149.1245),
-        ("coober_pedy",-29.0135, 134.7546),
+        ("bondi", -33.8915, 151.2767),
+        ("melbourne", -37.8183, 144.9671),
+        ("canberra", -35.3080, 149.1245),
+        ("coober_pedy", -29.0135, 134.7546),
         ("baulkham_hills", -33.7369, 150.9803),
     ];
 
@@ -119,14 +140,16 @@ fn dump_admin_levels_for_au_fixtures() {
                 let poly_id = raw & 0x7FFFFFFF;
                 // (no dedup — show every candidate)
                 let poly = &all_polys[poly_id as usize];
-                let verts = &all_vertices
-                    [poly.vertex_offset as usize..poly.vertex_offset as usize + poly.vertex_count as usize];
-                let hits = is_interior || point_in_polygon_f64(lat, lng, verts);
+                let verts = &all_vertices[poly.vertex_offset as usize
+                    ..poly.vertex_offset as usize + poly.vertex_count as usize];
+                let hits = (is_interior && c == cell) || point_in_polygon_f64(lat, lng, verts);
                 if hits {
                     let name_str = {
                         let bytes = &index.strings[poly.name_id as usize..];
                         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-                        std::str::from_utf8(&bytes[..end]).unwrap_or("?").to_string()
+                        std::str::from_utf8(&bytes[..end])
+                            .unwrap_or("?")
+                            .to_string()
                     };
                     eprintln!(
                         "  hit  level={:>2}  area={:>10.4}  interior={}  name={}",

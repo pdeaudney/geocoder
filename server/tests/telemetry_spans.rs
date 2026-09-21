@@ -44,7 +44,10 @@ impl CaptureBuf {
 
 impl Write for CaptureBuf {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("capture buffer poisoned").extend_from_slice(b);
+        self.0
+            .lock()
+            .expect("capture buffer poisoned")
+            .extend_from_slice(b);
         Ok(b.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -117,11 +120,7 @@ fn log_loaded_file_emits_manifest_line() {
     std::fs::write(&path, b"hello world").expect("write temp file");
 
     let (buf, _guard) = capture_json();
-    query_server::log_loaded_file(
-        "test_index",
-        path.to_str().expect("utf-8 path"),
-        11,
-    );
+    query_server::log_loaded_file("test_index", path.to_str().expect("utf-8 path"), 11);
     drop(_guard);
 
     let events = buf.lines();
@@ -129,17 +128,30 @@ fn log_loaded_file_emits_manifest_line() {
         .iter()
         .find(|e| e.get("target").and_then(|t| t.as_str()) == Some("query_server::manifest"))
         .expect("expected at least one manifest line on query_server::manifest target");
-    let fields = manifest_line.get("fields").expect("event has fields object");
-    assert_eq!(fields.get("index").and_then(|v| v.as_str()), Some("test_index"));
+    let fields = manifest_line
+        .get("fields")
+        .expect("event has fields object");
+    assert_eq!(
+        fields.get("index").and_then(|v| v.as_str()),
+        Some("test_index")
+    );
     assert_eq!(fields.get("size_bytes").and_then(|v| v.as_u64()), Some(11));
     assert!(
-        fields.get("path").and_then(|v| v.as_str()).expect("path field").ends_with("synthetic.bin"),
+        fields
+            .get("path")
+            .and_then(|v| v.as_str())
+            .expect("path field")
+            .ends_with("synthetic.bin"),
         "path field should reference the temp file"
     );
     // mtime_unix is "now" — we just check it's a positive integer rather
     // than pinning a specific timestamp.
     assert!(
-        fields.get("mtime_unix").and_then(|v| v.as_u64()).unwrap_or(0) > 0,
+        fields
+            .get("mtime_unix")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            > 0,
         "mtime_unix should be populated for an existing file"
     );
 }
@@ -217,10 +229,19 @@ fn forward_search_records_stage_progression() {
         .filter_map(|e| e.get("span"))
         .find(|s| s.get("name").and_then(|n| n.as_str()) == Some("forward.search_structured"))
         .expect("expected a forward.search_structured span in captured output");
-    let stage = span.get("geocoder.stage").and_then(|v| v.as_str()).unwrap_or("");
+    let stage = span
+        .get("geocoder.stage")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     assert!(
-        ["strict", "drop_country_code", "drop_state", "drop_city", "drop_kind", "fuzzy"]
-            .contains(&stage),
+        [
+            "strict",
+            "fanout",
+            "fuzzy",
+            "drop_location_suffix",
+            "exhausted"
+        ]
+        .contains(&stage),
         "unexpected geocoder.stage value {stage:?}"
     );
     let count = span
@@ -282,12 +303,11 @@ fn index_load_emits_manifest_line_per_mmap_file() {
     // The reverse-index group must be present — that's the load path
     // we just exercised.
     assert!(
-        manifest_lines
-            .iter()
-            .any(|l| l.get("fields")
-                .and_then(|f| f.get("index"))
-                .and_then(|v| v.as_str())
-                == Some("reverse")),
+        manifest_lines.iter().any(|l| l
+            .get("fields")
+            .and_then(|f| f.get("index"))
+            .and_then(|v| v.as_str())
+            == Some("reverse")),
         "expected at least one manifest line tagged index=reverse"
     );
 }

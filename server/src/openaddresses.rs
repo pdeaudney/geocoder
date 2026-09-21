@@ -12,8 +12,8 @@
 //! oa_us_points.bin   ...
 //! ```
 //!
-//! At startup, `OpenAddresses::open(dir)` scans for any `oa_??_points.bin`
-//! files in the index directory and opens each country's set. Deployments
+//! At startup, `OpenAddresses::open(dir)` scans for `oa_??_*` shard files
+//! in the index directory and opens each country's set. Deployments
 //! that only serve AU + NZ mount just those two countries' bin files and
 //! ignore the rest — no virtual memory or disk paid for unused geographies.
 //!
@@ -32,9 +32,8 @@ pub struct OpenAddresses {
 }
 
 impl OpenAddresses {
-    /// Open every country-specific index found in `dir`. Scans for files
-    /// matching `oa_<cc>_points.bin` and opens the four-file set for each
-    /// unique country code.
+    /// Open every country-specific index found in `dir`. A partial shard
+    /// must fail rather than silently disappear from service.
     pub fn open(dir: &Path) -> Result<Option<Self>, String> {
         let entries = match std::fs::read_dir(dir) {
             Ok(it) => it,
@@ -82,6 +81,10 @@ impl OpenAddresses {
     /// loaded index. Stable reference, borrowed from the internal map.
     pub fn countries(&self) -> impl Iterator<Item = &[u8; 2]> {
         self.per_country.keys()
+    }
+
+    pub fn shards(&self) -> impl Iterator<Item = (&[u8; 2], &AddressPointIndex)> {
+        self.per_country.iter()
     }
 
     pub fn has_country(&self, country_code: &[u8; 2]) -> bool {
@@ -164,21 +167,24 @@ pub fn oa_prefix(cc: [u8; 2]) -> String {
     )
 }
 
-/// Parse the country code out of an `oa_<cc>_points.bin` filename.
-/// Returns `None` when the filename doesn't match.
+/// Parse the country code out of any address-point shard filename.
+/// Returns `None` when the filename doesn't match a known component.
 pub fn parse_oa_country_prefix(filename: &str) -> Option<[u8; 2]> {
-    // Matches "oa_<cc>_points.bin" exactly.
     let rest = filename.strip_prefix("oa_")?;
-    let suffix = "_points.bin";
-    let cc_str = rest.strip_suffix(suffix)?;
+    let cc_str = [
+        "_points.bin",
+        "_cells.bin",
+        "_entries.bin",
+        "_strings.bin",
+        "_points.schema.json",
+    ]
+    .iter()
+    .find_map(|suffix| rest.strip_suffix(suffix))?;
     let bytes = cc_str.as_bytes();
     if bytes.len() != 2 || !bytes[0].is_ascii_alphabetic() || !bytes[1].is_ascii_alphabetic() {
         return None;
     }
-    Some([
-        bytes[0].to_ascii_lowercase(),
-        bytes[1].to_ascii_lowercase(),
-    ])
+    Some([bytes[0].to_ascii_lowercase(), bytes[1].to_ascii_lowercase()])
 }
 
 fn normalise_code(cc: &[u8; 2]) -> [u8; 2] {
@@ -193,6 +199,11 @@ mod tests {
     fn parses_valid_oa_filenames() {
         assert_eq!(parse_oa_country_prefix("oa_au_points.bin"), Some(*b"au"));
         assert_eq!(parse_oa_country_prefix("oa_us_points.bin"), Some(*b"us"));
+        assert_eq!(parse_oa_country_prefix("oa_us_cells.bin"), Some(*b"us"));
+        assert_eq!(
+            parse_oa_country_prefix("oa_us_points.schema.json"),
+            Some(*b"us")
+        );
         // Upper-case input → normalised to lower.
         assert_eq!(parse_oa_country_prefix("oa_FR_points.bin"), Some(*b"fr"));
     }
@@ -200,7 +211,6 @@ mod tests {
     #[test]
     fn rejects_non_oa_filenames() {
         assert_eq!(parse_oa_country_prefix("gnaf_points.bin"), None);
-        assert_eq!(parse_oa_country_prefix("oa_us_cells.bin"), None);
         assert_eq!(parse_oa_country_prefix("oa_usa_points.bin"), None);
         assert_eq!(parse_oa_country_prefix("oa_u1_points.bin"), None);
         assert_eq!(parse_oa_country_prefix("oa__points.bin"), None);

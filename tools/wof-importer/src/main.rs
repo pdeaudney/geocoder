@@ -18,7 +18,7 @@
 //! so the server reads the file the same way.
 //!
 //! Usage:
-//!   wof-importer <wof-sqlite-dir> <output-index-dir>
+//!   wof-importer <wof-sqlite-dir> <output-index-dir> [--postcodes-only]
 
 // mimalloc global allocator — see build-pipeline-perf-plan stage 2.
 #[global_allocator]
@@ -62,14 +62,19 @@ struct NodeCoord {
 fn main() {
     let _total = Stage::new("total");
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("Usage: {} <wof-sqlite-dir> <output-index-dir>", args[0]);
+    if args.len() < 3 || args.len() > 4 || args.get(3).is_some_and(|a| a != "--postcodes-only") {
+        eprintln!("Usage: {} <wof-sqlite-dir> <output-index-dir> [--postcodes-only]", args[0]);
         std::process::exit(2);
     }
     let sqlite_dir = PathBuf::from(&args[1]);
     let out_dir = PathBuf::from(&args[2]);
 
-    if let Err(e) = run(&sqlite_dir, &out_dir) {
+    let result = if args.get(3).is_some_and(|a| a == "--postcodes-only") {
+        import_postcodes(&sqlite_dir, &out_dir)
+    } else {
+        run(&sqlite_dir, &out_dir)
+    };
+    if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
@@ -142,7 +147,91 @@ fn run(sqlite_dir: &Path, out_dir: &Path) -> Result<(), String> {
         vertices.len(),
         strings.len()
     );
+    import_postcodes(sqlite_dir, out_dir)?;
     Ok(())
+}
+
+/// Export usable WoF postcode centroids for the autocomplete builder. Postalcode
+/// records are in separate WoF SQLite files; admin SQLite has no full codes.
+/// A versioned text header lets the reader reject a changed column layout.
+fn import_postcodes(sqlite_dir: &Path, out_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
+    let mut dbs: Vec<PathBuf> = fs::read_dir(sqlite_dir)
+        .map_err(|e| format!("read_dir {}: {e}", sqlite_dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()) == Some("db")
+                && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n.starts_with("whosonfirst-data-postalcode-")
+                        || n == "whosonfirst-data-postalcode-latest.db"
+                })
+        })
+        .collect();
+    dbs.sort();
+    if dbs.is_empty() {
+        eprintln!("no WoF postalcode SQLite files; skipping postcode export");
+        return Ok(());
+    }
+    // A planet file already contains the per-country records. Read it once.
+    if let Some(planet) = dbs.iter().find(|p| {
+        p.file_name().and_then(|n| n.to_str()) == Some("whosonfirst-data-postalcode-latest.db")
+    }).cloned() {
+        dbs = vec![planet];
+    }
+
+    let dest = out_dir.join("wof_postcodes.tsv");
+    let tmp = out_dir.join("wof_postcodes.tsv.tmp");
+    let file = File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(b"#wof-postcodes-v1\tcountry\tpostcode\tlatitude\tlongitude\n")
+        .map_err(|e| format!("write header: {e}"))?;
+    let mut accepted = 0u64;
+    let mut skipped = 0u64;
+    for db_path in &dbs {
+        let conn = Connection::open(db_path)
+            .map_err(|e| format!("open {}: {e}", db_path.display()))?;
+        let mut stmt = conn.prepare(
+            "SELECT name, country, latitude, longitude FROM spr \
+             WHERE placetype='postalcode' AND is_current != 0 \
+             AND is_deprecated=0 AND is_ceased=0 AND is_superseded=0 ORDER BY id"
+        ).map_err(|e| format!("prepare {}: {e}", db_path.display()))?;
+        let rows = stmt.query_map([], |row| Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<f64>>(2)?,
+            row.get::<_, Option<f64>>(3)?,
+        ))).map_err(|e| format!("query {}: {e}", db_path.display()))?;
+        for row in rows {
+            let (name, country, lat, lng) = row.map_err(|e| format!("row {}: {e}", db_path.display()))?;
+            if let (Some(name), Some(country), Some(lat), Some(lng)) = (name, country, lat, lng) {
+                if usable_postcode(&name, &country, lat, lng) {
+                    writeln!(writer, "{country}\t{name}\t{lat}\t{lng}")
+                        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+                    accepted += 1;
+                    continue;
+                }
+            }
+            skipped += 1;
+        }
+        eprintln!("read WoF postcodes from {}", db_path.display());
+    }
+    writer.flush().map_err(|e| format!("flush {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &dest)
+        .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), dest.display()))?;
+    eprintln!("wrote {} WoF postcode points to {} ({} unusable)", accepted, dest.display(), skipped);
+    Ok(())
+}
+
+fn usable_postcode(name: &str, country: &str, lat: f64, lng: f64) -> bool {
+    !name.is_empty()
+        && !name.contains(['\t', '\n', '\r'])
+        && country.len() == 2
+        && country.bytes().all(|b| b.is_ascii_uppercase())
+        && lat.is_finite()
+        && lng.is_finite()
+        && (-90.0..=90.0).contains(&lat)
+        && (-180.0..=180.0).contains(&lng)
+        && (lat != 0.0 || lng != 0.0)
 }
 
 fn import_one_db(
@@ -439,6 +528,14 @@ fn write_struct_array<T: Copy>(path: &Path, slice: &[T]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn postcode_import_rejects_missing_centroids() {
+        assert!(usable_postcode("E8 1DN", "GB", 51.54, -0.06));
+        assert!(!usable_postcode("0101", "NZ", 0.0, 0.0));
+        assert!(!usable_postcode("E8 1DN", "GB", f64::NAN, -0.06));
+        assert!(!usable_postcode("E8\t1DN", "GB", 51.54, -0.06));
+    }
 
     #[test]
     fn pack_cc_handles_cases() {

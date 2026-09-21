@@ -1,40 +1,35 @@
 {
   "name": "pelias-us-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Saint Marks Place"
+            "fields": {
+              "address.city": "New York",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "New York County",
+              "address.house_number": "101",
+              "address.postcode": "10009",
+              "address.road": "Saint Marks Place",
+              "address.state": "New York",
+              "name_or_address": "101 Saint Marks Place"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-1",
       "notes": null,
+      "partial_reason": "expected field borough, expected field label, expected field neighbourhood, expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "101 saint marks pl 10009"
         }
       },
@@ -47,30 +42,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Water Street"
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "1 Water Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-2",
       "notes": null,
+      "partial_reason": "expected field borough, expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "1 water st manhattan ny"
         }
       },
@@ -83,30 +72,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Water Street"
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "1 Water Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-2.2",
       "notes": null,
+      "partial_reason": "expected field borough, expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "1 water st manhattan ny"
         }
       },
@@ -119,35 +102,30 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "37th Street"
+            "fields": {
+              "address.city": "New York",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Kings County",
+              "address.house_number": "450",
+              "address.postcode": "11232",
+              "address.road": "37th Street",
+              "address.state": "New York",
+              "name_or_address": "450 37th Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-3",
       "notes": "result in the wrong zipcode and city shows up first. priorityThresh 2 to account for NY/NYC datasets with differing spelling",
+      "partial_reason": "expected field borough, expected field label, expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "450 37th st, new york, ny 11232"
         }
       },
@@ -160,30 +138,27 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "West 37th Street"
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "address.house_number": "450",
+              "address.postcode": "10018",
+              "address.road": "West 37th Street",
+              "name_or_address": "450 West 37th Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-3.1",
       "notes": "result with the wrong zipcode will be returned, but should have lower ranking than zipcoe match ",
+      "partial_reason": "expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "450 37th st, new york, ny 11232"
         }
       },
@@ -196,30 +171,28 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
+            "fields": {
+              "address.city": "New York",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "New York County",
+              "address.postcode": "10010",
+              "address.state": "New York",
+              "name": "Starbucks"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-4",
       "notes": null,
+      "partial_reason": "expected field borough, expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "starbucks 10010"
         }
       },
@@ -232,35 +205,30 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "43rd Street"
+            "fields": {
+              "address.city": "New York",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Kings County",
+              "address.house_number": "455",
+              "address.postcode": "11232",
+              "address.road": "43rd Street",
+              "address.state": "New York",
+              "name_or_address": "455 43rd Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-5",
       "notes": null,
+      "partial_reason": "expected field borough, expected field label, expected field neighbourhood, expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "455 43rd st new york ny 11232"
         }
       },
@@ -273,35 +241,30 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Main Street"
+            "fields": {
+              "address.city": "New York",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Kings County",
+              "address.house_number": "1",
+              "address.postcode": "11201",
+              "address.road": "Main Street",
+              "address.state": "New York",
+              "name_or_address": "1 Main Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-6",
       "notes": null,
+      "partial_reason": "expected field borough, expected field label, expected field neighbourhood, expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "1 main st ny 11201"
         }
       },
@@ -314,35 +277,32 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Atlanta"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Georgia"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Tuskegee Street Southeast"
+            "fields": {
+              "address.city": "Atlanta",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Fulton County",
+              "address.house_number": "186",
+              "address.postcode": "30315",
+              "address.road": "Tuskegee Street Southeast",
+              "address.state": "Georgia",
+              "name_or_address": "186 Tuskegee Street Southeast"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-7",
-      "notes": null,
+      "notes": [
+        "was failing due to a double-space in the street name"
+      ],
+      "partial_reason": "expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "186 Tuskegee St SE Atlanta GA"
         }
       },
@@ -355,35 +315,29 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "San Francisco"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "California"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "16th Street"
+            "fields": {
+              "address.city": "San Francisco",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "San Francisco County",
+              "address.house_number": "3122",
+              "address.road": "16th Street",
+              "address.state": "California",
+              "name_or_address": "3122 16th Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-8",
       "notes": null,
+      "partial_reason": "expected field label, expected field neighbourhood, expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "3122 16th St San Francisco, CA 94103"
         }
       },
@@ -396,35 +350,30 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "San Francisco"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "California"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "20th Street"
+            "fields": {
+              "address.city": "San Francisco",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "San Francisco County",
+              "address.house_number": "3010",
+              "address.postcode": "94110",
+              "address.road": "20th Street",
+              "address.state": "California",
+              "name_or_address": "3010 20th Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-9",
       "notes": "The mission is now a macrohood, so we won't be able to get this right until that's imported",
+      "partial_reason": "expected field label, expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "3010 20th St San Francisco CA 94110"
         }
       },
@@ -437,35 +386,30 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "San Francisco"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "California"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Jackson Street"
+            "fields": {
+              "address.city": "San Francisco",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "San Francisco County",
+              "address.house_number": "3577",
+              "address.postcode": "94118",
+              "address.road": "Jackson Street",
+              "address.state": "California",
+              "name_or_address": "3577 Jackson Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-10",
       "notes": null,
+      "partial_reason": "expected field label, expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "3577 Jackson St San Francisco, CA 94118"
         }
       },
@@ -478,25 +422,25 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.state": "New York",
+              "name": "Whole Foods"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-11",
       "notes": "this is not a very precise test. Perhaps we should add a focus point. Potentially flaky test",
+      "partial_reason": "expected field region_a, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "whole foods NY"
         }
       },
@@ -509,14 +453,15 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "California"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "San Francisco County",
+              "address.state": "California",
+              "name": "Mission District"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -527,27 +472,28 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "mission, san francisco"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Kings County",
+              "address.state": "New York",
+              "name": "Crown Heights"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -558,58 +504,72 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "crown heights"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Ocean County",
+              "address.state": "New Jersey"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New Jersey"
+            "fields": {
+              "address.county": "Ocean"
+            },
+            "kind": "result_absent"
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-admin_lookup-13",
-      "notes": null,
+      "notes": [
+        "all words in query text are potential address stop-words"
+      ],
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Vista Center"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Moore County",
+              "address.state": "North Carolina"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "North Carolina"
+            "fields": {
+              "address.county": "Moore"
+            },
+            "kind": "result_absent"
           }
         ],
         "status": 200
@@ -620,27 +580,27 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Yadkin Trail"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "California"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.state": "California",
+              "name": "California"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -651,39 +611,39 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "california"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Socorro"
+            "fields": {
+              "address.city": "Socorro",
+              "address.country_code": "US",
+              "address.house_number": "1220",
+              "address.road": "Calle De Lago"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-admin_translations-24",
       "notes": "Kazakh for Socorro, French for New Mexico",
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
-          "q": "1220 calle de lago \u0421\u043e\u043a\u043e\u0440\u0440\u043e Nouveau-Mexique"
+          "q": "1220 calle de lago Сокорро Nouveau-Mexique"
         }
       },
       "tags": [
@@ -693,51 +653,34 @@
     },
     {
       "expect": {
-        "checks": [
-          {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Washington"
-          }
-        ],
+        "checks": [],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_address-2",
       "notes": "popular address (White House) should be returned first",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "us",
           "q": "1600 Pennsylvania Avenue"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "no comparable expected fields"
     },
     {
       "expect": {
-        "checks": [
-          {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          }
-        ],
+        "checks": [],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_boundary_country-1",
       "notes": null,
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
           "country_code": "us",
           "q": "London"
@@ -745,16 +688,48 @@
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "no comparable expected fields"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "04106"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_postalcodes-5",
+      "notes": "postalcode in USA with leading zero",
+      "request": {
+        "method": "GET",
+        "path": "/autocomplete",
+        "query": {
+          "country_code": "us",
+          "q": "04106"
+        }
+      },
+      "tags": [
+        "pelias",
+        "autocomplete"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "90210"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -763,7 +738,7 @@
       "notes": null,
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
           "country_code": "us",
           "q": "90210"
@@ -771,16 +746,19 @@
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "90210"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -789,7 +767,7 @@
       "notes": "partial postal code autocomplete query, querying only on postalcode layer",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
           "country_code": "us",
           "q": "9021"
@@ -797,25 +775,29 @@
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "90210"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_postalcodes-6.2",
       "notes": "partial postal code autocomplete query",
+      "partial_reason": "expected field country_a, expected field layer, expected field postalcode, expected field region_a",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
           "country_code": "us",
           "q": "9021"
@@ -823,16 +805,25 @@
       },
       "tags": [
         "pelias",
-        "search"
+        "autocomplete"
       ]
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "West 26th Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": 40.747625,
+            "expected_lng": -73.9981,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 1500.0
           }
         ],
         "status": 200
@@ -841,133 +832,120 @@
       "notes": null,
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "us",
           "q": "w 26 st, new york"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources"
     },
     {
       "expect": {
-        "checks": [
-          {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
-          }
-        ],
+        "checks": [],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_street_fallback-2",
       "notes": null,
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "us",
           "q": "w 26th st, new york"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "no comparable expected fields"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "DiDi Dumpling"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_venues-1",
       "notes": null,
+      "partial_reason": "expected field borough, expected field country_a, expected field region_a",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "us",
           "q": "DiDi Dumpling"
         }
       },
       "tags": [
         "pelias",
-        "search"
+        "autocomplete"
       ]
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
+            "fields": {
+              "name": "Katz's Delicatessen"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-balance-5",
-      "notes": null,
+      "notes": [
+        "When focus point is specified, results should slightly favor",
+        "nearby POIs, while still surfacing larger regions further away"
+      ],
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "us",
           "q": "katzs deli"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "request parameter focus.point.lat, request parameter focus.point.lon"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "West 72nd Street"
+            "fields": {
+              "address.country_code": "US",
+              "address.house_number": "1",
+              "address.postcode": "10023",
+              "address.road": "West 72nd Street",
+              "name_or_address": "1 West 72nd Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-confidence_score-1",
       "notes": "This is an attempt to test that an address with zipcode that is found does not fail a 'deal breaker'",
+      "partial_reason": "expected field confidence value",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "1 West 72nd St, New York, NY, 10023"
         }
       },
@@ -980,20 +958,23 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "US",
+              "address.postcode": "10010"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-confidence_score-2",
       "notes": "Exact match address using search with IDs query should have confidence score 1",
+      "partial_reason": "expected field confidence value",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "30 W 26th St, New York, NY 10010"
         }
       },
@@ -1006,30 +987,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "address.state": "New York"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-confidence_score-3",
       "notes": "Street fallback leads to lower confidence score",
+      "partial_reason": "expected field confidence value, expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "9999999 W 26th St, New York, NY 10010"
         }
       },
@@ -1042,25 +1017,59 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "Chicago"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "San Francisco"
+            "fields": {
+              "name": "City of Chicago"
+            },
+            "kind": "result_absent"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-deduplication-3",
+      "notes": "Geonames 'City of X' style records should not appear",
+      "request": {
+        "method": "GET",
+        "path": "/autocomplete",
+        "query": {
+          "q": "Chicago"
+        }
+      },
+      "tags": [
+        "pelias",
+        "autocomplete"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "San Francisco",
+              "address.country_code": "US",
+              "address.house_number": "101",
+              "address.road": "California"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-fallback-3",
       "notes": null,
+      "partial_reason": "expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "101 california, san francisco"
         }
       },
@@ -1073,35 +1082,66 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Statue of Liberty"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-landmarks-14",
+      "notes": [
+        "because there is no indication of importance or popularity in our data",
+        "we have no way of knowing how to properly sort the results.",
+        "When they all have a name that matches the query, sort order of results",
+        "is based purely on order at import time or some variable ES search process.",
+        "In order to really fix this test, we must find definitive source of popularity data",
+        "for POIs that have common names."
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "statue of liberty"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "East 10th Street"
+            "fields": {
+              "address.city": "New York",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "New York County",
+              "address.house_number": "267",
+              "address.road": "East 10th Street",
+              "address.state": "New York",
+              "name_or_address": "267 East 10th Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 3
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-missing_postcodes-1",
       "notes": null,
+      "partial_reason": "expected field borough, expected field neighbourhood, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "267 e 10th st, new york, ny 10010"
         }
       },
@@ -1114,14 +1154,57 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.city": "Crystal Lake",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Polk County",
+              "address.house_number": "440",
+              "address.road": "South Combee Road",
+              "address.state": "Florida",
+              "name_or_address": "440 South Combee Road"
+            },
+            "kind": "result_matches_within",
+            "limit": 3
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-missing_postcodes-2",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "440 S Combee Rd, Lakeland, FL 33801"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Chelsea"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
+            "fields": {
+              "address.city": "London",
+              "address.country_code": "GB",
+              "name": "Chelsea"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -1132,27 +1215,26 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "chelsea"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Chelsea"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -1163,27 +1245,26 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "chelsea, ny"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Williamsburg"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -1194,27 +1275,26 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "williamsburg"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Williamsburg"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -1225,27 +1305,26 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "williamsburg, ny"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Ridgewood"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -1256,27 +1335,26 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "ridgewood"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Ridgewood"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -1287,27 +1365,158 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "ridgewood, ny"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers"
+    },
+    {
+      "expect": {
+        "checks": [],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-reverse_coordinate_wrapping-3",
+      "notes": "base case (no wrapping) for a reverse query in NYC",
+      "request": {
+        "method": "GET",
+        "path": "/reverse",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "reverse"
+      ],
+      "unsupported_reason": "endpoint reverse, missing text, no comparable expected fields, request parameter point.lat, request parameter point.lon"
+    },
+    {
+      "expect": {
+        "checks": [],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-reverse_coordinate_wrapping-4",
+      "notes": "same effective coordinate as base case with positive longitude wrapping",
+      "request": {
+        "method": "GET",
+        "path": "/reverse",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "reverse"
+      ],
+      "unsupported_reason": "endpoint reverse, missing text, no comparable expected fields, request parameter point.lat, request parameter point.lon"
+    },
+    {
+      "expect": {
+        "checks": [],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-reverse_coordinate_wrapping-5",
+      "notes": "same effective coordinate as base case with negative longitude wrapping",
+      "request": {
+        "method": "GET",
+        "path": "/reverse",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "reverse"
+      ],
+      "unsupported_reason": "endpoint reverse, missing text, no comparable expected fields, request parameter point.lat, request parameter point.lon"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
+            "fields": {
+              "name": "30 West 26th Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 3
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-reverse_coordinate_wrapping-6",
+      "notes": "elasticsearch <2 handled longitude wrapping and now does not",
+      "request": {
+        "method": "GET",
+        "path": "/reverse",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "reverse"
+      ],
+      "unsupported_reason": "endpoint reverse, missing text, request parameter point.lat, request parameter point.lon"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Pennsylvania"
+            "fields": {
+              "name": "30 West 26th Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 3
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-reverse_coordinate_wrapping-7",
+      "notes": "elasticsearch <2 handled longitude wrapping and now does not",
+      "request": {
+        "method": "GET",
+        "path": "/reverse",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "reverse"
+      ],
+      "unsupported_reason": "endpoint reverse, missing text, request parameter point.lat, request parameter point.lon"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "30 West 26th Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 3
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-reverse_coordinate_wrapping-8",
+      "notes": "latitude wrapping (this also requires the longitude to change)",
+      "request": {
+        "method": "GET",
+        "path": "/reverse",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "reverse"
+      ],
+      "unsupported_reason": "endpoint reverse, missing text, request parameter point.lat, request parameter point.lon"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country_code": "US",
+              "address.state": "Pennsylvania",
+              "name": "Philadelphia"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -1318,7 +1527,6 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "philadelphia"
         }
       },
@@ -1331,14 +1539,13 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Pennsylvania"
+            "fields": {
+              "address.country_code": "US",
+              "address.state": "Pennsylvania",
+              "name": "Philadelphia"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -1349,7 +1556,6 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "philadelphia, pa"
         }
       },
@@ -1362,30 +1568,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Dean Street"
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "130 Dean Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search-6",
       "notes": null,
+      "partial_reason": "expected field borough, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "130 dean street brooklyn, ny"
         }
       },
@@ -1398,20 +1598,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "US",
+              "address.county": "Middlesex County",
+              "name": "Billerica"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search-7",
       "notes": null,
+      "partial_reason": "expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "billerica"
         }
       },
@@ -1424,20 +1628,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "US",
+              "address.county": "Middlesex County",
+              "name": "Billerica"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search-8",
       "notes": null,
+      "partial_reason": "expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "billerica, ma"
         }
       },
@@ -1450,30 +1658,26 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Massachusetts"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Call Street"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Middlesex County",
+              "address.state": "Massachusetts",
+              "name": "15 Call Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search-9",
       "notes": "test failed due to data entry issue with openaddresses",
+      "partial_reason": "expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "15 call street billerica, ma"
         }
       },
@@ -1486,20 +1690,56 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "San Francisco County",
+              "address.state": "California",
+              "name": "Union Square"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search-1425586777012:0",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "union sq"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country_code": "US",
+              "address.county": "Multnomah County",
+              "name": "Portland"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search-1425586777012:2",
       "notes": null,
+      "partial_reason": "expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "portland"
         }
       },
@@ -1512,20 +1752,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "US",
+              "address.county": "Multnomah County",
+              "name": "Portland"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search-1425586777012:2-1",
       "notes": null,
+      "partial_reason": "expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "portland, oregon"
         }
       },
@@ -1538,20 +1782,23 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "US",
+              "name": "Chelsea"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search-10",
       "notes": null,
+      "partial_reason": "expected field borough, expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "chelsea, new york"
         }
       },
@@ -1564,20 +1811,23 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "US",
+              "name": "SoHo"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search-11",
       "notes": null,
+      "partial_reason": "expected field borough, expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "soho, new york"
         }
       },
@@ -1590,25 +1840,23 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Saint Marks Place"
+            "fields": {
+              "address.country_code": "US",
+              "name": "101 Saint Marks Place"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search-15",
       "notes": null,
+      "partial_reason": "expected field neighbourhood, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "101 saint marks pl, new york"
         }
       },
@@ -1621,24 +1869,52 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
+            "fields": {
+              "address.city": "Newark",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Essex County",
+              "address.state": "New Jersey",
+              "name": "Newark Liberty International Airport"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search-18",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "newark airport"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "West 26th Street"
+            "fields": {
+              "address.city": "New York",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "New York County",
+              "address.house_number": "30",
+              "address.postcode": "10010",
+              "address.road": "West 26th Street",
+              "address.state": "New York",
+              "name_or_address": "30 West 26th Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
@@ -1649,27 +1925,34 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
+          "bias_lat": "40.744243",
+          "bias_lng": "-73.990342",
           "q": "30 West 26th Street"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "US",
+              "address.state": "New York",
+              "name": "Statue of Liberty"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
+            "fields": {
+              "address.country_code": "FR"
+            },
+            "kind": "result_absent"
           }
         ],
         "status": 200
@@ -1693,25 +1976,94 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.city": "San Francisco",
+              "address.country_code": "US",
+              "name": "Caltrain"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
+            "fields": {
+              "address.city": "San Francisco",
+              "address.country_code": "US",
+              "name": "San Francisco 4th & King Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search-1426636804303:51",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "4th and King"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "Portland",
+              "address.country_code": "US",
+              "name": "Mount Tabor Park"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_abbreviations-8.3",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "Mt Tabor Park, Portland, OR"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country_code": "US",
+              "address.house_number": "85-23",
+              "address.road": "168th Place",
+              "address.state": "New York"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_alphanumeric_housenumber-4",
       "notes": "Queens address",
+      "partial_reason": "expected field borough, normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "85-23 168th Place queens ny"
         }
       },
@@ -1724,9 +2076,17 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "US"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "fields": {
+              "address.country_code": "GB"
+            },
+            "kind": "result_absent"
           }
         ],
         "status": 200
@@ -1750,25 +2110,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Truth Or Consequences"
+            "fields": {
+              "address.city": "Truth Or Consequences",
+              "address.country": "United States",
+              "address.country_code": "US"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_city_country-20",
       "notes": null,
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "truth or consequences, usa"
         }
       },
@@ -1781,25 +2140,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Yakima"
+            "fields": {
+              "address.city": "Yakima",
+              "address.country": "United States",
+              "address.country_code": "US"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_city_country-22",
       "notes": null,
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "yakima, us"
         }
       },
@@ -1812,25 +2170,26 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Brooklyn"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_coarse-1",
       "notes": null,
+      "partial_reason": "expected field label, expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
+          "bias_lat": "40.744243",
+          "bias_lng": "-73.990342",
           "q": "brooklyn"
         }
       },
@@ -1843,20 +2202,25 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "US",
+              "name": "93277"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_focus-3",
       "notes": "searching for a Finish/American postal code from Bend, Oregon should return the American version before other countries",
+      "partial_reason": "expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
+          "bias_lat": "44.05",
+          "bias_lng": "-121.3",
           "q": "93277"
         }
       },
@@ -1869,20 +2233,25 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "US",
+              "name": "93277"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_focus-4",
       "notes": "searching for a Finish/American postal code from central USA should return the American version before other countries. suspected flapping test",
+      "partial_reason": "expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
+          "bias_lat": "38.001",
+          "bias_lng": "-102.001",
           "q": "93277"
         }
       },
@@ -1895,14 +2264,14 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Pennsylvania"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.state": "Pennsylvania",
+              "name": "Aliquippa"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
           }
         ],
         "status": 200
@@ -1913,43 +2282,71 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Aliquippa, PA"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
+            "fields": {
+              "address.city": "Richlandtown",
+              "address.country_code": "US",
+              "address.house_number": "1",
+              "address.road": "Main St",
+              "address.state": "Pennsylvania"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_iso2_to_iso3-1",
+      "notes": "record is currently '1 main' in OA",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "1 Main St, Richlandtown, PA, US"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Richlandtown"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Pennsylvania"
+            "fields": {
+              "address.city": "Richlandtown",
+              "address.country_code": "US",
+              "address.house_number": "1",
+              "address.road": "Main",
+              "address.state": "Pennsylvania"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_iso2_to_iso3-1.1",
       "notes": "record is currently '1 main' in OA",
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "1 Main, Richlandtown, PA, US"
         }
       },
@@ -1962,25 +2359,298 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.city": "Phoenix",
+              "address.country_code": "US",
+              "name": "Phoenix Sky Harbor International Airport"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Nottingham"
+            "expected_lat": 33.434743,
+            "expected_lng": -112.012869,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 1000.0
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_poi-9",
+      "notes": "search for Phoenix Intl airport with focus point in Phoenix",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "bias_lat": "33.44155",
+          "bias_lng": "-112.09721",
+          "q": "Phoenix International Airport"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "Phoenix",
+              "address.country_code": "US",
+              "name": "Phoenix Sky Harbor International Airport"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": 33.434743,
+            "expected_lng": -112.012869,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 1000.0
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_poi-9.1",
+      "notes": "search for Phoenix Intl airport with focus point in Phoenix",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "bias_lat": "33.44155",
+          "bias_lng": "-112.09721",
+          "q": "Phoenix Airport"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "Phoenix",
+              "address.country_code": "US",
+              "name": "Phoenix Sky Harbor International Airport"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": 33.434743,
+            "expected_lng": -112.012869,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 1000.0
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_poi-9.2",
+      "notes": "search for Phoenix Intl airport with focus point in Phoenix",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "bias_lat": "33.44155",
+          "bias_lng": "-112.09721",
+          "q": "Phoenix sky harbor"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Union Square"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": 40.734603,
+            "expected_lng": -73.99036,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 500.0
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_poi-10.1",
+      "notes": "search for Union Square, NYC with focus point",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "bias_lat": "40.744243",
+          "bias_lng": "-73.990342",
+          "q": "union square"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Union Square"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": 40.734603,
+            "expected_lng": -73.99036,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 500.0
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_poi-10.2",
+      "notes": "search for Union Square, NYC with focus point",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "bias_lat": "40.744243",
+          "bias_lng": "-73.990342",
+          "q": "union square manhattan ny"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Union Square"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": 40.734603,
+            "expected_lng": -73.99036,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 500.0
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_poi-10.3",
+      "notes": "search for Union Square, NYC with focus point",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "bias_lat": "40.744243",
+          "bias_lng": "-73.990342",
+          "q": "union square new york ny"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "New York",
+              "address.country_code": "US",
+              "name": "Union Square"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "expected_lat": 40.734603,
+            "expected_lng": -73.99036,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 500.0
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_poi-10.4",
+      "notes": "search for Union Square, NYC with focus point",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "bias_lat": "40.744243",
+          "bias_lng": "-73.990342",
+          "q": "union square nyc"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "Nottingham",
+              "address.country_code": "US",
+              "address.house_number": "3",
+              "address.road": "Cameron Court"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_postal_cities-3",
       "notes": null,
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "3 Cameron Court, Nottingham, MD"
         }
       },
@@ -1993,25 +2663,25 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Woodbridge"
+            "fields": {
+              "address.city": "Woodbridge",
+              "address.country_code": "US",
+              "address.house_number": "15364",
+              "address.road": "Kensington Park Drive"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_postal_cities-5",
       "notes": null,
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "15364 Kensington Park Dr, Woodbridge, VA"
         }
       },
@@ -2024,25 +2694,25 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Syracuse"
+            "fields": {
+              "address.city": "Syracuse",
+              "address.country_code": "US",
+              "address.house_number": "211",
+              "address.road": "Knapp Road"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_postal_cities-6",
       "notes": null,
+      "partial_reason": "expected field layer, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "211 Knapp Rd, Syracuse, NY"
         }
       },
@@ -2055,25 +2725,62 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "US",
+              "address.road": "West 26th Street",
+              "name": "West 26th Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Portland"
+            "expected_lat": 40.747625,
+            "expected_lng": -73.9981,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 1500.0
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_street_centroids-3",
+      "notes": "intermittently fails because 'york' in Nebraska is an allowed parent id from placeholder, no scoring tiebreaker",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "w 26 st, new york"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "Portland",
+              "address.country_code": "US",
+              "address.house_number": "621",
+              "address.road": "SE Martin Luther King Jr Boulevard"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_street_centroids-7",
       "notes": "single omitted word in street name should still allow match",
+      "partial_reason": "expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "621 Martin Luther King Blvd portland or"
         }
       },
@@ -2084,47 +2791,782 @@
     },
     {
       "expect": {
+        "checks": [],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_address_parsing-1",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, no comparable expected fields, request parameter address, request parameter country, request parameter locality, request parameter postalcode, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_address_parsing-1.1",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, no comparable expected fields, request parameter address, request parameter country, request parameter locality, request parameter postalcode, request parameter region, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_boundary_country-1",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {
+          "country_code": "us"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, no comparable expected fields, request parameter locality"
+    },
+    {
+      "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name_or_address": "1090 N Charlotte St"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-1",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter address, request parameter locality, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "North Charlotte Street"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-2",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter address, request parameter locality, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Calle de Lago"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-3",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter address, request parameter locality, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Lancaster"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-4",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter address, request parameter locality, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "1338 Kobbe Ave"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-5",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter address, request parameter locality, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "5 Russian Hill Pl"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-7",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter address, request parameter locality, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "DUMBO"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-100",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter borough, request parameter neighbourhood"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Chelsea"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Pennsylvania"
+            "fields": {
+              "name": "Chelsea"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-101",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter neighbourhood"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "NoHo"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-102",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter neighbourhood"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Manhattan"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "fields": {
+              "name": "Manhattan"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-200",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter locality, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Manhattan"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-201",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter borough, request parameter locality, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Socorro"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-300",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter locality, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "New York"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-301",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter country, request parameter locality, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Zickrick"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-400",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter locality, request parameter sources"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Zumbehl"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-401",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter locality, request parameter sources"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Aastad"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-402",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter country, request parameter locality, request parameter sources"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Bloominggrove Township"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-403",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter locality, request parameter region, request parameter sources"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Lancaster County"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
+          },
+          {
+            "fields": {
+              "name": "Lancaster County"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-500",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter county"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Lancaster County"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-501",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter county, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Pennsylvania"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-700",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "New Mexico"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-701",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "United States"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-1000",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter country"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "United States"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-1001",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter country"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "United States"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-1002",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter country"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country_code": "US",
+              "name": "Статуя Свободы"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-venue_translations-4",
+      "notes": "venue with multiple translations should return russian translation with lang param",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "statue of liberty, manhattan"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, request parameter layers, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Potter County",
+              "address.state": "Pennsylvania",
+              "name": "Potter County"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-wof_counties-2",
-      "notes": null,
+      "notes": [
+        "chosen since it's also not the name of a city",
+        "Result from UK used to show up first because we still don't handle admin parts properly"
+      ],
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Potter, PA"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Hawaii"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Maui County",
+              "address.state": "Hawaii",
+              "name": "Maui County"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2135,22 +3577,26 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Maui, Hawaii"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "name": "United States"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2161,22 +3607,26 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "United States"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "name": "United States"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2187,27 +3637,88 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "USA"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "name": "Puerto Rico"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_dependencies-4",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "Puerto Rico"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Minnesota"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "name": "American Samoa"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_dependencies-5",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "American Samoa"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Carver County",
+              "address.state": "Minnesota",
+              "name": "Norwood Young America"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2218,27 +3729,27 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Norwood Young America, Minnesota, US"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "South Dakota"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.state": "South Dakota",
+              "name": "Zickrick Township"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2249,32 +3760,29 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Zickrick Township, SD"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
+            "fields": {
+              "address.city": "New York",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Kings County",
+              "address.state": "New York",
+              "name": "New York"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2285,32 +3793,29 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "New York, New York"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Socorro"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New Mexico"
+            "fields": {
+              "address.city": "Socorro",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Socorro County",
+              "address.state": "New Mexico",
+              "name": "Socorro"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2321,32 +3826,29 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Socorro, New Mexico"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Truth Or Consequences"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New Mexico"
+            "fields": {
+              "address.city": "Truth Or Consequences",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Sierra County",
+              "address.state": "New Mexico",
+              "name": "Truth Or Consequences"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2357,27 +3859,28 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Truth or Consequences, NM"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "California"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Monterey County",
+              "address.state": "California",
+              "name": "Carmel-by-the-Sea"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2388,27 +3891,27 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Carmel-by-the-Sea, California"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Springfield"
+            "fields": {
+              "address.city": "Springfield",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "name": "Springfield"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2419,32 +3922,29 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Springfield"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "New York"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New York"
+            "fields": {
+              "address.city": "New York",
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.county": "Kings County",
+              "address.state": "New York",
+              "name": "Crown Heights"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2455,27 +3955,27 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Crown Heights, Brooklyn, New York"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Pennsylvania"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.state": "Pennsylvania",
+              "name": "Pennsylvania"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2486,27 +3986,27 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "Pennsylvania"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "New Mexico"
+            "fields": {
+              "address.country": "United States",
+              "address.country_code": "US",
+              "address.state": "New Mexico",
+              "name": "New Mexico"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -2517,14 +4017,14 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "us",
           "q": "New Mexico"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     }
   ]
 }

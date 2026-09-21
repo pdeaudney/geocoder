@@ -41,22 +41,40 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use query_server::address_points::{AddressPoint, BuildOutputPaths};
+use query_server::address_points::{AddressPoint, AddressPointIndex, BuildOutputPaths};
 use query_server::openaddresses::oa_prefix;
 use s2::cellid::CellID;
 use s2::latlng::LatLng;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const DEFAULT_STREET_CELL_LEVEL: u64 = 17;
 
 /// Per-stage timing — see build-pipeline-perf-plan stage 6.
-struct Stage { name: &'static str, start: Instant }
-impl Stage { fn new(name: &'static str) -> Self { Self { name, start: Instant::now() } } }
-impl Drop for Stage { fn drop(&mut self) { eprintln!("[stage] {}: {:.3}s", self.name, self.start.elapsed().as_secs_f64()); } }
+struct Stage {
+    name: &'static str,
+    start: Instant,
+}
+impl Stage {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            start: Instant::now(),
+        }
+    }
+}
+impl Drop for Stage {
+    fn drop(&mut self) {
+        eprintln!(
+            "[stage] {}: {:.3}s",
+            self.name,
+            self.start.elapsed().as_secs_f64()
+        );
+    }
+}
 
 fn main() {
     let _total = Stage::new("total");
@@ -64,7 +82,9 @@ fn main() {
     if args.len() < 3 {
         eprintln!(
             "Usage: {} <csv-root> <output-dir> [--country cc,cc] [--skip cc,cc] [--street-level N]",
-            args.first().map(String::as_str).unwrap_or("build-openaddresses-index"),
+            args.first()
+                .map(String::as_str)
+                .unwrap_or("build-openaddresses-index"),
         );
         std::process::exit(2);
     }
@@ -82,7 +102,13 @@ fn main() {
         .map(|v| parse_country_list(&v))
         .unwrap_or_else(|| [*b"au"].into_iter().collect());
 
-    match run(&csv_root, &out_dir, street_level, country_filter.as_ref(), &skip) {
+    match run(
+        &csv_root,
+        &out_dir,
+        street_level,
+        country_filter.as_ref(),
+        &skip,
+    ) {
         Ok(()) => eprintln!("Done."),
         Err(e) => {
             eprintln!("build failed: {e}");
@@ -122,8 +148,8 @@ fn run(
     fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {}", out_dir.display(), e))?;
 
     // Discover per-country directories.
-    let entries = fs::read_dir(csv_root)
-        .map_err(|e| format!("read_dir {}: {}", csv_root.display(), e))?;
+    let entries =
+        fs::read_dir(csv_root).map_err(|e| format!("read_dir {}: {}", csv_root.display(), e))?;
     let mut country_dirs: Vec<([u8; 2], PathBuf)> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("read_dir entry: {e}"))?;
@@ -163,7 +189,10 @@ fn run(
     // interleaves across countries, which is fine — nothing parses it.
     use rayon::prelude::*;
     country_dirs.par_iter().try_for_each(|(cc, dir)| {
-        eprintln!("--- building {} ---", std::str::from_utf8(cc).unwrap_or("??"));
+        eprintln!(
+            "--- building {} ---",
+            std::str::from_utf8(cc).unwrap_or("??")
+        );
         build_country(cc, dir, out_dir, street_level)
     })
 }
@@ -252,7 +281,10 @@ fn build_country(
     );
 
     if records.is_empty() {
-        eprintln!("  nothing to write for {}", std::str::from_utf8(cc).unwrap_or("??"));
+        eprintln!(
+            "  nothing to write for {}",
+            std::str::from_utf8(cc).unwrap_or("??")
+        );
         return Ok(());
     }
 
@@ -279,8 +311,7 @@ fn list_csvs(dir: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 fn collect_csvs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries =
-        fs::read_dir(dir).map_err(|e| format!("read_dir {}: {}", dir.display(), e))?;
+    let entries = fs::read_dir(dir).map_err(|e| format!("read_dir {}: {}", dir.display(), e))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("read_dir entry: {e}"))?;
         let path = entry.path();
@@ -298,87 +329,51 @@ fn collect_csvs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-/// Minimal CSV parser for OpenAddresses data. OA's exports are clean
-/// UTF-8 with standard double-quote escaping, so we don't need a full
-/// RFC-4180 implementation — this handles the common cases (quoted
-/// fields, escaped quotes inside quoted fields, commas inside quotes).
+/// OpenAddresses CSV fields can contain commas, escaped quotes, and newlines.
+/// Use a CSV reader so those fields cannot shift address columns silently.
 fn read_csv<F>(path: &Path, mut on_row: F) -> Result<(), String>
 where
     F: FnMut(&CsvRow),
 {
     let file = File::open(path).map_err(|e| format!("open {}: {}", path.display(), e))?;
-    let reader = BufReader::with_capacity(1 << 20, file);
-
-    let mut lines = reader.lines();
-    let header_line = match lines.next() {
-        Some(Ok(l)) => l,
-        Some(Err(e)) => return Err(format!("read {}: {}", path.display(), e)),
-        None => return Ok(()),
-    };
-    let header = parse_csv_line(&header_line);
-    let columns: HashMap<String, usize> = header
+    let mut reader = csv::ReaderBuilder::new()
+        .buffer_capacity(1 << 20)
+        .from_reader(file);
+    let columns: HashMap<String, usize> = reader
+        .headers()
+        .map_err(|e| format!("read CSV header {}: {e}", path.display()))?
         .iter()
         .enumerate()
         .map(|(i, name)| (name.to_ascii_uppercase(), i))
         .collect();
 
     let mut row = CsvRow::new(&columns);
-    for line in lines {
-        let line = line.map_err(|e| format!("read {}: {}", path.display(), e))?;
-        let fields = parse_csv_line(&line);
-        row.set_fields(fields);
+    while reader
+        .read_record(&mut row.fields)
+        .map_err(|e| format!("read CSV {}: {e}", path.display()))?
+    {
         on_row(&row);
     }
     Ok(())
 }
 
 /// Lookup-by-name row view. Keeps the column→index map out of the loop
-/// body so `row.get("LON")` is a single HashMap hit plus a Vec index.
+/// body so `row.get("LON")` is a single HashMap hit plus a record index.
 struct CsvRow<'cols> {
     columns: &'cols HashMap<String, usize>,
-    fields: Vec<String>,
+    fields: csv::StringRecord,
 }
 
 impl<'cols> CsvRow<'cols> {
     fn new(columns: &'cols HashMap<String, usize>) -> Self {
-        CsvRow { columns, fields: Vec::new() }
-    }
-    fn set_fields(&mut self, fields: Vec<String>) {
-        self.fields = fields;
-    }
-    fn get(&self, name: &str) -> Option<&str> {
-        self.columns
-            .get(name)
-            .and_then(|&i| self.fields.get(i))
-            .map(|s| s.as_str())
-    }
-}
-
-fn parse_csv_line(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        match (c, in_quotes) {
-            ('"', false) => in_quotes = true,
-            ('"', true) => {
-                if chars.peek() == Some(&'"') {
-                    // Escaped quote inside quoted field.
-                    cur.push('"');
-                    chars.next();
-                } else {
-                    in_quotes = false;
-                }
-            }
-            (',', false) => {
-                out.push(std::mem::take(&mut cur));
-            }
-            (c, _) => cur.push(c),
+        CsvRow {
+            columns,
+            fields: csv::StringRecord::new(),
         }
     }
-    out.push(cur);
-    out
+    fn get(&self, name: &str) -> Option<&str> {
+        self.columns.get(name).and_then(|&i| self.fields.get(i))
+    }
 }
 
 fn write_output(
@@ -386,6 +381,7 @@ fn write_output(
     strings: &StringPool,
     paths: &BuildOutputPaths,
 ) -> Result<(), String> {
+    AddressPointIndex::invalidate_schema(&paths.points)?;
     let mut points_file = File::create(&paths.points)
         .map_err(|e| format!("create {}: {}", paths.points.display(), e))?;
     let mut cells_file = File::create(&paths.cells)
@@ -440,6 +436,8 @@ fn write_output(
     }
 
     fs::write(&paths.strings, strings.as_bytes()).map_err(io_err(&paths.strings))?;
+    drop((points_file, cells_file, entries_file));
+    AddressPointIndex::write_schema(&paths.points, &paths.cells, &paths.entries, &paths.strings)?;
     Ok(())
 }
 
@@ -476,5 +474,27 @@ impl StringPool {
 
     fn as_bytes(&self) -> &[u8] {
         &self.data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quoted_newline_is_one_address_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("addresses.csv");
+        fs::write(
+            &path,
+            "LON,LAT,NUMBER,STREET\n-77.5,38.3,12533,\"JOSEPHINE\nJOSEPHINE LN\"\n",
+        )
+        .unwrap();
+        let mut streets = Vec::new();
+        read_csv(&path, |row| {
+            streets.push(row.get("STREET").unwrap().to_owned())
+        })
+        .unwrap();
+        assert_eq!(streets, ["JOSEPHINE\nJOSEPHINE LN"]);
     }
 }

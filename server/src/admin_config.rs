@@ -108,14 +108,17 @@ impl AdminConfig {
             .into_iter()
             .map(|(cc, section)| (cc.to_ascii_uppercase(), to_level_map(&section)))
             .collect();
-        AdminConfig { defaults, by_country }
+        AdminConfig {
+            defaults,
+            by_country,
+        }
     }
 
     /// Look up the output entry for `(country_code, admin_level)`. Returns
     /// `None` to mean "no output" (no mapping or explicit `Ignore`).
     pub fn lookup(&self, country_code: Option<&str>, admin_level: u8) -> Option<AdminEntry> {
-        let override_map = country_code
-            .and_then(|cc| self.by_country.get(&cc.to_ascii_uppercase()));
+        let override_map =
+            country_code.and_then(|cc| self.by_country.get(&cc.to_ascii_uppercase()));
 
         if let Some(map) = override_map {
             if let Some(entry) = map.get(&admin_level) {
@@ -170,7 +173,10 @@ mod tests {
         let cfg = AdminConfig::embedded_default();
         assert_eq!(field(cfg.lookup(Some("AU"), 6)), Some(AdminField::County));
         assert_eq!(field(cfg.lookup(Some("AU"), 9)), Some(AdminField::City));
-        assert_eq!(field(cfg.lookup(Some("AU"), 7)), Some(AdminField::CountyIfEmpty));
+        assert_eq!(
+            field(cfg.lookup(Some("AU"), 7)),
+            Some(AdminField::CountyIfEmpty)
+        );
     }
 
     #[test]
@@ -181,15 +187,31 @@ mod tests {
             .expect("AU level 9 should resolve in the embedded default");
         assert_eq!(entry.field, AdminField::City);
         // Cap rejects pastoral-station-sized polygons.
-        let cap = entry.max_area.expect("AU level 9 entry should carry max_area cap");
-        assert!(cap > 0.01 && cap < 0.1, "cap {cap} should be in urban-suburb range");
+        let cap = entry
+            .max_area
+            .expect("AU level 9 entry should carry max_area cap");
+        assert!(
+            cap > 0.01 && cap < 0.1,
+            "cap {cap} should be in urban-suburb range"
+        );
     }
 
     #[test]
     fn nz_overrides_level_6_to_city() {
         let cfg = AdminConfig::embedded_default();
         assert_eq!(field(cfg.lookup(Some("NZ"), 6)), Some(AdminField::City));
-        assert_eq!(field(cfg.lookup(Some("NZ"), 10)), Some(AdminField::CountyIfEmpty));
+        assert_eq!(
+            field(cfg.lookup(Some("NZ"), 10)),
+            Some(AdminField::CountyIfEmpty)
+        );
+    }
+
+    #[test]
+    fn us_compact_level_5_municipality_is_a_city() {
+        let cfg = AdminConfig::embedded_default();
+        let entry = cfg.lookup(Some("US"), 5).expect("US level 5 mapping");
+        assert_eq!(entry.field, AdminField::City);
+        assert_eq!(entry.max_area, Some(0.25));
     }
 
     #[test]

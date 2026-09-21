@@ -47,6 +47,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     wof: bool,
 
+    /// Fetch WhosOnFirst postalcode SQLite (separate from admin SQLite).
+    #[arg(long, default_value_t = false)]
+    wof_postcodes: bool,
+
     /// WoF scope: "planet" (default), "none", or space-separated alpha-2 codes.
     #[arg(long, env = "WOF_COUNTRIES", default_value = "planet")]
     wof_countries: String,
@@ -100,12 +104,13 @@ async fn main() -> Result<()> {
     // a usage error.
     if cli.region.is_none()
         && !cli.wof
+        && !cli.wof_postcodes
         && !cli.openaddresses
         && !cli.maxmind
         && !cli.gnaf
     {
         anyhow::bail!(
-            "no source selected: pass at least one of --region <preset>, --wof, --openaddresses, --maxmind, --gnaf (see --help)"
+            "no source selected: pass at least one of --region <preset>, --wof, --wof-postcodes, --openaddresses, --maxmind, --gnaf (see --help)"
         );
     }
 
@@ -155,6 +160,24 @@ async fn main() -> Result<()> {
             }
             Err(e) => {
                 eprintln!("WoF fetch failed: {e:#}");
+                had_failure = true;
+            }
+        }
+    }
+
+    if cli.wof_postcodes {
+        info!(scope = %cli.wof_countries, "fetching WhosOnFirst postalcode SQLite");
+        match wof::fetch_wof_postcodes(&client, &cli.data_dir, &cli.wof_countries, &opts).await {
+            Ok(reports) => {
+                for r in reports {
+                    summarize_simple("WoF postcodes", &r.dest, &r.outcome);
+                    if r.outcome.is_err() {
+                        had_failure = true;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("WoF postcode fetch failed: {e:#}");
                 had_failure = true;
             }
         }

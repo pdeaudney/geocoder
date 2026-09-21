@@ -26,7 +26,11 @@ fn saint_collapse_at_leading_position() {
 #[test]
 fn mount_collapse_at_leading_position() {
     for variant in ["Mount Pleasant", "Mt Pleasant", "MT Pleasant"] {
-        assert_eq!(normalise_prefix(variant), "mt pleasant", "input: {variant:?}");
+        assert_eq!(
+            normalise_prefix(variant),
+            "mt pleasant",
+            "input: {variant:?}"
+        );
     }
 }
 
@@ -37,16 +41,13 @@ fn fort_collapse_at_leading_position() {
     }
 }
 
-/// Trailing `St` is the OSM convention for "Street" (e.g. `Main St`).
-/// It must NOT collapse to `st` (= Saint) — that's the only ambiguity
-/// the position rule handles. Pinned explicitly so a future edit can't
-/// quietly drop the rule.
+/// Trailing `St` means Street, while leading `St` means Saint.
 #[test]
-fn trailing_st_stays_literal() {
-    assert_eq!(normalise_prefix("Main St"), "main st");
-    assert_eq!(normalise_prefix("Hampton St"), "hampton st");
-    assert_eq!(tokenize_user_input("Main St"), vec!["main", "st"]);
-    assert_eq!(tokenize_user_input("Hampton St"), vec!["hampton", "st"]);
+fn trailing_st_expands_to_street() {
+    assert_eq!(normalise_prefix("Main St"), "main street");
+    assert_eq!(normalise_prefix("Hampton St"), "hampton street");
+    assert_eq!(tokenize_user_input("Main St"), vec!["main", "street"]);
+    assert_eq!(tokenize_user_input("Hampton St"), vec!["hampton", "street"]);
 }
 
 /// Saint as a leading prefix of a 3+ token phrase still folds.

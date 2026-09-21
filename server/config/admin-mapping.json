@@ -26,6 +26,12 @@
         "6": "city",
         "10": "county_if_empty"
       }
+    },
+    "US": {
+      "_note": "New York City is an OSM level-5 municipality. Most US level-5 regions are much larger, so only compact polygons may supply the city field.",
+      "admin": {
+        "5": { "field": "city", "max_area": 0.25 }
+      }
     }
   }
 }

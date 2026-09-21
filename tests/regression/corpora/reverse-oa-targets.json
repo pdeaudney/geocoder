@@ -1,0 +1,15 @@
+{
+  "name": "reverse-oa-targets",
+  "description": "At an imported OpenAddresses point, reverse search should return that house instead of a farther OSM house.",
+  "cases": [
+    {
+      "id": "va-kensington-exact-point",
+      "request": { "method": "GET", "path": "/reverse", "query": { "lat": "38.624117", "lon": "-77.2821749" } },
+      "expect": { "status": 200, "checks": [
+        { "kind": "json_path_equals", "path": "address.house_number", "value": "15364" },
+        { "kind": "json_path_contains_ci", "path": "address.road", "value": "Kensington Park" },
+        { "kind": "json_path_equals", "path": "address.postcode", "value": "22191" }
+      ] }
+    }
+  ]
+}
