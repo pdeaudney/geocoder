@@ -1,21 +1,27 @@
 #!/bin/sh
-set -e
+set -eu
 
 DATA_DIR="${DATA_DIR:-/data}"
+INDEX_DIR="$DATA_DIR/index"
 
-# Docker `auto` mode is intentionally OSM-only — the small-Docker
-# operator gets a working /reverse + /search out of the box on
-# whatever Geofabrik region they pick. WhosOnFirst, OpenAddresses,
-# MaxMind, and G-NAF are NOT fetched here. Worldwide / multi-source
-# builds use the Packer AMI path (packer/build-worldwide.pkr.hcl)
-# or invoke `fetch-data` directly with the full set of source flags.
+has_file() {
+    for file in "$@"; do
+        [ -f "$file" ] && return 0
+    done
+    return 1
+}
+
+has_oa_csv() {
+    [ -d "$DATA_DIR/openaddresses" ] &&
+        [ -n "$(find "$DATA_DIR/openaddresses" -type f -name '*.csv' -print -quit)" ]
+}
 download_pbf() {
     mkdir -p "$DATA_DIR/pbf"
-    if [ -z "$PBF_URLS" ] && [ -n "$REGION" ]; then
+    if [ -z "${PBF_URLS:-}" ] && [ -n "${REGION:-}" ]; then
         DATA_DIR="$DATA_DIR" fetch-data --region "$REGION" --data-dir "$DATA_DIR"
         return
     fi
-    for url in $PBF_URLS; do
+    for url in ${PBF_URLS:-}; do
         filename=$(basename "$url")
         if [ ! -f "$DATA_DIR/pbf/$filename" ]; then
             echo "Downloading $url..."
@@ -26,67 +32,156 @@ download_pbf() {
     done
 }
 
-build_index() {
-    files=""
-    for f in "$DATA_DIR"/pbf/*.osm.pbf; do
-        [ -f "$f" ] && files="$files $f"
+fetch_optional_sources() {
+    # Scope WoF explicitly: its planet SQLite is large. Preloaded SQLite
+    # files are also accepted without asking Docker to download them.
+    if [ -n "${WOF_COUNTRIES:-}" ] && [ "$WOF_COUNTRIES" != "none" ]; then
+        fetch-data --data-dir "$DATA_DIR" --wof --wof-postcodes --wof-countries "$WOF_COUNTRIES"
+    fi
+    if [ -n "${OA_GEOJSON_SOURCES:-}" ]; then
+        # The public GeoJSON importer writes the per-country CSVs consumed
+        # by build-openaddresses-index. Each operator selects source IDs
+        # whose licence permits their use.
+        old_ifs=$IFS
+        IFS=' ,'
+        set -f
+        set -- $OA_GEOJSON_SOURCES
+        set +f
+        IFS=$old_ifs
+        python3 /usr/local/bin/import-oa-geojson.py --output "$DATA_DIR/openaddresses" "$@"
+    fi
+    [ -z "${GNAF_ARCHIVE_URL:-}" ] || fetch-data --data-dir "$DATA_DIR" --gnaf
+    [ "${MAXMIND_ENABLED:-0}" != "1" ] || fetch-data --data-dir "$DATA_DIR" --maxmind
+}
+
+inputs_newer_than_build() {
+    marker="$INDEX_DIR/.docker-build-complete-v1"
+    for file in "$DATA_DIR"/pbf/*.osm.pbf "$DATA_DIR"/whosonfirst-data-*.db "$DATA_DIR"/gnaf/psv/*.psv; do
+        [ -f "$file" ] && [ "$file" -nt "$marker" ] && return 0
     done
-    if [ -z "$files" ]; then
+    [ -d "$DATA_DIR/openaddresses" ] &&
+        [ -n "$(find "$DATA_DIR/openaddresses" -type f -name '*.csv' -newer "$marker" -print -quit)" ]
+}
+
+index_current() {
+    # Older volumes have no completion marker. A bare geo_cells.bin is not
+    # enough: the C++ format changed and a killed build can leave partial files.
+    [ -f "$INDEX_DIR/.docker-build-complete-v1" ] &&
+        [ -s "$INDEX_DIR/geo_cells.bin" ] &&
+        [ -s "$INDEX_DIR/manifest_reverse.json" ] &&
+        grep -Eq '"version"[[:space:]]*:[[:space:]]*3' "$INDEX_DIR/manifest_reverse.json" &&
+        [ -f "$INDEX_DIR/manifest_autocomplete.json" ] &&
+        { [ "${FORWARD_INDEX:-1}" = "0" ] || [ -f "$INDEX_DIR/manifest_forward.json" ]; } &&
+        ! inputs_newer_than_build
+}
+
+build_index() {
+    set -- "$DATA_DIR"/pbf/*.osm.pbf
+    if [ ! -f "$1" ]; then
         echo "Error: no PBF files found in $DATA_DIR/pbf/"
         exit 1
     fi
-    if [ -f "$DATA_DIR/index/geo_cells.bin" ]; then
-        echo "Index already exists, skipping build"
-    else
-        mkdir -p "$DATA_DIR/index"
-        level_args=""
-        [ -n "$STREET_LEVEL" ] && level_args="$level_args --street-level $STREET_LEVEL"
-        [ -n "$ADMIN_LEVEL" ] && level_args="$level_args --admin-level $ADMIN_LEVEL"
-        echo "Building index..."
-        build-index "$DATA_DIR/index" $files $level_args
-        echo "Index built."
+
+    # Build the complete generation in a sibling directory. A failed
+    # optional stage must not replace a working index with mixed files.
+    staged="$DATA_DIR/index.next"
+    rm -rf "$staged"
+    mkdir -p "$staged"
+    [ -z "${STREET_LEVEL:-}" ] || set -- "$@" --street-level "$STREET_LEVEL"
+    [ -z "${ADMIN_LEVEL:-}" ] || set -- "$@" --admin-level "$ADMIN_LEVEL"
+    build-index "$staged" "$@"
+    if [ ! -s "$staged/geo_cells.bin" ] || [ ! -s "$staged/manifest_reverse.json" ]; then
+        echo "Error: build-index left an incomplete reverse index" >&2
+        exit 1
     fi
 
-    # Forward-geocoding tantivy index (optional; enables /search).
-    # Set FORWARD_INDEX=0 to skip.
-    if [ "${FORWARD_INDEX:-1}" = "1" ] && command -v build-forward-index >/dev/null 2>&1; then
-        if [ -d "$DATA_DIR/index/tantivy" ] && [ -n "$(ls -A "$DATA_DIR/index/tantivy" 2>/dev/null)" ]; then
-            echo "Forward index already exists, skipping build"
+    if has_file "$DATA_DIR"/whosonfirst-data-admin-*.db; then
+        wof-importer "$DATA_DIR" "$staged"
+    elif has_file "$DATA_DIR"/whosonfirst-data-postalcode-*.db; then
+        wof-importer "$DATA_DIR" "$staged" --postcodes-only
+    fi
+
+    gnaf_loaded=0
+    if has_file "$DATA_DIR"/gnaf/psv/*.psv; then
+        build-postcode-lookup "$DATA_DIR/gnaf/psv" "$staged"
+        build-gnaf-index "$DATA_DIR/gnaf/psv" "$staged"
+        gnaf_loaded=1
+    fi
+    if has_oa_csv; then
+        if [ "$gnaf_loaded" = "1" ]; then
+            build-openaddresses-index "$DATA_DIR/openaddresses" "$staged"
         else
-            echo "Building forward-geocoding index..."
-            build-forward-index "$DATA_DIR/index"
+            # OA's builder skips AU by default only because G-NAF is
+            # usually present. Keep AU OA points when it is absent.
+            build-openaddresses-index "$DATA_DIR/openaddresses" "$staged" --skip ""
         fi
+    fi
+
+    # Forward search and autocomplete must run last: both consume the
+    # optional G-NAF/OA points and autocomplete consumes WoF postcodes.
+    if [ "${FORWARD_INDEX:-1}" != "0" ]; then
+        if [ -n "${TANTIVY_HEAP_MB:-}" ]; then
+            build-forward-index "$staged" --partition-by-country --tantivy-heap-mb "$TANTIVY_HEAP_MB"
+        else
+            build-forward-index "$staged" --partition-by-country
+        fi
+    fi
+    build-autocomplete-fst "$staged" --layout both
+    printf 'docker-index-v1\n' > "$staged/.docker-build-complete-v1"
+
+    previous="$DATA_DIR/index.previous.$$"
+    restore_previous() {
+        if [ ! -e "$INDEX_DIR" ] && [ -e "$previous" ]; then
+            mv "$previous" "$INDEX_DIR"
+        fi
+    }
+    trap restore_previous EXIT HUP INT TERM
+    if [ -e "$INDEX_DIR" ]; then mv "$INDEX_DIR" "$previous"; fi
+    if ! mv "$staged" "$INDEX_DIR"; then
+        [ ! -e "$previous" ] || mv "$previous" "$INDEX_DIR"
+        exit 1
+    fi
+    [ ! -e "$previous" ] || rm -rf "$previous"
+    trap - EXIT HUP INT TERM
+    echo "Index built at $INDEX_DIR"
+}
+
+run_build() {
+    download_pbf
+    fetch_optional_sources
+    if [ "$1" = "auto" ] && index_current; then
+        echo "Index is current, skipping build"
+    else
+        build_index
     fi
 }
 
 serve() {
-    args="$DATA_DIR/index"
-    if [ -n "$DOMAIN" ]; then
-        args="$args --domain $DOMAIN"
-        if [ -n "$CACHE_DIR" ]; then
-            args="$args --cache $CACHE_DIR"
+    set -- "$INDEX_DIR"
+    if [ -n "${DOMAIN:-}" ]; then
+        set -- "$@" --domain "$DOMAIN"
+        if [ -n "${CACHE_DIR:-}" ]; then
+            set -- "$@" --cache "$CACHE_DIR"
         fi
     else
-        args="$args ${BIND_ADDR:-0.0.0.0:3000}"
+        set -- "$@" "${BIND_ADDR:-0.0.0.0:3000}"
     fi
-    [ -n "$STREET_LEVEL" ] && args="$args --street-level $STREET_LEVEL"
-    [ -n "$ADMIN_LEVEL" ] && args="$args --admin-level $ADMIN_LEVEL"
-    [ -n "$SEARCH_DISTANCE" ] && args="$args --search-distance $SEARCH_DISTANCE"
+    [ -z "${STREET_LEVEL:-}" ] || set -- "$@" --street-level "$STREET_LEVEL"
+    [ -z "${ADMIN_LEVEL:-}" ] || set -- "$@" --admin-level "$ADMIN_LEVEL"
+    [ -z "${SEARCH_DISTANCE:-}" ] || set -- "$@" --search-distance "$SEARCH_DISTANCE"
     echo "Starting server..."
-    exec query-server $args
+    exec query-server "$@"
 }
 
 case "${1:-auto}" in
     build)
-        download_pbf
-        build_index
+        run_build build
         ;;
     serve)
         serve
         ;;
     auto)
-        download_pbf
-        build_index
+        run_build auto
         serve
         ;;
     *)

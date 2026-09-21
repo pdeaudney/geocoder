@@ -37,7 +37,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 COPY server/ server/
-# This builder copies only `server/`, so cargo runs without the
+COPY tools/wof-importer/ tools/wof-importer/
+# This builder copies crates without the root Cargo.toml, so cargo runs without the
 # workspace Cargo.toml and the workspace-level `[profile.release]`
 # (lto = "thin") wouldn't otherwise apply. Set it on the command
 # line to keep parity with local + Packer builds. See
@@ -45,6 +46,9 @@ COPY server/ server/
 RUN cargo build --release --manifest-path server/Cargo.toml \
     --config 'profile.release.lto="thin"' \
     --bins
+RUN cargo build --release --manifest-path tools/wof-importer/Cargo.toml \
+    --config 'profile.release.lto="thin"' \
+    --bin wof-importer
 
 # Stage 3: Runtime
 FROM debian:bookworm-slim
@@ -63,6 +67,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libicu72 \
     curl ca-certificates \
     lbzip2 \
+    python3 \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
@@ -74,6 +79,8 @@ COPY --from=builder-rust /src/server/target/release/build-gnaf-index /usr/local/
 COPY --from=builder-rust /src/server/target/release/build-openaddresses-index /usr/local/bin/
 COPY --from=builder-rust /src/server/target/release/build-autocomplete-fst /usr/local/bin/
 COPY --from=builder-rust /src/server/target/release/fetch-data /usr/local/bin/
+COPY --from=builder-rust /src/tools/wof-importer/target/release/wof-importer /usr/local/bin/
+COPY scripts/import-oa-geojson.py /usr/local/bin/
 COPY entrypoint.sh /usr/local/bin/
 
 RUN chmod +x /usr/local/bin/entrypoint.sh

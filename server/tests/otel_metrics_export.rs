@@ -68,8 +68,9 @@ async fn handler_path_unaffected_by_otlp_outage() {
 
     // 200 fire-and-forget observations. The exporter background task
     // is failing every 200ms in the meantime — recording must stay
-    // sub-millisecond regardless. 5 ms is generous; on the dev box
-    // this completes in tens of microseconds even on debug builds.
+    // sub-millisecond regardless. Allow 20 ms for a single shared-CI
+    // scheduler pause; this still stays well below the exporter's 100 ms
+    // network timeout and catches an observation path awaiting OTLP.
     let mut max_per_call = Duration::ZERO;
     for i in 0..200 {
         let t0 = Instant::now();
@@ -93,7 +94,7 @@ async fn handler_path_unaffected_by_otlp_outage() {
         }
     }
     assert!(
-        max_per_call < Duration::from_millis(5),
+        max_per_call < Duration::from_millis(20),
         "max per-call latency {max_per_call:?} — observation path is awaiting OTLP"
     );
 

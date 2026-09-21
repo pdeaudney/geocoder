@@ -27,3 +27,5 @@ jobs:
       - run: cargo clippy --workspace --all-targets
       # Includes binary-layout, schema rejection, and per-country shard tests.
       - run: cargo test --workspace
+      - name: Test Docker build orchestration
+        run: sh tests/docker-build-mode.sh

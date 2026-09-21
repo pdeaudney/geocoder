@@ -10,26 +10,39 @@
 use query_server::{format_address, AddressDetails};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 struct Counting;
 
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    // Integration tests in this binary run concurrently. Count only the
+    // thread executing the measured formatter so allocations from sibling
+    // tests cannot make this performance assertion flaky.
+    static ALLOCS: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+fn record_alloc() {
+    let _ = ALLOCS.try_with(|allocs| {
+        if let Some(count) = allocs.get() {
+            allocs.set(Some(count + 1));
+        }
+    });
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        record_alloc();
         System.alloc(layout)
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         System.dealloc(ptr, layout)
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        record_alloc();
         System.alloc_zeroed(layout)
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        record_alloc();
         System.realloc(ptr, layout, new_size)
     }
 }
@@ -133,9 +146,13 @@ fn empty_details_returns_none() {
 }
 
 fn count_allocs(f: impl FnOnce()) -> usize {
-    let before = ALLOCS.load(Ordering::Relaxed);
+    ALLOCS.with(|allocs| allocs.set(Some(0)));
     f();
-    ALLOCS.load(Ordering::Relaxed) - before
+    ALLOCS.with(|allocs| {
+        let count = allocs.get().expect("allocation counter enabled");
+        allocs.set(None);
+        count
+    })
 }
 
 #[test]

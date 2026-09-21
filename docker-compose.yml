@@ -1,6 +1,7 @@
 services:
   geocoder:
-    image: traccar/traccar-geocoder
+    build: .
+    image: geocoder:local
     environment:
       - PBF_URLS=https://download.geofabrik.de/europe/monaco-latest.osm.pbf
     ports:

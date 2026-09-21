@@ -28,12 +28,29 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical reference: on-disk
 ### Docker
 
 ```bash
-# All-in-one: download, build index, and serve
-docker run -e REGION=oceania \
-  -v geocoder-data:/data -p 3000:3000 geocoder:latest
+docker build -t geocoder:local .
+# Download, build every available index stage, then exit.
+docker run --rm -e REGION=oceania -v geocoder-data:/data geocoder:local build
+# Serve the completed index.
+docker run --rm -v geocoder-data:/data -p 3000:3000 geocoder:local serve
 ```
 
-The `auto` mode (default) downloads the PBF for a named region, builds the reverse + forward indexes, and starts serving.
+The default `auto` mode combines `build` and `serve`. `build` always rebuilds
+into `/data/index.next` and replaces `/data/index` only after every enabled
+stage succeeds. `auto` reuses a completed index when its source files have not
+changed; an older volume without the current completion marker is rebuilt.
+The stages are OSM reverse, Who's On First country/postcode import, G-NAF
+postcode and address indexes, OpenAddresses address index, per-country forward
+search, and autocomplete. Optional stages run when their source data is present.
+
+Set `WOF_COUNTRIES="au nz us ca gb"` to fetch WoF admin and postcode SQLite for
+those countries. Set `OA_GEOJSON_SOURCES` to a space-separated list of selected
+public OpenAddresses source IDs (or mount prepared CSVs under
+`/data/openaddresses/<country>/`). Set `GNAF_ARCHIVE_URL` to a license-accepted
+G-NAF archive URL for Australia. `MAXMIND_ENABLED=1` fetches the optional IP
+geocoding database. Check OpenAddresses source licences before selecting them.
+See [the worldwide Docker example](docs/worldwide-build.md#docker-build) for
+the five-country command.
 
 Supported region presets: `oceania` (default; full Australia/Oceania continent â€” AU, NZ, Fiji, PNG, Vanuatu, Solomon Is, New Caledonia, Cook Is, Samoa, Tonga, Kiribati, etc.), `australia` and `new-zealand` (sub-region extracts), `africa`, `antarctica`, `asia`, `europe`, `north-america`, `south-america`, `central-america`, `russia`, `usa`, `planet`.
 
@@ -41,7 +58,8 @@ Supported region presets: `oceania` (default; full Australia/Oceania continent â
 # docker-compose.yml
 services:
   geocoder:
-    image: geocoder:latest
+    build: .
+    image: geocoder:local
     environment:
       - REGION=australia
     ports:

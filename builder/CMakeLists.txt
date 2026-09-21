@@ -119,8 +119,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             $<$<CONFIG:Release>:-march=x86-64-v3>
         )
     elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        # Debian Bookworm ships GCC 12, which predates the
+        # `neoverse-v2` spelling. Probe instead of assuming it: Docker's
+        # linux/arm64 build otherwise fails before the indexer compiles.
+        include(CheckCXXCompilerFlag)
+        check_cxx_compiler_flag("-mcpu=neoverse-v2" HAS_NEOVERSE_V2)
+        if(HAS_NEOVERSE_V2)
+            set(ARM_RELEASE_CPU -mcpu=neoverse-v2)
+        else()
+            # Neoverse N2 is the closest GCC 12 target and its output
+            # runs on the Graviton 4 / Neoverse V2 deployment floor.
+            set(ARM_RELEASE_CPU -mcpu=neoverse-n2)
+        endif()
         target_compile_options(build-index PRIVATE
-            $<$<CONFIG:Release>:-mcpu=neoverse-v2>
+            $<$<CONFIG:Release>:${ARM_RELEASE_CPU}>
         )
     endif()
 endif()
