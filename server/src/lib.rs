@@ -394,8 +394,7 @@ impl Index {
         admin_config: AdminConfig,
     ) -> Result<Self, String> {
         manifest::verify_reverse(Path::new(dir))?;
-        let meters_to_rad = search_distance / 111_320.0;
-        let max_distance_sq = meters_to_rad * meters_to_rad;
+        let max_distance_sq = geo::metres_to_dist_sq(search_distance);
         let postcode_lookup = PostcodeLookup::open(Path::new(dir))?;
         let gnaf = Gnaf::open(Path::new(dir))?;
         let open_addresses = OpenAddresses::open(Path::new(dir))?;
@@ -1014,8 +1013,7 @@ impl Index {
             return None;
         }
 
-        let max_rad = max_distance_m / 111_320.0;
-        let max_dist_sq = max_rad * max_rad;
+        let max_dist_sq = geo::metres_to_dist_sq(max_distance_m);
 
         let cell = cell_id_at_level(lat, lng, self.street_cell_level);
         let neighbors = cell_neighbors_at_level(cell, self.street_cell_level);
@@ -1048,16 +1046,10 @@ impl Index {
             });
         }
 
-        best.map(|(_, dist_sq_val, p)| {
-            // Convert dist_sq (radians^2) back to metres for the
-            // response. sqrt + the 111_320 m/rad approximation that
-            // matches dist_sq's input scaling.
-            let dist_m = dist_sq_val.sqrt() * 111_320.0;
-            PoiMatch {
-                name: self.get_string(p.name_id),
-                category: self.get_string(p.category_id),
-                distance_m: dist_m,
-            }
+        best.map(|(_, dist_sq_val, p)| PoiMatch {
+            name: self.get_string(p.name_id),
+            category: self.get_string(p.category_id),
+            distance_m: geo::dist_sq_to_metres(dist_sq_val),
         })
     }
 
@@ -1639,18 +1631,20 @@ pub fn point_to_segment_with_t(
     by: f64,
     cos_lat: f64,
 ) -> (f64, f64) {
+    // Project in the same lng-scaled space `dist_sq` measures in, so the
+    // foot point is the metric nearest point, not the degree-space one.
     let dx = bx - ax;
-    let dy = by - ay;
+    let dy = (by - ay) * cos_lat;
     let len_sq = dx * dx + dy * dy;
 
     let t = if len_sq == 0.0 {
         0.0
     } else {
-        (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0)
+        (((px - ax) * dx + (py - ay) * cos_lat * dy) / len_sq).clamp(0.0, 1.0)
     };
 
     let proj_x = ax + t * dx;
-    let proj_y = ay + t * dy;
+    let proj_y = ay + t * (by - ay);
     let dlat = (px - proj_x).to_radians();
     let dlng = (py - proj_y).to_radians();
     (dist_sq(dlat, dlng, cos_lat), t)

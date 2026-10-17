@@ -174,17 +174,34 @@ fn find_poi_distance_is_reported_in_metres() {
     if pois.is_empty() {
         return;
     }
-    // POI lookup prefers a lower rank before distance. Choose the
-    // globally lowest rank so no nearby POI can displace this point.
-    let p = pois.iter().min_by_key(|p| p.rank).unwrap();
-    // Querying at the POI's own coord should report distance ~0 m.
-    // Floating-point round-trip plus the 111_320-m approximation
-    // means we tolerate a centimetre of slop.
-    if let Some(m) = idx.find_poi(p.lat as f64, p.lng as f64, 100.0) {
-        assert!(
-            m.distance_m >= 0.0 && m.distance_m < 0.05,
-            "self-POI distance should be near-zero in metres, got {}",
-            m.distance_m
-        );
-    }
+    // Query 10 m north of a globally lowest-rank POI. A unit mix-up
+    // between degrees and radians shows up here as a ~57x error, which a
+    // self-coord query (distance 0) can never catch.
+    let min_rank = pois
+        .iter()
+        .map(|p| p.rank)
+        .min()
+        .expect("POI slice checked non-empty above");
+    let p = pois
+        .iter()
+        .find(|p| p.rank == min_rank)
+        .expect("min_rank comes from this slice");
+    let lat = p.lat as f64 + 10.0 / 111_195.0;
+    let lng = p.lng as f64;
+    // Many POIs share the lowest rank, and find_poi prefers lower rank
+    // before distance, so the answer is the nearest min-rank POI, which
+    // may be a neighbour of `p` rather than `p` itself.
+    let expected = pois
+        .iter()
+        .filter(|q| q.rank == min_rank)
+        .map(|q| query_server::geo::haversine_m(lat, lng, q.lat as f64, q.lng as f64))
+        .fold(f64::INFINITY, f64::min);
+    let m = idx
+        .find_poi(lat, lng, 100.0)
+        .expect("a POI 10 m away is inside the 100 m cap");
+    assert!(
+        (m.distance_m - expected).abs() < 0.5,
+        "POI distance should be ~{expected:.2} m, got {}",
+        m.distance_m
+    );
 }
