@@ -292,3 +292,30 @@ fn australia_accuracy() {
         failures.join("\n")
     );
 }
+
+#[test]
+fn reverse_rejects_address_beyond_search_distance() {
+    let Some(index) = load_index() else {
+        eprintln!("SKIP: GEOCODER_INDEX_DIR unset — cannot run accuracy test");
+        return;
+    };
+    // Bondi Beach sand. The nearest OSM address (4a Queen Elizabeth Drive)
+    // is ~109 m away: inside the 9-cell scan, outside the 75 m cap. A
+    // degrees-vs-radians mix-up in the cap once made this return "4a" as
+    // an exact match.
+    let (lat, lng) = (-33.8915, 151.2767);
+    let (nearest, _, _) = index.query_geo(lat, lng);
+    let (_, point) = nearest.expect("Bondi fixture needs an address point in the 9-cell scan");
+    let nearest_m = query_server::geo::haversine_m(lat, lng, point.lat as f64, point.lng as f64);
+    assert!(
+        nearest_m > DEFAULT_SEARCH_DISTANCE + 10.0,
+        "fixture premise broken: nearest address is now {nearest_m:.0} m away; pick a new point"
+    );
+
+    let addr = index.query(lat, lng);
+    assert_eq!(
+        addr.address.house_number, None,
+        "house number returned for an address {nearest_m:.0} m away (cap {DEFAULT_SEARCH_DISTANCE} m)"
+    );
+    assert_ne!(addr.confidence, Some("exact"));
+}
