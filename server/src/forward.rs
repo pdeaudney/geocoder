@@ -607,7 +607,10 @@ pub fn build_with_heap(
         let mid = nodes[offset + count / 2];
         let lat = mid.lat as f64;
         let lng = mid.lng as f64;
-        let admin = idx.find_admin(lat, lng);
+        // Same city as /reverse shows. Without the place fallback, every
+        // same-name street outside a city polygon (such as one in a city's
+        // unincorporated hole) collapses into one doc per country.
+        let admin = idx.find_admin_with_place(lat, lng);
         let suburb_key = admin.city.unwrap_or("").to_string();
         if !seen.insert((way.name_id, suburb_key)) {
             continue;
@@ -1112,7 +1115,8 @@ pub fn build_partitioned_with_heap(
             let mid = nodes[offset + count / 2];
             let lat = mid.lat as f64;
             let lng = mid.lng as f64;
-            let admin = idx.find_admin(lat, lng);
+            // Same city fallback as the serial path above.
+            let admin = idx.find_admin_with_place(lat, lng);
             let cc = country_bytes(admin.country_code)?;
             let suburb_key = admin.city.unwrap_or("").to_string();
             Some((
