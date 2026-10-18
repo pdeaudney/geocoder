@@ -130,3 +130,40 @@ fn point_in_polygon_f64_refimpl(lat: f64, lng: f64, vertices: &[(f64, f64)]) -> 
     }
     inside
 }
+
+#[test]
+fn bridged_ring_excludes_hole() {
+    // build-index writes each admin hole into the outer ring through a
+    // zero-width bridge (o0..ok, h0..hm, h0, ok, ..., o0). Even-odd PIP
+    // must then treat the hole as outside with no reader change.
+    let ring = [
+        n(0.0, 0.0),
+        n(0.0, 10.0),
+        n(10.0, 10.0),
+        n(10.0, 0.0),
+        // bridge from (10, 0) into a 4..6 square hole, walked clockwise
+        // against the outer ring's anticlockwise order
+        n(4.0, 4.0),
+        n(6.0, 4.0),
+        n(6.0, 6.0),
+        n(4.0, 6.0),
+        n(4.0, 4.0),
+        n(10.0, 0.0),
+        n(0.0, 0.0),
+    ];
+    for (lat, lng) in [(1.0_f64, 1.0), (5.0, 8.0), (8.0, 5.0), (7.0, 3.0)] {
+        assert!(
+            point_in_polygon_f64(lat, lng, &ring),
+            "({lat}, {lng}) is in the outer ring only"
+        );
+    }
+    for (lat, lng) in [(5.0_f64, 5.0), (4.1, 5.9), (11.0, 5.0), (-1.0, 5.0)] {
+        assert!(
+            !point_in_polygon_f64(lat, lng, &ring),
+            "({lat}, {lng}) is in the hole or outside"
+        );
+    }
+    // Points on either side of the bridge line (10,0)->(4,4).
+    assert!(point_in_polygon_f64(7.0, 2.1, &ring));
+    assert!(point_in_polygon_f64(7.0, 1.9, &ring));
+}

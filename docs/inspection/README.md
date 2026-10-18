@@ -102,6 +102,8 @@ FROM admin_polygons
 GROUP BY 1 ORDER BY 1;
 
 -- Biggest polygons (likely countries / states).
+-- vertex_count includes the vertices of bridged holes; area_sq_deg is
+-- the outer-ring area (see docs/binary-format.md, "Holes").
 SELECT name, admin_level, country_code, vertex_count, area_sq_deg
 FROM admin_polygons
 ORDER BY area_sq_deg DESC

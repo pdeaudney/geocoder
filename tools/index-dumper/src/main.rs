@@ -16,6 +16,7 @@
 //!   streets.csv           id, osm_way_id, name, node_count, midpoint_lat, midpoint_lng
 //!   place_points.csv      id, name, rank, importance, lat, lng
 //!   admin_polygons.csv    id, name, admin_level, importance, country_code, vertex_count, area_sq_deg
+//!                         (vertex_count includes bridged hole vertices; area is the outer ring)
 //!   addr_points.csv       id, housenumber, street_id, street_name, lat, lng
 //!   interp_ways.csv       id, street_id, street_name, start_number, end_number, interpolation, node_count
 //!   i18n_names.csv        entity_kind, entity_id, lang, localized_name

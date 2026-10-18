@@ -607,7 +607,10 @@ pub fn build_with_heap(
         let mid = nodes[offset + count / 2];
         let lat = mid.lat as f64;
         let lng = mid.lng as f64;
-        let admin = idx.find_admin(lat, lng);
+        // Same city as /reverse shows. Without the place fallback, every
+        // same-name street outside a city polygon (such as one in a city's
+        // unincorporated hole) collapses into one doc per country.
+        let admin = idx.find_admin_with_place(lat, lng);
         let suburb_key = admin.city.unwrap_or("").to_string();
         if !seen.insert((way.name_id, suburb_key)) {
             continue;
@@ -1112,7 +1115,8 @@ pub fn build_partitioned_with_heap(
             let mid = nodes[offset + count / 2];
             let lat = mid.lat as f64;
             let lng = mid.lng as f64;
-            let admin = idx.find_admin(lat, lng);
+            // Same city fallback as the serial path above.
+            let admin = idx.find_admin_with_place(lat, lng);
             let cc = country_bytes(admin.country_code)?;
             let suburb_key = admin.city.unwrap_or("").to_string();
             Some((
@@ -4170,6 +4174,58 @@ pub fn fuzzy_name(schema: &ForwardSchema, token: &str, distance: u8) -> Box<dyn 
         distance,
         true,
     ))
+}
+
+#[cfg(test)]
+mod polygon_centroid_tests {
+    use super::*;
+
+    fn n(lat: f32, lng: f32) -> NodeCoord {
+        NodeCoord { lat, lng }
+    }
+
+    #[test]
+    fn bridged_hole_moves_centroid_away_from_hole() {
+        // A 10x10 square with a 4..6 hole bridged in (see build-index
+        // bridge_holes). The hole is centred, so the centroid stays at the
+        // middle; an off-centre hole pushes it the other way.
+        let centred = [
+            n(0.0, 0.0),
+            n(0.0, 10.0),
+            n(10.0, 10.0),
+            n(10.0, 0.0),
+            n(4.0, 4.0),
+            n(6.0, 4.0),
+            n(6.0, 6.0),
+            n(4.0, 6.0),
+            n(4.0, 4.0),
+            n(10.0, 0.0),
+            n(0.0, 0.0),
+        ];
+        let (lat, lng) = polygon_centroid(&centred);
+        assert!(
+            (lat - 5.0).abs() < 1e-9 && (lng - 5.0).abs() < 1e-9,
+            "({lat}, {lng})"
+        );
+
+        let off_centre = [
+            n(0.0, 0.0),
+            n(0.0, 10.0),
+            n(10.0, 10.0),
+            n(10.0, 0.0),
+            n(6.0, 6.0),
+            n(8.0, 6.0),
+            n(8.0, 8.0),
+            n(6.0, 8.0),
+            n(6.0, 6.0),
+            n(10.0, 0.0),
+            n(0.0, 0.0),
+        ];
+        // (100 * 5 - 4 * 7) / 96 = 4.9167
+        let (lat, lng) = polygon_centroid(&off_centre);
+        assert!((lat - 472.0 / 96.0).abs() < 1e-9, "{lat}");
+        assert!((lng - 472.0 / 96.0).abs() < 1e-9, "{lng}");
+    }
 }
 
 #[cfg(test)]

@@ -211,11 +211,11 @@ Administrative boundary index.
 #[repr(C)]
 pub struct AdminPolygon {
     pub vertex_offset: u32,   // into admin_vertices.bin
-    pub vertex_count: u16,    // number of NodeCoords in the outer ring
+    pub vertex_count: u16,    // NodeCoords in the ring, holes and bridges included
     pub name_id: u32,         // into strings.bin
     pub admin_level: u8,      // OSM admin_level (2–10; 11 for postal_code boundaries)
     pub importance: u8,       // 0..255 prominence (population log + wikidata + wikipedia)
-    pub area: f32,            // shoelace area in deg² (not geodesic)
+    pub area: f32,            // shoelace area in deg² of the outer ring (not geodesic)
     pub country_code: u16,    // packed ISO 3166-1 alpha-2, 0 if unset
 }
 ```
@@ -231,6 +231,33 @@ struct stays 24 bytes (binary-format-stable).
 
 Vertices in `admin_vertices.bin` are densely packed `NodeCoord`
 records; each polygon's ring is `&admin_vertices[vertex_offset..vertex_offset+vertex_count]`.
+`vertex_offset` does not increase with the polygon id: polygons with holes are written after all others.
+
+**Holes.**
+An admin ring can contain zero-width bridges.
+The builder writes each indexed inner ring (hole) into its outer ring as
+`o0 .. ok, h0 .. hm, h0, ok, ok+1 .. o0`, where `ok` is the outer vertex nearest the hole and the hole runs in the opposite direction.
+Each bridge edge is walked once in each direction.
+So even-odd point-in-polygon crosses it an even number of times, and the shoelace area and centroid terms cancel.
+Readers need no hole-specific code: a point in a hole is outside the polygon, and the ring centroid is for the outer ring minus its holes.
+The admin cell covering is built from the same outer ring and holes, so a cell inside a hole carries no entry and a cell that touches a hole is never `INTERIOR_FLAG`.
+The builder drops a hole, and prints a count for each reason, when:
+
+- its area is below 1e-8 deg² (mapping artefacts),
+- an indexed outer ring at the same `admin_level` has the same node set (an enclave; area ranking already resolves it, and cutting the hole would leave gaps where the two rings simplify apart),
+- it has fewer than 3 points after simplification,
+- S2 rejects it after simplification (it crosses itself, the outer ring or another hole, or shares an edge),
+- the simplified outer ring crosses itself (so S2 cannot check it) and a hole vertex is not inside the outer ring,
+- the ring would still pass the `u16` vertex limit with every hole at the minimum cap (smallest holes are dropped first).
+
+Each hole is simplified with the same `admin_level` cap as an outer ring, from its own area.
+When the outer ring and its holes pass the `u16` limit, the hole caps are halved (down to 8) until they fit.
+`area` stays the outer-ring area.
+`find_admin` ranks the polygons that contain a point by area, and an enclave in a skipped hole must still rank below its owner.
+
+A closed way that is a member of a boundary relation with the same `admin_level` and name is not written as its own polygon.
+Old TIGER imports tag member ways like their relation, so the way would otherwise add the outer ring without holes, and each hole as a polygon of the same name.
+Indexes built before holes were indexed have the same format and still load; they just treat holes as inside.
 
 **Note**: `vertex_count` is `u16` (max 65 535). Very large country
 polygons get Douglas-Peucker simplified in the C++ builder before

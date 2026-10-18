@@ -10,9 +10,11 @@
 #include <iostream>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -318,6 +320,41 @@ static uint64_t poi_count_total = 0;
 // second relation+way pass and the convention is well-followed enough
 // that the simpler approach captures most of the value.
 static ankerl::unordered_dense::map<int64_t, uint32_t> node_to_assoc_street;
+// Ways that are members of a boundary relation, keyed with the
+// relation's admin level and name (boundary_way_key). Old TIGER imports
+// tag the member ways like the relation, so each closed member way would
+// also become its own admin area: the outer ring without its holes, and
+// each hole as a polygon of the same name.
+static std::unordered_set<uint64_t> boundary_member_ways;
+
+static uint64_t boundary_way_key(int64_t way_id, uint8_t admin_level, std::string_view name) {
+    uint64_t h = std::hash<std::string_view>{}(name);
+    h ^= static_cast<uint64_t>(way_id) * 0x9E3779B97F4A7C15ULL;
+    h ^= static_cast<uint64_t>(admin_level) << 56;
+    return h;
+}
+
+// admin_level and name as the area handler stores them (11 = postal code).
+// Returns false for tags that are not an indexed boundary.
+static bool boundary_level_and_name(const osmium::TagList& tags, uint8_t& admin_level, const char*& name) {
+    const char* boundary = tags["boundary"];
+    if (!boundary) return false;
+    if (std::strcmp(boundary, "administrative") == 0) {
+        const char* level_str = tags["admin_level"];
+        if (!level_str) return false;
+        int level = std::atoi(level_str);
+        if (level < 2 || level > 10) return false;
+        admin_level = static_cast<uint8_t>(level);
+        name = tags["name"];
+    } else if (std::strcmp(boundary, "postal_code") == 0) {
+        admin_level = 11;
+        name = tags["postal_code"];
+        if (!name) name = tags["name"];
+    } else {
+        return false;
+    }
+    return name != nullptr;
+}
 static ankerl::unordered_dense::map<int64_t, uint32_t> way_to_assoc_street;
 
 // Localized names from OSM `name:<lang>` tags. Populated inline as we
@@ -353,11 +390,24 @@ static S2CellId point_to_cell(double lat, double lng) {
     return S2CellId(S2LatLng::FromDegrees(lat, lng)).parent(kStreetCellLevel);
 }
 
-// Returns pairs of (cell_id, is_interior)
-static std::vector<std::pair<S2CellId, bool>> cover_polygon(const std::vector<std::pair<double,double>>& vertices) {
+using Ring = std::vector<std::pair<double,double>>;
+
+// Why admin holes were dropped (or kept), for the build summary.
+struct HoleStats {
+    uint64_t seen = 0;
+    uint64_t indexed = 0;
+    uint64_t tiny = 0;
+    uint64_t enclave = 0;
+    uint64_t too_few_points = 0;
+    uint64_t invalid = 0;
+    uint64_t vertex_cap = 0;
+};
+static HoleStats hole_stats;
+
+static std::vector<S2Point> ring_to_s2_points(const Ring& ring) {
     std::vector<S2Point> points;
-    points.reserve(vertices.size());
-    for (const auto& [lat, lng] : vertices) {
+    points.reserve(ring.size());
+    for (const auto& [lat, lng] : ring) {
         S2Point p = S2LatLng::FromDegrees(lat, lng).ToPoint();
         if (!points.empty() && points.back() == p) continue;
         points.push_back(p);
@@ -366,6 +416,43 @@ static std::vector<std::pair<S2CellId, bool>> cover_polygon(const std::vector<st
     if (points.size() > 1 && points.front() == points.back()) {
         points.pop_back();
     }
+    return points;
+}
+
+// Planar even-odd test, as the reader does it.
+static bool ring_contains(const Ring& ring, double lat, double lng) {
+    bool inside = false;
+    for (size_t i = 0, j = ring.size() - 1; i < ring.size(); j = i++) {
+        const auto& [ilat, ilng] = ring[i];
+        const auto& [jlat, jlng] = ring[j];
+        if (((ilng > lng) != (jlng > lng)) &&
+            (lat < (jlat - ilat) * (lng - ilng) / (jlng - ilng) + ilat)) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+static std::unique_ptr<S2Polygon> make_s2_polygon(const S2Loop& outer,
+                                                  const std::vector<const S2Loop*>& holes) {
+    std::vector<std::unique_ptr<S2Loop>> loops;
+    loops.emplace_back(outer.Clone());
+    for (const S2Loop* hole : holes) loops.emplace_back(hole->Clone());
+    auto polygon = std::make_unique<S2Polygon>();
+    polygon->set_s2debug_override(S2Debug::DISABLE);
+    polygon->InitNested(std::move(loops));
+    S2Error error;
+    if (polygon->FindValidationError(&error)) return nullptr;
+    return polygon;
+}
+
+// Returns pairs of (cell_id, is_interior). Holes that S2 cannot use
+// (self-crossing, not inside the outer ring, crossing another hole) are
+// removed from `holes`, so the caller writes the same hole set that the
+// covering was built from.
+static std::vector<std::pair<S2CellId, bool>> cover_polygon(const Ring& vertices,
+                                                            std::vector<Ring>& holes) {
+    std::vector<S2Point> points = ring_to_s2_points(vertices);
     if (points.size() < 3) return {};
 
     // A simplified OSM ring can self-intersect even when the original
@@ -381,8 +468,64 @@ static std::vector<std::pair<S2CellId, bool>> cover_polygon(const std::vector<st
     auto loop = std::make_unique<S2Loop>(points, S2Debug::DISABLE);
     loop->Normalize();
     const bool valid = !loop->FindValidationError(&error);
+
+    std::vector<std::unique_ptr<S2Loop>> hole_loops;
+    std::vector<Ring> kept;
+    for (auto& hole : holes) {
+        std::vector<S2Point> hole_points = ring_to_s2_points(hole);
+        if (hole_points.size() < 3) {
+            hole_stats.too_few_points++;
+            continue;
+        }
+        auto hole_loop = std::make_unique<S2Loop>(hole_points, S2Debug::DISABLE);
+        hole_loop->Normalize();
+        bool ok = !hole_loop->FindValidationError(&error);
+        if (ok && valid) ok = loop->Contains(*hole_loop);
+        // S2 cannot check a self-crossing outer ring. A hole that pokes out
+        // of the outer ring would make even-odd PIP claim the part outside.
+        for (size_t i = 0; ok && !valid && i < hole.size(); i++) {
+            ok = ring_contains(vertices, hole[i].first, hole[i].second);
+        }
+        for (size_t i = 0; ok && i < hole_loops.size(); i++) {
+            if (hole_loops[i]->GetRectBound().Intersects(hole_loop->GetRectBound()) &&
+                hole_loops[i]->Intersects(*hole_loop)) {
+                ok = false;
+            }
+        }
+        if (!ok) {
+            hole_stats.invalid++;
+            continue;
+        }
+        hole_loops.push_back(std::move(hole_loop));
+        kept.push_back(std::move(hole));
+    }
+
     std::unique_ptr<S2Polygon> polygon;
-    if (valid) polygon = std::make_unique<S2Polygon>(std::move(loop));
+    if (valid) {
+        std::vector<const S2Loop*> hole_ptrs;
+        for (const auto& h : hole_loops) hole_ptrs.push_back(h.get());
+        polygon = make_s2_polygon(*loop, hole_ptrs);
+        if (!polygon) {
+            // The pairwise checks miss shared edges. Add holes one at a
+            // time and keep each one that leaves the polygon valid.
+            std::vector<const S2Loop*> good;
+            std::vector<Ring> good_rings;
+            for (size_t i = 0; i < hole_loops.size(); i++) {
+                good.push_back(hole_loops[i].get());
+                auto candidate = make_s2_polygon(*loop, good);
+                if (candidate) {
+                    polygon = std::move(candidate);
+                    good_rings.push_back(std::move(kept[i]));
+                } else {
+                    good.pop_back();
+                    hole_stats.invalid++;
+                }
+            }
+            kept = std::move(good_rings);
+            if (!polygon) polygon = make_s2_polygon(*loop, {});
+        }
+    }
+    holes = std::move(kept);
 
     S2RegionCoverer::Options options;
     options.set_max_level(kAdminCellLevel);
@@ -456,9 +599,10 @@ static std::vector<std::pair<S2CellId, bool>> cover_polygon(const std::vector<st
 // exceeds 180° and, when we see one, normalise the ring by shifting
 // the western half east by 360° before the shoelace. Pure-ranking use
 // means the absolute value is still approximate but now monotonic.
-static float polygon_area(const std::vector<std::pair<double,double>>& vertices) {
+// Signed shoelace area: the sign gives the ring orientation.
+static double polygon_signed_area(const std::vector<std::pair<double,double>>& vertices) {
     size_t n = vertices.size();
-    if (n < 3) return 0.0f;
+    if (n < 3) return 0.0;
 
     bool crosses_antimeridian = false;
     for (size_t i = 0; i < n; i++) {
@@ -481,7 +625,11 @@ static float polygon_area(const std::vector<std::pair<double,double>>& vertices)
         area += vertices[i].first * lng_at(j);
         area -= vertices[j].first * lng_at(i);
     }
-    return static_cast<float>(std::fabs(area) / 2.0);
+    return area / 2.0;
+}
+
+static float polygon_area(const std::vector<std::pair<double,double>>& vertices) {
+    return static_cast<float>(std::fabs(polygon_signed_area(vertices)));
 }
 
 // Douglas-Peucker simplification
@@ -1499,10 +1647,7 @@ static float polygon_area_km2(const std::vector<std::pair<double,double>>& verti
     return static_cast<float>(std::fabs(area) / 2.0);
 }
 
-static uint32_t add_admin_polygon(const std::vector<std::pair<double,double>>& vertices,
-                                   const char* name, uint8_t admin_level,
-                                   const char* country_code,
-                                   uint8_t importance) {
+static size_t admin_vertex_cap(uint8_t admin_level, const Ring& vertices) {
     // Vertex cap scaled by admin_level, with a special bump for small
     // countries at level 2. Country borders need high fidelity because
     // reverse-geocode failures cluster within a few km of international
@@ -1515,29 +1660,67 @@ static uint32_t add_admin_polygon(const std::vector<std::pair<double,double>>& v
     // countries to 16000 (and ≤100K to 32000) closes the BE/NL/LU/CH
     // border-bleed failures observed in bench-accuracy. The hard cap
     // of 32000 stays well under uint16_t's 65535 vertex_count limit.
-    size_t max_vertices;
+    // A hole gets its own cap from its own area, so the ZA hole that
+    // Lesotho fills is drawn as finely as Lesotho itself.
     if (admin_level <= 2) {
         float area_km2 = polygon_area_km2(vertices);
-        if (area_km2 <= 100000.0f)      max_vertices = 32000;  // BE/NL/CH/LU
-        else if (area_km2 <= 500000.0f) max_vertices = 16000;  // DE/IT/GB/PL/JP
-        else                            max_vertices = 8000;   // FR/ES/RU/US/...
+        if (area_km2 <= 100000.0f)      return 32000;  // BE/NL/CH/LU
+        else if (area_km2 <= 500000.0f) return 16000;  // DE/IT/GB/PL/JP
+        else                            return 8000;   // FR/ES/RU/US/...
     }
-    else if (admin_level <= 4) max_vertices = 3000;  // states/provinces
-    else if (admin_level <= 6) max_vertices = 1500;  // counties/regions
-    else                       max_vertices = 500;   // cities/districts/suburbs
-    auto simplified = simplify_polygon(vertices, max_vertices);
+    else if (admin_level <= 4) return 3000;  // states/provinces
+    else if (admin_level <= 6) return 1500;  // counties/regions
+    else                       return 500;   // cities/districts/suburbs
+}
+
+// Holes below this area (sq deg, about 100 m²) are mapping artefacts.
+constexpr double kMinHoleAreaSqDeg = 1e-8;
+
+// An admin polygon with holes waits until every boundary is read, so
+// each hole can be checked against every indexed outer ring first.
+struct PendingAdminHoles {
+    uint32_t poly_id;
+    Ring outer;                    // simplified
+    std::vector<Ring> holes;       // raw
+    std::vector<uint64_t> hole_keys;
+};
+static std::vector<PendingAdminHoles> pending_admin_holes;
+// ring_key() of every indexed outer ring.
+static std::unordered_set<uint64_t> indexed_outer_ring_keys;
+
+// Identifies a ring by its admin level and the set of its node ids, so
+// a hole and the outer ring of the enclave that fills it get one key.
+static uint64_t ring_key(uint8_t admin_level, std::vector<int64_t> node_ids) {
+    std::sort(node_ids.begin(), node_ids.end());
+    node_ids.erase(std::unique(node_ids.begin(), node_ids.end()), node_ids.end());
+    uint64_t h = 1469598103934665603ULL ^ admin_level;
+    for (int64_t id : node_ids) {
+        h ^= static_cast<uint64_t>(id);
+        h *= 1099511628211ULL;
+        h ^= h >> 29;
+    }
+    return h;
+}
+
+static void add_admin_cells(uint32_t poly_id, const Ring& outer, std::vector<Ring>& holes) {
+    for (const auto& [cell_id, is_interior] : cover_polygon(outer, holes)) {
+        uint32_t entry = is_interior ? (poly_id | INTERIOR_FLAG) : poly_id;
+        cell_to_admin[cell_id.id()].push_back(entry);
+    }
+}
+
+static uint32_t add_admin_polygon(const Ring& vertices,
+                                   std::vector<Ring> holes,
+                                   std::vector<uint64_t> hole_keys,
+                                   const char* name, uint8_t admin_level,
+                                   const char* country_code,
+                                   uint8_t importance) {
+    auto simplified = simplify_polygon(vertices, admin_vertex_cap(admin_level, vertices));
     if (simplified.size() < 3) return UINT32_MAX;
 
     uint32_t poly_id = checked_u32(admin_polygons.size(), "admin_polygon id");
-    uint32_t vertex_offset = checked_u32(admin_vertices.size(), "admin_vertices offset");
-
-    for (const auto& [lat, lng] : simplified) {
-        admin_vertices.push_back({static_cast<float>(lat), static_cast<float>(lng)});
-    }
 
     AdminPolygon poly{};
-    poly.vertex_offset = vertex_offset;
-    poly.vertex_count = static_cast<uint16_t>(std::min(simplified.size(), size_t(65535)));
     poly.name_id = string_pool.intern(name);
     poly.admin_level = admin_level;
     poly.importance = importance;
@@ -1545,15 +1728,144 @@ static uint32_t add_admin_polygon(const std::vector<std::pair<double,double>>& v
     poly.country_code = (country_code && country_code[0] && country_code[1])
         ? static_cast<uint16_t>((country_code[0] << 8) | country_code[1])
         : 0;
+
+    hole_stats.seen += holes.size();
+    for (size_t i = holes.size(); i-- > 0; ) {
+        if (polygon_area(holes[i]) < kMinHoleAreaSqDeg) {
+            hole_stats.tiny++;
+            holes.erase(holes.begin() + i);
+            hole_keys.erase(hole_keys.begin() + i);
+        }
+    }
+
+    if (!holes.empty()) {
+        // Vertices and cells are written by finalize_admin_holes().
+        admin_polygons.push_back(poly);
+        pending_admin_holes.push_back({poly_id, std::move(simplified), std::move(holes), std::move(hole_keys)});
+        return poly_id;
+    }
+
+    poly.vertex_offset = checked_u32(admin_vertices.size(), "admin_vertices offset");
+    for (const auto& [lat, lng] : simplified) {
+        admin_vertices.push_back({static_cast<float>(lat), static_cast<float>(lng)});
+    }
+    poly.vertex_count = static_cast<uint16_t>(std::min(simplified.size(), size_t(65535)));
     admin_polygons.push_back(poly);
 
     // S2 cell coverage (high bit marks interior cells)
-    auto cell_ids = cover_polygon(simplified);
-    for (const auto& [cell_id, is_interior] : cell_ids) {
-        uint32_t entry = is_interior ? (poly_id | INTERIOR_FLAG) : poly_id;
-        cell_to_admin[cell_id.id()].push_back(entry);
-    }
+    add_admin_cells(poly_id, simplified, holes);
     return poly_id;
+}
+
+// Writes each hole into the outer ring as a zero-width bridge:
+//   o0 .. ok, h0 .. hm, h0, ok, ok+1 .. on, o0
+// Each bridge edge is walked once in each direction, so even-odd PIP
+// crosses it an even number of times and the shoelace terms cancel: the
+// reader and the forward centroid code need no change for holes.
+static Ring bridge_holes(Ring outer, const std::vector<Ring>& holes) {
+    auto open_ring = [](Ring ring) {
+        if (ring.size() > 1 && ring.front() == ring.back()) ring.pop_back();
+        return ring;
+    };
+    outer = open_ring(std::move(outer));
+    const bool outer_ccw = polygon_signed_area(outer) > 0;
+
+    std::vector<std::vector<Ring>> attached(outer.size());
+    for (const auto& hole_in : holes) {
+        Ring hole = open_ring(hole_in);
+        if ((polygon_signed_area(hole) > 0) == outer_ccw) std::reverse(hole.begin(), hole.end());
+        size_t nearest = 0;
+        double best = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < outer.size(); i++) {
+            double dlat = outer[i].first - hole[0].first;
+            double dlng = outer[i].second - hole[0].second;
+            double d = dlat * dlat + dlng * dlng;
+            if (d < best) { best = d; nearest = i; }
+        }
+        attached[nearest].push_back(std::move(hole));
+    }
+
+    Ring ring;
+    for (size_t i = 0; i < outer.size(); i++) {
+        ring.push_back(outer[i]);
+        for (const auto& hole : attached[i]) {
+            ring.insert(ring.end(), hole.begin(), hole.end());
+            ring.push_back(hole[0]);
+            ring.push_back(outer[i]);
+        }
+    }
+    ring.push_back(outer[0]);
+    return ring;
+}
+
+static void finalize_admin_holes() {
+    for (auto& pending : pending_admin_holes) {
+        AdminPolygon& poly = admin_polygons[pending.poly_id];
+        std::vector<const Ring*> raw;
+        std::vector<size_t> caps;
+        for (size_t i = 0; i < pending.holes.size(); i++) {
+            // A hole that another polygon at this level fills exactly (an
+            // enclave) already resolves by area ranking. Cutting it too
+            // would leave thin gaps where the two rings simplify apart.
+            if (indexed_outer_ring_keys.count(pending.hole_keys[i])) {
+                hole_stats.enclave++;
+                continue;
+            }
+            raw.push_back(&pending.holes[i]);
+            caps.push_back(admin_vertex_cap(poly.admin_level, pending.holes[i]));
+        }
+
+        // vertex_count is u16: the outer ring, then each hole plus its
+        // two bridge vertices. Halve the hole caps until the ring fits,
+        // so a polygon with hundreds of holes keeps them all, coarser.
+        constexpr size_t kMinHoleCap = 8;
+        std::vector<Ring> holes;
+        for (;;) {
+            holes.clear();
+            size_t total = pending.outer.size();
+            for (size_t i = 0; i < raw.size(); i++) {
+                auto simplified = simplify_polygon(*raw[i], caps[i]);
+                if (simplified.size() < 4) continue;
+                total += simplified.size() + 1;
+                holes.push_back(std::move(simplified));
+            }
+            bool can_shrink = false;
+            for (size_t& cap : caps) {
+                if (cap > kMinHoleCap) can_shrink = true;
+            }
+            if (total <= 65535 || !can_shrink) break;
+            for (size_t& cap : caps) cap = std::max(kMinHoleCap, cap / 2);
+        }
+        hole_stats.too_few_points += raw.size() - holes.size();
+
+        // Still too many: keep the largest holes.
+        std::sort(holes.begin(), holes.end(), [](const Ring& a, const Ring& b) {
+            return polygon_area(a) > polygon_area(b);
+        });
+        size_t total = pending.outer.size();
+        size_t fit = 0;
+        while (fit < holes.size() && total + holes[fit].size() + 1 <= 65535) {
+            total += holes[fit].size() + 1;
+            fit++;
+        }
+        hole_stats.vertex_cap += holes.size() - fit;
+        holes.resize(fit);
+
+        add_admin_cells(pending.poly_id, pending.outer, holes);
+        hole_stats.indexed += holes.size();
+
+        // poly.area stays the outer-ring area. find_admin ranks polygons
+        // that contain the point by area, and an enclave in a skipped hole
+        // must still rank below its owner even when other holes are cut.
+        Ring ring = bridge_holes(pending.outer, holes);
+        poly.vertex_offset = checked_u32(admin_vertices.size(), "admin_vertices offset");
+        for (const auto& [lat, lng] : ring) {
+            admin_vertices.push_back({static_cast<float>(lat), static_cast<float>(lng)});
+        }
+        poly.vertex_count = static_cast<uint16_t>(ring.size());
+    }
+    pending_admin_holes.clear();
+    pending_admin_holes.shrink_to_fit();
 }
 
 // --- OSM handler (pass 2) ---
@@ -1795,54 +2107,56 @@ public:
             name_str = name;
         }
 
+        // The relation this way belongs to already emits the polygon,
+        // with its holes.
+        if (area.from_way() &&
+            boundary_member_ways.count(boundary_way_key(area.orig_id(), admin_level, name_str))) {
+            return;
+        }
+
         // Extract country code for level 2 boundaries
         const char* country_code = (admin_level == 2)
             ? area.tags()["ISO3166-1:alpha2"]
             : nullptr;
-        // Extract outer ring vertices. Inner rings (holes) are counted
-        // but not written to the index: the on-disk format has no
-        // hole-exclusion flag, and PIP'ing a point that lies inside a
-        // hole would currently return "inside the outer polygon" — a
-        // wrong admin attribution.
-        //
-        // The practical impact is small in almost all cases:
-        //  1. Enclave countries (Lesotho inside ZA, Vatican inside IT)
-        //     have their own admin_level=2 polygon with a smaller area,
-        //     and the reader's area-ranking already prefers the smaller
-        //     polygon. So enclaves resolve correctly despite the hole.
-        //  2. Pure geographic holes (a national-park polygon with a
-        //     valley cut out) can still mis-attribute queries inside
-        //     the hole. This is rare and we accept it as a known bug;
-        //     fixing it requires a format bump (either store holes as
-        //     a separate file or flag them with a new field).
-        //
-        // The inner-ring count is printed in the summary so an operator
-        // can tell how much of their build is affected.
-        //
         // Keep every outer ring here. This file also drives reverse
         // geocoding: dropping detached city parcels or secondary islands
         // would make their admin lookup fail. The Rust forward-index
         // builder deduplicates same-name polygons only for search results.
         for (const auto& outer_ring : area.outer_rings()) {
-            std::vector<std::pair<double,double>> vertices;
+            Ring vertices;
+            std::vector<int64_t> outer_ids;
             for (const auto& node_ref : outer_ring) {
                 if (node_ref.location().valid()) {
                     vertices.emplace_back(node_ref.location().lat(), node_ref.location().lon());
+                    outer_ids.push_back(node_ref.ref());
+                }
+            }
+            std::vector<Ring> holes;
+            std::vector<uint64_t> hole_keys;
+            for (const auto& inner_ring : area.inner_rings(outer_ring)) {
+                Ring hole;
+                std::vector<int64_t> hole_ids;
+                for (const auto& node_ref : inner_ring) {
+                    if (node_ref.location().valid()) {
+                        hole.emplace_back(node_ref.location().lat(), node_ref.location().lon());
+                        hole_ids.push_back(node_ref.ref());
+                    }
+                }
+                if (hole.size() >= 4) {
+                    holes.push_back(std::move(hole));
+                    hole_keys.push_back(ring_key(admin_level, std::move(hole_ids)));
                 }
             }
             if (vertices.size() >= 3) {
                 uint8_t importance = compute_place_importance(area.tags());
                 uint32_t poly_id = add_admin_polygon(
-                    vertices, name_str.c_str(), admin_level, country_code,
-                    importance);
+                    vertices, std::move(holes), std::move(hole_keys),
+                    name_str.c_str(), admin_level, country_code, importance);
                 if (poly_id != UINT32_MAX) {
+                    indexed_outer_ring_keys.insert(ring_key(admin_level, std::move(outer_ids)));
                     collect_i18n_names(area.tags(), ENTITY_ADMIN, poly_id);
                     maybe_emit_english_exonym(area.tags(), ENTITY_ADMIN, poly_id);
                 }
-            }
-            for (const auto& inner_ring : area.inner_rings(outer_ring)) {
-                (void)inner_ring;
-                inner_ring_count_++;
             }
         }
 
@@ -1856,14 +2170,12 @@ public:
     uint64_t building_addr_count() const { return building_addr_count_; }
     uint64_t interp_count() const { return interp_count_; }
     uint64_t admin_count() const { return admin_count_; }
-    uint64_t inner_ring_count() const { return inner_ring_count_; }
 
 private:
     uint64_t way_count_ = 0;
     uint64_t building_addr_count_ = 0;
     uint64_t interp_count_ = 0;
     uint64_t admin_count_ = 0;
-    uint64_t inner_ring_count_ = 0;
 
     void process_building_address(const osmium::Way& way) {
         const auto& wnodes = way.nodes();
@@ -2576,6 +2888,15 @@ static int run_build(int argc, char* argv[]) {
         struct AssocStreetCollector : public osmium::handler::Handler {
             uint64_t relations_seen = 0;
             void relation(const osmium::Relation& rel) {
+                uint8_t admin_level = 0;
+                const char* boundary_name = nullptr;
+                if (boundary_level_and_name(rel.tags(), admin_level, boundary_name)) {
+                    for (const auto& member : rel.members()) {
+                        if (member.type() == osmium::item_type::way) {
+                            boundary_member_ways.insert(boundary_way_key(member.ref(), admin_level, boundary_name));
+                        }
+                    }
+                }
                 const char* type = rel.tags()["type"];
                 if (!type || std::strcmp(type, "associatedStreet") != 0) return;
                 const char* street_name = rel.tags()["name"];
@@ -2652,12 +2973,15 @@ static int run_build(int argc, char* argv[]) {
     std::cerr << "  " << handler.interp_count() << " interpolation ways" << std::endl;
     std::cerr << "  " << handler.admin_count() << " admin/postcode boundaries ("
               << admin_polygons.size() << " polygon rings)" << std::endl;
-    if (handler.inner_ring_count() > 0) {
-        std::cerr << "  " << handler.inner_ring_count()
-                  << " inner rings (holes) seen; not indexed — area ranking"
-                  << " resolves enclaves, pure hole attribution is a known"
-                  << " limitation" << std::endl;
-    }
+
+    finalize_admin_holes();
+    std::cerr << "  " << hole_stats.seen << " admin inner rings (holes): "
+              << hole_stats.indexed << " indexed, dropped "
+              << hole_stats.tiny << " tiny, "
+              << hole_stats.enclave << " enclave-filled, "
+              << hole_stats.too_few_points << " too few points, "
+              << hole_stats.invalid << " invalid after simplification, "
+              << hole_stats.vertex_cap << " over vertex cap" << std::endl;
     std::cerr << "  " << place_count_total << " place=* points" << std::endl;
     std::cerr << "  " << poi_count_total << " POIs" << std::endl;
 
