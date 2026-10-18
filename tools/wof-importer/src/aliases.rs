@@ -34,6 +34,7 @@ enum Rule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Reject {
     LeadingThe,
+    CommonWord,
     Code,
     NoRule,
     SmallPlace,
@@ -97,11 +98,21 @@ fn compact(name: &str) -> String {
         .collect()
 }
 
+const COMMON_WORDS: &[&str] = &[
+    "a", "an", "and", "as", "at", "be", "by", "do", "go", "he", "if", "in", "is", "it", "me",
+    "my", "no", "of", "oh", "ok", "on", "or", "so", "to", "up", "us", "we",
+];
+
 /// Decide whether `alias` (already passed through [`tidy`]) is a short
 /// form of one of `canonical`, the place's own names.
 fn classify(alias: &str, canonical: &[&str]) -> Result<Rule, Reject> {
     if alias.to_lowercase().starts_with("the ") {
         return Err(Reject::LeadingThe);
+    }
+    // An initialism that is also an English word would match every query
+    // that uses the word ("NO" for New Orleans in "No 5 Bar").
+    if COMMON_WORDS.contains(&alias.to_lowercase().as_str()) {
+        return Err(Reject::CommonWord);
     }
     if alias.chars().any(|c| c.is_ascii_digit()) {
         return Err(Reject::NoRule);
@@ -603,6 +614,7 @@ mod tests {
         assert_eq!(rule("PHL", &["Philadelphia"]), Err(Reject::Code));
         assert_eq!(rule("SC", &["Los Angeles"]), Err(Reject::NoRule));
         assert_eq!(rule("Lotus", &["Los Angeles"]), Err(Reject::NoRule));
+        assert_eq!(rule("NO", &["New Orleans"]), Err(Reject::CommonWord));
         assert_eq!(rule("Smell A", &["Los Angeles"]), Err(Reject::NoRule));
     }
 
