@@ -24,7 +24,9 @@ use crate::{
 };
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, Occur, Query, TermQuery};
+use tantivy::query::{
+    AllQuery, BooleanQuery, BoostQuery, ConstScoreQuery, Occur, Query, TermQuery,
+};
 use tantivy::schema::{Field, IndexRecordOption, Schema, Value, FAST, INDEXED, STORED, STRING};
 use tantivy::tokenizer::{AsciiFoldingFilter, LowerCaser, SimpleTokenizer, TextAnalyzer};
 use tantivy::{
@@ -163,6 +165,92 @@ const STREET_TYPE_ABBREVIATIONS: &[(&str, &str)] = &[
     ("jr", "junior"),
     ("sr", "senior"),
 ];
+
+/// Query tokens of a name without a leading "The", so "University of
+/// Sydney" names "The University of Sydney".
+fn name_tokens(name: &str) -> Vec<String> {
+    let mut tokens = tokenize_user_input(name);
+    if tokens.len() > 1 && tokens[0] == "the" {
+        tokens.remove(0);
+    }
+    tokens
+}
+
+/// See `Forward::trailing_city`.
+struct TrailingCity {
+    body: String,
+    name: String,
+    importance: u64,
+}
+
+/// How well `hit` explains every typed token (`typed` is `name_tokens`
+/// of the query): its name alone, or its name followed by the start of
+/// its city ("Queen Street" + Auckland Central for "Queen Street
+/// Auckland"), or of its state ("Richmond" + Victoria).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Explains {
+    No,
+    ByState,
+    ByCity,
+    ByName,
+}
+
+fn explains_query(hit: &Hit, typed: &[String]) -> Explains {
+    let name = name_tokens(&hit.name);
+    if name == typed {
+        return Explains::ByName;
+    }
+    let Some(rest) = typed
+        .strip_prefix(name.as_slice())
+        .filter(|rest| !rest.is_empty())
+    else {
+        return Explains::No;
+    };
+    let starts = |context: &Option<String>| {
+        context
+            .as_deref()
+            .is_some_and(|c| tokenize_user_input(c).starts_with(rest))
+    };
+    if starts(&hit.suburb) {
+        Explains::ByCity
+    } else if starts(&hit.state) {
+        Explains::ByState
+    } else {
+        Explains::No
+    }
+}
+
+/// Compass words that can follow a street type ("Jackson St SE").
+fn is_directional(word: &str) -> bool {
+    matches!(
+        word,
+        "n" | "s"
+            | "e"
+            | "w"
+            | "ne"
+            | "nw"
+            | "se"
+            | "sw"
+            | "north"
+            | "south"
+            | "east"
+            | "west"
+            | "northeast"
+            | "northwest"
+            | "southeast"
+            | "southwest"
+    )
+}
+
+/// Index of the token that is the street type when "St" means Street:
+/// the last token, or the one before trailing compass words ("Jackson St
+/// SE"). A leading "St" is Saint ("St Kilda").
+fn street_st_position<S: AsRef<str>>(words: &[S]) -> Option<usize> {
+    let end = words
+        .iter()
+        .rposition(|w| !is_directional(&w.as_ref().to_ascii_lowercase()))?;
+    (end > 0).then_some(end)
+}
 
 /// Full street-type words, after `STREET_TYPE_ABBREVIATIONS`.
 fn is_street_type(word: &str) -> bool {
@@ -325,6 +413,90 @@ pub struct BuildStats {
     pub places: usize,
     pub streets: usize,
     pub addresses: usize,
+}
+
+/// Place points to leave out of the forward index: the area-centroid
+/// twin of a place. The builder emits a place point for a `place=*` node
+/// and another at the centroid of a `place=*` area; for Greater Melbourne
+/// that centroid is in Dingley Village, 25 km from the CBD node, with the
+/// same name, the same rank and a slightly higher importance. Of two
+/// same-name, same-rank points within 50 km, drop one that lies outside
+/// any locality of its name when the other lies inside one.
+fn misplaced_place_twins(idx: &crate::Index) -> std::collections::HashSet<usize> {
+    let mut skip = std::collections::HashSet::new();
+    let Some(pp) = idx.place_points.as_ref() else {
+        return skip;
+    };
+    let points: &[PlacePoint] = as_typed_slice(pp);
+    let mut groups: std::collections::HashMap<(u32, u8), Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, p) in points.iter().enumerate() {
+        groups.entry((p.name_id, p.rank)).or_default().push(i);
+    }
+    for ((name_id, _), ids) in groups.into_iter().filter(|(_, ids)| ids.len() > 1) {
+        let name = idx.get_string(name_id);
+        let home: Vec<bool> = ids
+            .iter()
+            .map(|&i| {
+                let p = &points[i];
+                idx.find_admin(p.lat as f64, p.lng as f64)
+                    .city
+                    .is_some_and(|city| city.eq_ignore_ascii_case(name))
+            })
+            .collect();
+        for (a, &i) in ids.iter().enumerate() {
+            if home[a] {
+                continue;
+            }
+            let (pi, near) = (&points[i], 50_000.0);
+            if ids.iter().enumerate().any(|(b, &j)| {
+                home[b]
+                    && crate::geo::haversine_m(
+                        pi.lat as f64,
+                        pi.lng as f64,
+                        points[j].lat as f64,
+                        points[j].lng as f64,
+                    ) <= near
+            }) {
+                skip.insert(i);
+            }
+        }
+    }
+    skip
+}
+
+/// Place points by name, for `has_same_name_place`.
+fn place_points_by_name(idx: &crate::Index) -> std::collections::HashMap<u32, Vec<(f64, f64)>> {
+    let mut by_name: std::collections::HashMap<u32, Vec<(f64, f64)>> =
+        std::collections::HashMap::new();
+    if let Some(pp) = idx.place_points.as_ref() {
+        let points: &[PlacePoint] = as_typed_slice(pp);
+        for p in points {
+            by_name
+                .entry(p.name_id)
+                .or_default()
+                .push((p.lat as f64, p.lng as f64));
+        }
+    }
+    by_name
+}
+
+/// A city or suburb polygon (admin level 7+) with a same-name place
+/// point inside it is the same place. Its own doc would sit at the
+/// polygon centroid, which for Greater Melbourne is in Dingley Village,
+/// 25 km from the city, and outrank the place point. States and
+/// counties keep their docs: "New York" the state is not the city.
+fn has_same_name_place(
+    poly: &crate::AdminPolygon,
+    ring: &[NodeCoord],
+    places: &std::collections::HashMap<u32, Vec<(f64, f64)>>,
+) -> bool {
+    poly.admin_level >= 7
+        && places.get(&poly.name_id).is_some_and(|points| {
+            points
+                .iter()
+                .any(|&(lat, lng)| crate::point_in_polygon_f64(lat, lng, ring))
+        })
 }
 
 /// Signed-area-weighted polygon centroid (lat, lng). Falls back to the
@@ -696,9 +868,10 @@ pub fn build_with_heap(
     // Places
     if let Some(pp) = idx.place_points.as_ref() {
         let points: &[PlacePoint] = as_typed_slice(pp);
+        let skip = misplaced_place_twins(&idx);
         for (place_id, p) in points.iter().enumerate() {
             let name = idx.get_string(p.name_id);
-            if name.is_empty() {
+            if name.is_empty() || skip.contains(&place_id) {
                 continue;
             }
             let lat = p.lat as f64;
@@ -771,6 +944,7 @@ pub fn build_with_heap(
     let polys: &[crate::AdminPolygon] = as_typed_slice(&idx.admin_polygons);
     let admin_vertices: &[NodeCoord] = as_typed_slice(&idx.admin_vertices);
     let admin_metro_keep = build_admin_metro_keep_set(polys, admin_vertices, &idx);
+    let places_by_name = place_points_by_name(&idx);
     for (poly_id, poly) in polys.iter().enumerate() {
         if poly.admin_level < 4 || poly.admin_level > 10 {
             continue;
@@ -796,7 +970,9 @@ pub fn build_with_heap(
         // (name, ~11km bucket) cell. The place_point is more
         // authoritative (carries the OSM-curated `place=*` rank).
         let (b_lat, b_lng) = coord_bucket(lat, lng);
-        if place_signature.contains(&(poly.name_id, b_lat, b_lng)) {
+        if place_signature.contains(&(poly.name_id, b_lat, b_lng))
+            || has_same_name_place(poly, &admin_vertices[off..off + cnt], &places_by_name)
+        {
             continue;
         }
 
@@ -1190,12 +1366,13 @@ pub fn build_partitioned_with_heap(
     // the post-collect bucketing is cheap.
     if let Some(pp) = idx.place_points.as_ref() {
         let points: &[PlacePoint] = as_typed_slice(pp);
+        let skip = misplaced_place_twins(&idx);
         let place_candidates: Vec<([u8; 2], PendingDoc<'_>)> = points
             .par_iter()
             .enumerate()
             .filter_map(|(place_id, p)| {
                 let name = idx.get_string(p.name_id);
-                if name.is_empty() {
+                if name.is_empty() || skip.contains(&place_id) {
                     return None;
                 }
                 let lat = p.lat as f64;
@@ -1274,6 +1451,8 @@ pub fn build_partitioned_with_heap(
         let admin_metro_keep = build_admin_metro_keep_set(polys, admin_vertices, &idx);
         let admin_metro_keep_ref = &admin_metro_keep;
         let place_signature_ref = &place_signature;
+        let places_by_name = place_points_by_name(&idx);
+        let places_ref = &places_by_name;
         let admin_candidates: Vec<([u8; 2], PendingDoc<'_>)> = polys
             .par_iter()
             .enumerate()
@@ -1298,7 +1477,9 @@ pub fn build_partitioned_with_heap(
                 }
                 let (lat, lng) = polygon_centroid(&admin_vertices[off..off + cnt]);
                 let (b_lat, b_lng) = coord_bucket(lat, lng);
-                if place_signature_ref.contains(&(poly.name_id, b_lat, b_lng)) {
+                if place_signature_ref.contains(&(poly.name_id, b_lat, b_lng))
+                    || has_same_name_place(poly, &admin_vertices[off..off + cnt], places_ref)
+                {
                     return None;
                 }
                 let admin = idx.find_admin(lat, lng);
@@ -2695,21 +2876,21 @@ impl Forward {
             // An exact match in one country beats a relaxed match in
             // another: a shard that drops ", new york" to find "26th Street
             // West" in Saskatoon must not outrank West 26th Street, New York.
+            // With a bias the distance decides instead: a device near
+            // Sydney AU wants George Street there, not 1 George Street in
+            // Sydney, Nova Scotia.
             let mut hits = Vec::new();
-            for cc in &countries {
+            for cc in countries.iter().filter(|_| q.bias.is_none()) {
                 let code = String::from_utf8_lossy(cc);
                 let Some(active) = self.per_country.get(cc) else {
                     continue;
                 };
-                hits.extend(self.search_once(
+                hits.extend(self.search_strict(
                     active,
                     &StructuredQuery {
                         country_code: Some(&code),
                         ..q.clone()
                     },
-                    true,
-                    true,
-                    true,
                 )?);
             }
             let relax = hits.is_empty();
@@ -2752,16 +2933,59 @@ impl Forward {
                 || q.q
                     .and_then(|text| text.trim_start().chars().next())
                     .is_some_and(|c| c.is_ascii_digit());
-            hits.sort_by(|a, b| {
+            // With a bias the distance in `boosted_score` decides: a device
+            // near Sydney AU wants George Street there, not an exact
+            // 1 George Street in Sydney, Nova Scotia.
+            let seeks_address = seeks_address && q.bias.is_none();
+            // A hit whose name, alone or followed by its city or state,
+            // is exactly what was typed wins the merge: "Richmond" in
+            // Victoria for "Richmond Victoria" (not Richmond Drive in
+            // Victoria, TX), "British Columbia" itself (not a "British"
+            // shop in Columbia, MD). Among those, the city's importance
+            // and then the hit's own decide, because BM25 from different
+            // shards is not comparable: George Street in Sydney NSW before
+            // Sydney, Nova Scotia; the Golden Gate Bridge in California.
+            let typed = q.q.map(name_tokens);
+            // A city the query names by its WoF short name ("new york
+            // city") explains the query as fully as its own name would.
+            let full_match = |hit: &Hit| {
+                if is_aliased_place(&aliased, hit) {
+                    return Explains::ByName;
+                }
+                typed
+                    .as_ref()
+                    .map_or(Explains::No, |typed| explains_query(hit, typed))
+            };
+            let mut keyed: Vec<(Explains, u64, u64, u64, Hit)> = hits
+                .into_iter()
+                .map(|hit| {
+                    let full = full_match(&hit);
+                    let own = if full == Explains::No {
+                        0
+                    } else {
+                        hit.importance
+                    };
+                    (full, prominence(&hit), hit.city_importance, own, hit)
+                })
+                .collect();
+            let bias = q.bias.as_ref();
+            keyed.sort_by(|(fa, pa, ca, oa, a), (fb, pb, cb, ob, b)| {
                 (seeks_address && b.kind == KIND_ADDRESS)
                     .cmp(&(seeks_address && a.kind == KIND_ADDRESS))
-                    .then_with(|| prominence(b).cmp(&prominence(a)))
+                    .then_with(|| fb.cmp(fa))
+                    .then_with(|| pb.cmp(pa))
                     .then_with(|| {
-                        boosted_score(b, q.bias.as_ref())
-                            .total_cmp(&boosted_score(a, q.bias.as_ref()))
+                        if bias.is_none() {
+                            cb.cmp(ca)
+                        } else {
+                            std::cmp::Ordering::Equal
+                        }
                     })
+                    .then_with(|| ob.cmp(oa))
+                    .then_with(|| boosted_score(b, bias).total_cmp(&boosted_score(a, bias)))
                     .then_with(|| a.country_code.cmp(&b.country_code))
             });
+            let mut hits: Vec<Hit> = keyed.into_iter().map(|(_, _, _, _, hit)| hit).collect();
             hits.truncate(q.limit.clamp(1, 50));
             tracing::Span::current().record("geocoder.stage", "fanout");
             tracing::Span::current().record("geocoder.match_count", hits.len());
@@ -2855,7 +3079,7 @@ impl Forward {
             geocoder.stage = "strict",
             geocoder.forward.tantivy_dir = %active.dir_name,
         );
-        let hits = strict_span.in_scope(|| self.search_once(active, &q, true, true, true))?;
+        let hits = strict_span.in_scope(|| self.search_strict(active, &q))?;
         if !hits.is_empty() {
             tracing::Span::current().record("geocoder.stage", "strict");
             tracing::Span::current().record("geocoder.match_count", hits.len());
@@ -3052,6 +3276,203 @@ impl Forward {
         Ok(Vec::new())
     }
 
+    /// Every constraint honoured. When the query ends in the name of a
+    /// city or town in this shard ("Broadway New York", "George Street
+    /// Sydney"), search the rest within that city first: as plain text
+    /// the city words also match POI names ("New York Pizza on Broadway",
+    /// Tucson). Those hits carry the city's importance, so when shards
+    /// merge, Sydney NSW outranks Sydney, Nova Scotia.
+    fn search_strict(
+        &self,
+        active: &FieldedIndex,
+        q: &StructuredQuery<'_>,
+    ) -> Result<Vec<Hit>, String> {
+        let plain = self.search_once(active, q, true, true, true)?;
+        let Some(typed) = q.q.map(name_tokens) else {
+            return Ok(plain);
+        };
+        let best = |hits: &[Hit]| {
+            hits.iter()
+                .map(|hit| explains_query(hit, &typed))
+                .max()
+                .unwrap_or(Explains::No)
+        };
+        let trailing = self.trailing_city(active, q)?;
+        let with_city = |mut hits: Vec<Hit>, importance: u64| {
+            for hit in hits
+                .iter_mut()
+                .filter(|hit| explains_query(hit, &typed) == Explains::ByCity)
+            {
+                hit.city_importance = importance;
+            }
+            hits
+        };
+        // A document that already explains the query by name or city
+        // ("University of Sydney", "Collins Street" in Melbourne) is what
+        // the user asked for.
+        let plain_best = best(&plain);
+        let importance = trailing.as_ref().map_or(0, |city| city.importance);
+        // The plain search found the city itself through another of its
+        // names ("city of new york"): the query is about the city.
+        let names_the_city = |city: &TrailingCity| {
+            let city_tokens = name_tokens(&city.name);
+            plain
+                .iter()
+                .any(|hit| hit.kind == KIND_PLACE && name_tokens(&hit.name) == city_tokens)
+        };
+        let Some(city) =
+            trailing.filter(|city| plain_best < Explains::ByCity && !names_the_city(city))
+        else {
+            return Ok(with_city(plain, importance));
+        };
+        let scoped = self.search_once(
+            active,
+            &StructuredQuery {
+                q: Some(&city.body),
+                city: Some(&city.name),
+                ..q.clone()
+            },
+            true,
+            true,
+            true,
+        )?;
+        // The city reading wins when it finds the place in that city
+        // ("Times Square" in New York, not the streets of that name in
+        // Friendship, New York State). Otherwise a match through the state
+        // stays ("Richmond Victoria" is Richmond in the state of Victoria,
+        // not Richmond Road near a village called Victoria).
+        if best(&scoped) >= Explains::ByCity
+            || (plain_best < Explains::ByState && !scoped.is_empty())
+        {
+            // Every hit here was found in the city, so all carry it.
+            let mut scoped = scoped;
+            for hit in &mut scoped {
+                hit.city_importance = city.importance;
+            }
+            return Ok(scoped);
+        }
+        Ok(plain)
+    }
+
+    /// (rest of the query, city name, city importance) when the last one
+    /// to three words of a comma-free freeform query are exactly the name
+    /// of a city, town or village (rank 16, or a municipality at admin
+    /// levels 5-8) in this shard. Suburbs and hamlets are left out:
+    /// "City" (Canberra) or "Bridge" would turn "daly city" or "Golden
+    /// Gate Bridge" into a city search.
+    fn trailing_city(
+        &self,
+        active: &FieldedIndex,
+        q: &StructuredQuery<'_>,
+    ) -> Result<Option<TrailingCity>, String> {
+        let Some(text) = q.q.filter(|t| !t.contains(',')) else {
+            return Ok(None);
+        };
+        if q.city.is_some()
+            || q.street.is_some()
+            || q.kind == Some(KIND_PLACE)
+            || !self.wof_aliases.places_named(Some(text)).is_empty()
+        {
+            return Ok(None);
+        }
+        let words: Vec<&str> = text.split_whitespace().collect();
+        for n in (1..=3).rev().filter(|&n| n < words.len()) {
+            let (body, tail) = words.split_at(words.len() - n);
+            let tail = tail.join(" ");
+            let places = self.search_once(
+                active,
+                &StructuredQuery {
+                    q: Some(&tail),
+                    kind: Some(KIND_PLACE),
+                    limit: 5,
+                    country_code: q.country_code,
+                    ..Default::default()
+                },
+                false,
+                false,
+                false,
+            )?;
+            let tail_tokens = name_tokens(&tail);
+            if let Some(place) = places
+                .into_iter()
+                .filter(|p| (13..=16).contains(&p.rank) && name_tokens(&p.name) == tail_tokens)
+                .max_by_key(|p| p.importance)
+            {
+                return Ok(Some(TrailingCity {
+                    body: body.join(" "),
+                    name: place.name,
+                    importance: place.importance,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The city a WoF short name inside a longer query stands for, as a
+    /// query on the city field. Two-letter short names count only when
+    /// typed in capitals ("pizza LA", not "calle de la paz").
+    fn alias_city_query(
+        &self,
+        s: &ForwardSchema,
+        tok: &str,
+        text: Option<&str>,
+        country_code: Option<&str>,
+    ) -> Option<Box<dyn Query>> {
+        let text = text?;
+        if text.split_whitespace().count() < 2 {
+            return None;
+        }
+        if tok.len() < 3
+            && !text
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|w| w.len() == tok.len() && w == tok.to_ascii_uppercase())
+        {
+            return None;
+        }
+        // Same weight as a name match, so "pizza nyc" finds pizza in New
+        // York as readily as shops named "NYC Pizza".
+        const ALIAS_CITY_BOOST: f32 = 3.0;
+        // Any of the city's names ("New York", "New York City") will do:
+        // documents in the city name it by only one of them.
+        let names: std::collections::BTreeSet<&str> = self
+            .wof_aliases
+            .places_named(Some(tok))
+            .into_iter()
+            .filter(|p| country_code.is_none_or(|cc| p.cc.eq_ignore_ascii_case(cc.as_bytes())))
+            .map(|p| p.name)
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        // The city field only: "in New York", not shops named "New York
+        // City Pizza" in South Carolina.
+        let name_query = |name: &str| -> Box<dyn Query> {
+            Box::new(BooleanQuery::new(
+                name.split(' ')
+                    .map(|word| {
+                        (
+                            Occur::Must,
+                            Box::new(TermQuery::new(
+                                Term::from_field_text(s.suburb, word),
+                                IndexRecordOption::WithFreqs,
+                            )) as Box<dyn Query>,
+                        )
+                    })
+                    .collect(),
+            ))
+        };
+        let city_q = BooleanQuery::new(
+            names
+                .into_iter()
+                .map(|name| (Occur::Should, name_query(name)))
+                .collect(),
+        );
+        Some(Box::new(BoostQuery::new(
+            Box::new(city_q),
+            ALIAS_CITY_BOOST,
+        )))
+    }
+
     #[tracing::instrument(
         name = "forward.search_once",
         skip_all,
@@ -3119,6 +3540,7 @@ impl Forward {
         // (house_number, state abbreviation, postcode), then every remaining
         // token must match at least one of name/suburb/state. State hints
         // from the parse are additive on top of any structured `state`.
+        let mut street_intent = false;
         let parsed =
             q.q.map(|text| parse_freeform_query_inner(text, q.country_code));
         if let Some(parsed) = parsed.as_ref() {
@@ -3158,7 +3580,6 @@ impl Forward {
                 // address context decide which document wins.
                 let aliases: &[&str] = match tok.as_str() {
                     "st" => &["st", "street"],
-                    "street" => &["street", "st"],
                     "n" => &["n", "north"],
                     "north" => &["north", "n"],
                     "s" => &["s", "south"],
@@ -3221,8 +3642,39 @@ impl Forward {
                     (Occur::Should, suburb_q),
                     (Occur::Should, state_q),
                 ];
-                let token_q = BooleanQuery::new(tok_clauses);
-                clauses.push((Occur::Must, Box::new(token_q)));
+                let token_q: Box<dyn Query> = Box::new(BooleanQuery::new(tok_clauses));
+                // A WoF short name inside a longer query ("pizza nyc")
+                // also matches its city's own name in any field.
+                let token_q = match self.alias_city_query(s, tok, q.q, q.country_code) {
+                    Some(city_q) => Box::new(BooleanQuery::new(vec![
+                        (Occur::Should, token_q),
+                        (Occur::Should, city_q),
+                    ])) as Box<dyn Query>,
+                    None => token_q,
+                };
+                clauses.push((Occur::Must, token_q));
+            }
+            // A street-type word ("5th Avenue New York") asks for a street.
+            // Without a bonus, POIs whose names contain the street ("New
+            // 5th Ave. Nails") outscore it on the extra name tokens. This
+            // also lets "George Street" beat a "St.George" POI when the
+            // house number was not found.
+            const STREET_INTENT_SCORE: f32 = 10.0;
+            let has_house = q.housenumber.is_some_and(|h| !h.trim().is_empty())
+                || parsed.house_number.is_some();
+            street_intent =
+                (!has_house || !use_house) && parsed.rest.iter().any(|tok| is_street_type(tok));
+            if street_intent {
+                clauses.push((
+                    Occur::Should,
+                    Box::new(ConstScoreQuery::new(
+                        Box::new(TermQuery::new(
+                            Term::from_field_u64(s.kind, KIND_STREET),
+                            IndexRecordOption::Basic,
+                        )),
+                        STREET_INTENT_SCORE,
+                    )),
+                ));
             }
         }
 
@@ -3305,31 +3757,42 @@ impl Forward {
                 && q.city.is_none()
                 && q.state.is_none()
         });
-        // A WoF alias ("NYC") reaches its city only through the long
-        // alt_name field, so POIs named "NYC" outscore the city and push
-        // it out of the candidate pool. Boost documents that also carry
-        // the aliased place's own name.
-        const ALIASED_PLACE_BOOST: f32 = 5.0;
+        // A WoF alias ("NYC", "new york city") reaches its city only
+        // through the long alt_name field, so POIs named "NYC" or "New
+        // York City Hall" outscore the city and push it out of the
+        // candidate pool. Give place documents with the aliased place's
+        // own name a flat score above any text match; the exact/alias
+        // rule below then orders them.
+        const ALIASED_PLACE_SCORE: f32 = 1000.0;
         let aliased = self.wof_aliases.places_named(exact_name);
         let aliased_names: std::collections::HashSet<&str> =
             aliased.iter().map(|p| p.name).collect();
         for name in aliased_names {
-            let name_q = BooleanQuery::new(
-                name.split(' ')
-                    .map(|tok| {
-                        (
-                            Occur::Must,
-                            Box::new(TermQuery::new(
-                                Term::from_field_text(s.name, tok),
-                                IndexRecordOption::WithFreqs,
-                            )) as Box<dyn Query>,
-                        )
-                    })
-                    .collect(),
-            );
+            let mut name_clauses: Vec<(Occur, Box<dyn Query>)> = name
+                .split(' ')
+                .map(|tok| {
+                    (
+                        Occur::Must,
+                        Box::new(TermQuery::new(
+                            Term::from_field_text(s.name, tok),
+                            IndexRecordOption::WithFreqs,
+                        )) as Box<dyn Query>,
+                    )
+                })
+                .collect();
+            name_clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(s.kind, KIND_PLACE),
+                    IndexRecordOption::Basic,
+                )),
+            ));
             clauses.push((
                 Occur::Should,
-                Box::new(BoostQuery::new(Box::new(name_q), ALIASED_PLACE_BOOST)),
+                Box::new(ConstScoreQuery::new(
+                    Box::new(BooleanQuery::new(name_clauses)),
+                    ALIASED_PLACE_SCORE,
+                )),
             ));
         }
 
@@ -3400,7 +3863,14 @@ impl Forward {
         let mut candidates: Vec<Hit> = Vec::with_capacity(top.len());
         for (score, addr) in top {
             let doc: TantivyDocument = searcher.doc(addr).map_err(|e| format!("fetch doc: {e}"))?;
-            candidates.push(hit_from_doc(&doc, s, score)?);
+            let mut hit = hit_from_doc(&doc, s, score)?;
+            // `boosted_score` lifts POIs by up to 1.24x for prominence and
+            // streets not at all. When the query names a street type, a
+            // street is at least as prominent as any POI.
+            if street_intent && hit.kind == KIND_STREET {
+                hit.score *= 1.24;
+            }
+            candidates.push(hit);
         }
 
         // Nominatim-style prominence boost: documents with a lower rank
@@ -3945,6 +4415,7 @@ fn hit_from_doc(doc: &TantivyDocument, s: &ForwardSchema, score: f32) -> Result<
             .get_first(s.importance)
             .and_then(|v| v.as_u64())
             .unwrap_or(0),
+        city_importance: 0,
         lat: required_f64(doc, s.lat, "lat")?,
         lng: required_f64(doc, s.lng, "lng")?,
         score,
@@ -3992,9 +4463,9 @@ pub fn tokenize_user_input(s: &str) -> Vec<String> {
             .collect();
         // At the end of a comma-delimited street component, "St" is
         // Street. At the start of "St Louis" it still means Saint.
-        if let Some(last) = part.last_mut().filter(|s| *s == "st") {
-            if words.len() > 1 {
-                *last = "street".to_owned();
+        if let Some(pos) = street_st_position(&part) {
+            if part[pos] == "st" {
+                part[pos] = "street".to_owned();
             }
         }
         canonicalise_ordinals(&mut part, true);
@@ -4075,6 +4546,11 @@ pub fn canonicalise_phrase(s: &str) -> String {
         return String::new();
     }
     let last = words.len() - 1;
+    let keys: Vec<String> = words
+        .iter()
+        .map(|w| ascii_fold(w.trim_end_matches('.')).to_ascii_lowercase())
+        .collect();
+    let st_at = street_st_position(&keys);
 
     let mut out = String::with_capacity(s.len());
     let mut first = true;
@@ -4089,7 +4565,7 @@ pub fn canonicalise_phrase(s: &str) -> String {
         let trimmed = word.trim_end_matches('.');
         let key_owned = ascii_fold(trimmed).to_ascii_lowercase();
 
-        if i == last && key_owned == "st" && words.len() > 1 {
+        if Some(i) == st_at && key_owned == "st" {
             out.push_str("street");
             continue;
         }
@@ -4744,6 +5220,11 @@ pub struct Hit {
     /// response; used only for re-ranking.
     #[serde(skip)]
     pub importance: u64,
+    /// Importance of the city a city-scoped search matched this hit in
+    /// ("George Street Sydney"), else 0. Cross-country merges compare it
+    /// because BM25 scores from different shards are not comparable.
+    #[serde(skip)]
+    pub city_importance: u64,
     pub lat: f64,
     pub lng: f64,
     pub score: f32,
@@ -4773,6 +5254,69 @@ mod query_normalizer_tests {
         assert_eq!(canonicalise_phrase("New York"), "New York");
         // In a query the first number is the house number.
         assert_eq!(toks("310 7 Street"), vec!["310", "7th", "street"]);
+    }
+
+    #[test]
+    fn st_before_a_compass_word_is_street_and_leading_st_is_saint() {
+        assert_eq!(toks("Jackson St SE"), vec!["jackson", "street", "se"]);
+        assert_eq!(canonicalise_phrase("Jackson St SE"), "Jackson street SE");
+        assert_eq!(toks("Main St"), vec!["main", "street"]);
+        // "St.George" is Saint George: a query for George Street must not
+        // reach it through an st/street alias.
+        assert_eq!(toks("St George"), vec!["st", "george"]);
+    }
+
+    fn hit_at(name: &str, suburb: Option<&str>, state: Option<&str>) -> Hit {
+        Hit {
+            name: name.to_owned(),
+            housenumber: None,
+            unit: None,
+            postcode: None,
+            suburb: suburb.map(str::to_owned),
+            state: state.map(str::to_owned),
+            country_code: None,
+            kind: KIND_STREET,
+            rank: 26,
+            importance: 0,
+            city_importance: 0,
+            lat: 0.0,
+            lng: 0.0,
+            score: 1.0,
+        }
+    }
+
+    #[test]
+    fn explains_query_grades_name_city_and_state() {
+        let typed = |q: &str| name_tokens(q);
+        assert_eq!(
+            explains_query(
+                &hit_at("The University of Sydney", Some("Camperdown"), None),
+                &typed("University of Sydney")
+            ),
+            Explains::ByName
+        );
+        assert_eq!(
+            explains_query(
+                &hit_at("Queen Street", Some("Auckland Central"), Some("Auckland")),
+                &typed("Queen Street Auckland")
+            ),
+            Explains::ByCity
+        );
+        assert_eq!(
+            explains_query(
+                &hit_at("Richmond", Some("Richmond"), Some("Victoria")),
+                &typed("Richmond Victoria")
+            ),
+            Explains::ByState
+        );
+        assert_eq!(
+            explains_query(
+                &hit_at("Richmond Road", Some("Victoria Vale"), Some("Queensland")),
+                &typed("Richmond Victoria")
+            ),
+            Explains::No
+        );
+        assert!(Explains::ByName > Explains::ByCity && Explains::ByCity > Explains::ByState);
     }
 
     #[test]
@@ -4919,6 +5463,7 @@ mod wof_alias_tests {
             kind,
             rank: 16,
             importance: 0,
+            city_importance: 0,
             lat,
             lng,
             score: 1.0,
@@ -5140,6 +5685,7 @@ mod bias_curve_tests {
             kind: KIND_PLACE,
             rank: 16,
             importance,
+            city_importance: 0,
             lat,
             lng,
             score,
