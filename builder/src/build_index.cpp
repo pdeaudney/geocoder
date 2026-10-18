@@ -706,6 +706,38 @@ static std::vector<std::pair<double,double>> simplify_polygon(
     return result;
 }
 
+// Admin rings that S2 rejected after simplification, for the build summary.
+struct RingRetryStats {
+    uint64_t retried = 0;   // needed a larger cap to become a valid S2 loop
+    uint64_t invalid = 0;   // invalid even at the largest cap
+};
+static RingRetryStats outer_retry_stats;
+static RingRetryStats hole_retry_stats;
+
+// Douglas-Peucker can make a valid ring cross itself. S2 then cannot
+// build an interior covering for it or check its holes, and even-odd PIP
+// gets the crossed part wrong. Double the cap until the ring is a valid
+// S2 loop. If even `max_vertices` (or the raw ring) is invalid, return
+// the ring at the first cap, as before.
+static Ring simplify_valid_ring(const Ring& raw, size_t cap, size_t max_vertices,
+                                RingRetryStats& stats) {
+    auto valid = [](const Ring& ring) {
+        S2Loop loop(ring_to_s2_points(ring), S2Debug::DISABLE);
+        S2Error error;
+        return !loop.FindValidationError(&error);
+    };
+    Ring first = simplify_polygon(raw, cap);
+    if (ring_to_s2_points(first).size() < 3 || valid(first)) return first;
+    stats.retried++;
+    while (cap < raw.size() && cap < max_vertices) {
+        cap = std::min(cap * 2, max_vertices);
+        Ring ring = simplify_polygon(raw, cap);
+        if (valid(ring)) return ring;
+    }
+    stats.invalid++;
+    return first;
+}
+
 // --- Highway filter ---
 
 // Highway values excluded from the street index. Narrowly scoped to
@@ -1715,7 +1747,9 @@ static uint32_t add_admin_polygon(const Ring& vertices,
                                    const char* name, uint8_t admin_level,
                                    const char* country_code,
                                    uint8_t importance) {
-    auto simplified = simplify_polygon(vertices, admin_vertex_cap(admin_level, vertices));
+    // Half the u16 vertex_count stays free for the holes.
+    auto simplified = simplify_valid_ring(vertices, admin_vertex_cap(admin_level, vertices),
+                                          32768, outer_retry_stats);
     if (simplified.size() < 3) return UINT32_MAX;
 
     uint32_t poly_id = checked_u32(admin_polygons.size(), "admin_polygon id");
@@ -1820,11 +1854,14 @@ static void finalize_admin_holes() {
         // so a polygon with hundreds of holes keeps them all, coarser.
         constexpr size_t kMinHoleCap = 8;
         std::vector<Ring> holes;
+        RingRetryStats retry;
         for (;;) {
             holes.clear();
+            retry = {};
             size_t total = pending.outer.size();
             for (size_t i = 0; i < raw.size(); i++) {
-                auto simplified = simplify_polygon(*raw[i], caps[i]);
+                auto simplified = simplify_valid_ring(*raw[i], caps[i],
+                                                      65535 - pending.outer.size(), retry);
                 if (simplified.size() < 4) continue;
                 total += simplified.size() + 1;
                 holes.push_back(std::move(simplified));
@@ -1836,6 +1873,8 @@ static void finalize_admin_holes() {
             if (total <= 65535 || !can_shrink) break;
             for (size_t& cap : caps) cap = std::max(kMinHoleCap, cap / 2);
         }
+        hole_retry_stats.retried += retry.retried;
+        hole_retry_stats.invalid += retry.invalid;
         hole_stats.too_few_points += raw.size() - holes.size();
 
         // Still too many: keep the largest holes.
@@ -2982,6 +3021,11 @@ static int run_build(int argc, char* argv[]) {
               << hole_stats.too_few_points << " too few points, "
               << hole_stats.invalid << " invalid after simplification, "
               << hole_stats.vertex_cap << " over vertex cap" << std::endl;
+    std::cerr << "  admin rings invalid after simplification: "
+              << outer_retry_stats.retried << " outer, "
+              << hole_retry_stats.retried << " holes re-simplified with a larger vertex cap, "
+              << outer_retry_stats.invalid << " outer, "
+              << hole_retry_stats.invalid << " holes still invalid" << std::endl;
     std::cerr << "  " << place_count_total << " place=* points" << std::endl;
     std::cerr << "  " << poi_count_total << " POIs" << std::endl;
 
