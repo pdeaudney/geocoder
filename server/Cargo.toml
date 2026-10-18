@@ -31,6 +31,10 @@ rustls-acme = { version = "0.14", features = ["axum"] }
 axum-server = "0.7"
 arc-swap = "1.7"
 tantivy = { version = "0.22", optional = true }
+# Spell correction walks tantivy's term dictionary with a Levenshtein
+# automaton. Same versions tantivy uses, so nothing new is built.
+tantivy-fst = { version = "0.5", optional = true }
+levenshtein_automata = { version = "0.2", optional = true }
 maxminddb = "0.24"
 fst = "0.4"
 # H3 hexagonal spatial index — pure-Rust, from-scratch implementation
@@ -146,7 +150,7 @@ rust_icu_sys = { version = "5", optional = true }
 default = ["forward", "grpc", "translit"]
 # `forward` wires in tantivy for the /search endpoint. Drop it for a lean
 # reverse-only build.
-forward = ["dep:tantivy"]
+forward = ["dep:tantivy", "dep:tantivy-fst", "dep:levenshtein_automata"]
 # `grpc` starts a gRPC server alongside the REST API on a separate port.
 # Messages mirror the REST JSON shape; see server/proto/geocoder.proto.
 grpc = ["dep:tonic", "dep:prost"]

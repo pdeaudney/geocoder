@@ -24,7 +24,7 @@ use crate::{
 };
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, Occur, Query, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, Schema, Value, FAST, INDEXED, STORED, STRING};
 use tantivy::tokenizer::{AsciiFoldingFilter, LowerCaser, SimpleTokenizer, TextAnalyzer};
 use tantivy::{
@@ -2140,7 +2140,62 @@ impl Forward {
         )
     )]
     pub fn search_structured(&self, q: StructuredQuery<'_>) -> Result<Vec<Hit>, String> {
-        self.search_structured_inner(q, true)
+        let hits = self.search_structured_inner(q.clone(), true)?;
+        if !hits.is_empty() {
+            return Ok(hits);
+        }
+        // Last resort: correct misspelt words ("3577 Jakson Stret San
+        // Fransisco") and search again, so the corrected query ranks like
+        // a typed one. Term counts come from every shard the query could
+        // reach, so one shard's rare spelling cannot pick a local match.
+        // A country we hold no data for ("sendai, japan") stays empty
+        // rather than turning into a near spelling somewhere else.
+        let country = q.country_code.map(str::to_owned).or_else(|| {
+            q.q.and_then(|text| country_suffix(text, Some(&self.country_aliases), None))
+                .map(|(_, cc)| cc)
+        });
+        let shards: Vec<&FieldedIndex> = match country.as_deref() {
+            Some(cc) => match self.pick(Some(cc)) {
+                Some((active, _)) => vec![active],
+                None => return Ok(hits),
+            },
+            None => self
+                .per_country
+                .values()
+                .chain(self.default.iter())
+                .collect(),
+        };
+        let corrected = |text: Option<&str>| text.and_then(|t| correct_spelling(&shards, t));
+        let (q_fix, street_fix, city_fix) =
+            (corrected(q.q), corrected(q.street), corrected(q.city));
+        if q_fix.is_none() && street_fix.is_none() && city_fix.is_none() {
+            return Ok(hits);
+        }
+        let kept: Vec<String> = [&q_fix, &street_fix, &city_fix]
+            .into_iter()
+            .flatten()
+            .flat_map(|(_, kept)| kept.iter().cloned())
+            .collect();
+        let mut hits = self.search_structured_inner(
+            StructuredQuery {
+                q: q_fix.as_ref().map(|(text, _)| text.as_str()).or(q.q),
+                street: street_fix
+                    .as_ref()
+                    .map(|(text, _)| text.as_str())
+                    .or(q.street),
+                city: city_fix.as_ref().map(|(text, _)| text.as_str()).or(q.city),
+                ..q
+            },
+            true,
+        )?;
+        // The ladder may relax a corrected query by dropping words. A
+        // result that drops a word the user typed correctly ("japan" in
+        // "sendai, japan") is a guess about a different place.
+        hits.retain(|hit| hit_names_all(hit, &kept));
+        if !hits.is_empty() {
+            tracing::Span::current().record("geocoder.stage", "spelling");
+        }
+        Ok(hits)
     }
 
     fn search_structured_inner(
@@ -2345,6 +2400,49 @@ impl Forward {
                     }
                 }
             }
+            // A postcode names its country: search only the shards that
+            // have addresses with it. Each shard otherwise ranks its own
+            // postcode-less POIs ("starbucks 10010") and the merge below
+            // cannot tell which shard knew the postcode. With no country a
+            // trailing five-digit token parses as an AU/NZ rural house
+            // number, so also offer the last token; the lookup decides.
+            let postcode = q.postcode.map(str::to_owned).or_else(|| {
+                let text = q.q?;
+                parse_freeform_query_inner(text, None).postcode.or_else(|| {
+                    let tokens = tokenize_user_input(text);
+                    let last = normalize_postcode(tokens.last()?);
+                    (tokens.len() > 1 && postcode_shape(&last)).then_some(last)
+                })
+            });
+            if let Some(code) = postcode.as_deref() {
+                let mut known = Vec::new();
+                for cc in &countries {
+                    let cc_str = String::from_utf8_lossy(cc);
+                    let Some(active) = self.per_country.get(cc) else {
+                        continue;
+                    };
+                    let located = self.search_once(
+                        active,
+                        &StructuredQuery {
+                            q: None,
+                            postcode: Some(code),
+                            kind: Some(KIND_ADDRESS),
+                            country_code: Some(&cc_str),
+                            limit: 1,
+                            ..Default::default()
+                        },
+                        false,
+                        true,
+                        false,
+                    )?;
+                    if !located.is_empty() {
+                        known.push(*cc);
+                    }
+                }
+                if !known.is_empty() {
+                    countries = known;
+                }
+            }
             let mut hits = Vec::new();
             for cc in countries {
                 let code = String::from_utf8_lossy(&cc);
@@ -2530,48 +2628,56 @@ impl Forward {
                 || q.state.is_some()
                 || parsed.as_ref().is_some_and(|p| !p.rest.is_empty());
             if has_text {
-                let hits = self.search_once(active, &q, false, false, false)?;
-                if !hits.is_empty() {
-                    return Ok(hits);
-                }
-            }
-        }
-
-        // Last-resort typo tolerance — retry the freeform `q` with fuzzy
-        // name matching (Levenshtein distance 1). Only fires after the
-        // ladder has failed, so we never pay fuzzy's 2-3x cost on queries
-        // the strict path already resolved.
-        if !has_house
-            && !has_postcode
-            && q.street.is_none()
-            && q.city.is_none()
-            && q.state.is_none()
-        {
-            if let Some(q_text) = q.q.filter(|s| !s.trim().is_empty()) {
-                if let Some((active, variant)) = self.active_index(&q) {
-                    let fuzzy_span = tracing::info_span!(
-                        target: "query_server::forward",
-                        "forward.ladder.rung",
-                        geocoder.stage = "fuzzy",
-                        geocoder.forward.tantivy_dir = %active.dir_name,
-                        geocoder.forward.index_variant = variant,
-                    );
-                    if let Some(hits) = fuzzy_span.in_scope(|| {
-                        self.search_fuzzy(
+                // A POI or place has no postcode field ("starbucks 10010"),
+                // so use the postcode's addresses as the location instead:
+                // their city as a filter, and their position as the bias.
+                let mut text_query = q.clone();
+                let mut postcode_city = None;
+                if text_query.bias.is_none() && !has_house {
+                    if let Some(code) = parsed.as_ref().and_then(|p| p.postcode.as_deref()) {
+                        let located = self.search_once(
                             active,
-                            q_text,
-                            q.country_code,
-                            q.kind,
-                            q.limit,
-                            q.bias.as_ref(),
-                        )
-                    })? {
-                        if !hits.is_empty() {
-                            tracing::Span::current().record("geocoder.stage", "fuzzy");
-                            tracing::Span::current().record("geocoder.match_count", hits.len());
-                            return Ok(hits);
+                            &StructuredQuery {
+                                q: None,
+                                postcode: Some(code),
+                                kind: Some(KIND_ADDRESS),
+                                limit: 1,
+                                ..q.clone()
+                            },
+                            false,
+                            true,
+                            false,
+                        )?;
+                        if let Some(hit) = located.into_iter().next() {
+                            text_query.bias = Some(BiasCoord {
+                                lat: hit.lat,
+                                lng: hit.lng,
+                            });
+                            postcode_city = hit.suburb;
                         }
                     }
+                }
+                if let Some(city) = postcode_city
+                    .as_deref()
+                    .filter(|_| text_query.city.is_none())
+                {
+                    let hits = self.search_once(
+                        active,
+                        &StructuredQuery {
+                            city: Some(city),
+                            ..text_query.clone()
+                        },
+                        false,
+                        false,
+                        false,
+                    )?;
+                    if !hits.is_empty() {
+                        return Ok(hits);
+                    }
+                }
+                let hits = self.search_once(active, &text_query, false, false, false)?;
+                if !hits.is_empty() {
+                    return Ok(hits);
                 }
             }
         }
@@ -2675,90 +2781,6 @@ impl Forward {
         Ok(Vec::new())
     }
 
-    /// Fuzzy fallback: construct a BooleanQuery of FuzzyTermQueries (edit
-    /// distance 1) over the parsed tokens. Fires only when the strict
-    /// ladder found nothing — typo tolerance isn't free (~2-3x tantivy
-    /// cost) and we'd rather not blur scoring on queries that matched.
-    #[tracing::instrument(
-        name = "forward.search_fuzzy",
-        skip_all,
-        fields(
-            geocoder.q = q_text,
-            geocoder.kind = kind_filter.unwrap_or(0),
-            geocoder.limit = limit,
-            geocoder.match_count = tracing::field::Empty,
-        )
-    )]
-    fn search_fuzzy(
-        &self,
-        active: &FieldedIndex,
-        q_text: &str,
-        country_code: Option<&str>,
-        kind_filter: Option<u64>,
-        limit: usize,
-        bias: Option<&BiasCoord>,
-    ) -> Result<Option<Vec<Hit>>, String> {
-        let parsed = parse_freeform_query_inner(q_text, country_code);
-        if parsed.rest.is_empty() {
-            return Ok(None);
-        }
-        let s = &active.schema;
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-        for tok in &parsed.rest {
-            // Edit distance 1 is the sweet spot: catches most single-char
-            // typos ("sidny"→"sydney") without blurring into false
-            // positives (distance 2 matches anything remotely similar).
-            let fuzzy = FuzzyTermQuery::new(Term::from_field_text(s.name, tok), 1, true);
-            clauses.push((Occur::Must, Box::new(fuzzy)));
-        }
-        clauses.push((
-            Occur::MustNot,
-            Box::new(TermQuery::new(
-                Term::from_field_u64(s.kind, KIND_ADDRESS),
-                IndexRecordOption::Basic,
-            )),
-        ));
-        if let Some(cc) = country_code {
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(s.country_code, &cc.to_ascii_uppercase()),
-                    IndexRecordOption::Basic,
-                )),
-            ));
-        }
-        if let Some(k) = kind_filter {
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    Term::from_field_u64(s.kind, k),
-                    IndexRecordOption::Basic,
-                )),
-            ));
-        }
-        let boolean = BooleanQuery::new(clauses);
-        let limit = limit.clamp(1, 50);
-        let searcher = active.reader.searcher();
-        let top = searcher
-            .search(&boolean, &TopDocs::with_limit(limit * 3))
-            .map_err(|e| format!("fuzzy search: {e}"))?;
-        let mut hits = Vec::with_capacity(top.len());
-        for (score, addr) in top {
-            let doc: TantivyDocument = searcher.doc(addr).map_err(|e| format!("fetch doc: {e}"))?;
-            hits.push(hit_from_doc(&doc, s, score)?);
-        }
-        // Re-rank with the prominence boost + optional proximity bias,
-        // same as the strict path.
-        hits.sort_by(|a, b| {
-            boosted_score(b, bias)
-                .partial_cmp(&boosted_score(a, bias))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        hits.truncate(limit);
-        tracing::Span::current().record("geocoder.match_count", hits.len());
-        Ok(Some(hits))
-    }
-
     #[tracing::instrument(
         name = "forward.search_once",
         skip_all,
@@ -2780,35 +2802,38 @@ impl Forward {
 
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
-        // Structured fields: MUST match each requested token. Using
-        // FuzzyTermQuery with distance 0 to get analyzer-aware matching
-        // (lowercasing) for free; distance 1 could be added for typo
-        // tolerance once we're confident in recall.
+        // Structured fields: MUST match each requested token.
         if let Some(street) = q.street.filter(|s| !s.trim().is_empty()) {
             for tok in tokenize_user_input(street) {
-                let tq = TermQuery::new(
-                    Term::from_field_text(s.name, &tok),
-                    IndexRecordOption::WithFreqs,
-                );
-                clauses.push((Occur::Must, Box::new(tq)));
+                clauses.push((
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(s.name, &tok),
+                        IndexRecordOption::WithFreqs,
+                    )),
+                ));
             }
         }
         if let Some(city) = q.city.filter(|s| !s.trim().is_empty()) {
             for tok in tokenize_user_input(city) {
-                let tq = TermQuery::new(
-                    Term::from_field_text(s.suburb, &tok),
-                    IndexRecordOption::WithFreqs,
-                );
-                clauses.push((Occur::Must, Box::new(tq)));
+                clauses.push((
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(s.suburb, &tok),
+                        IndexRecordOption::WithFreqs,
+                    )),
+                ));
             }
         }
         if let Some(state) = q.state.filter(|s| !s.trim().is_empty()) {
             for tok in tokenize_user_input(state) {
-                let tq = TermQuery::new(
-                    Term::from_field_text(s.state, &tok),
-                    IndexRecordOption::WithFreqs,
-                );
-                clauses.push((Occur::Must, Box::new(tq)));
+                clauses.push((
+                    Occur::Must,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(s.state, &tok),
+                        IndexRecordOption::WithFreqs,
+                    )),
+                ));
             }
         }
         if let Some(cc) = q.country_code.filter(|s| !s.trim().is_empty()) {
@@ -2911,11 +2936,11 @@ impl Forward {
                     )),
                     ALT_NAME_BOOST,
                 ));
-                let suburb_q: Box<dyn Query> = Box::new(TermQuery::new(
+                let suburb_q = Box::new(TermQuery::new(
                     Term::from_field_text(s.suburb, tok),
                     IndexRecordOption::WithFreqs,
                 ));
-                let state_q: Box<dyn Query> = Box::new(TermQuery::new(
+                let state_q = Box::new(TermQuery::new(
                     Term::from_field_text(s.state, tok),
                     IndexRecordOption::WithFreqs,
                 ));
@@ -3305,6 +3330,146 @@ fn parse_tantivy_country_prefix(name: &str) -> Option<[u8; 2]> {
 /// matches still beat weak ones regardless of rank. Exponent chosen
 /// empirically so "Sydney" ranks the city above streets named Sydney, but
 /// "Alysse Close Baulkham Hills" still prefers the highly-specific street.
+/// Replaces each rare word with a much more common indexed term within
+/// one edit (two from 8 letters, as Elasticsearch's AUTO fuzziness). A
+/// word counts as rare when the best candidate appears in at least
+/// `SPELLING_RATIO` times as many documents: OSM has a few "Stret"s, but
+/// far more "Street"s. Words under 4 letters or with digits stay: "st",
+/// "nw" and "16th" are too short or too structured to guess. Returns
+/// `None` when nothing changed, else the new text and the checkable words
+/// (4+ letters, no digits) that were kept as typed.
+fn correct_spelling(shards: &[&FieldedIndex], text: &str) -> Option<(String, Vec<String>)> {
+    const SPELLING_RATIO: u64 = 50;
+    let searchers: Vec<_> = shards
+        .iter()
+        .map(|shard| (shard.reader.searcher(), &shard.schema))
+        .collect();
+    let doc_freq = |term: &str| -> u64 {
+        searchers
+            .iter()
+            .flat_map(|(searcher, schema)| {
+                [schema.name, schema.alt_name, schema.suburb, schema.state]
+                    .into_iter()
+                    .flat_map(move |field| {
+                        searcher
+                            .segment_readers()
+                            .iter()
+                            .filter_map(move |segment| segment.inverted_index(field).ok())
+                    })
+            })
+            .filter_map(|index| index.terms().get(term).ok().flatten())
+            .map(|info| u64::from(info.doc_freq))
+            .sum()
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut changed = false;
+    let mut kept = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let split = rest
+            .find(|c: char| c.is_alphanumeric() != rest.starts_with(char::is_alphanumeric))
+            .unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(split);
+        rest = tail;
+        let Some(token) = tokenize_user_input(word).into_iter().next() else {
+            out.push_str(word);
+            continue;
+        };
+        let len = token.chars().count();
+        if len < 4 || token.chars().any(|c| c.is_ascii_digit()) {
+            out.push_str(word);
+            continue;
+        }
+        let dfa = levenshtein_automata::LevenshteinAutomatonBuilder::new(
+            if len >= 8 { 2 } else { 1 },
+            true,
+        )
+        .build_dfa(&token);
+        let mut freq: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for (searcher, schema) in &searchers {
+            for field in [schema.name, schema.suburb, schema.state] {
+                for segment in searcher.segment_readers() {
+                    let Ok(index) = segment.inverted_index(field) else {
+                        continue;
+                    };
+                    let Ok(mut stream) = index.terms().search(LevenshteinDfa(&dfa)).into_stream()
+                    else {
+                        continue;
+                    };
+                    while stream.advance() {
+                        if let Ok(term) = std::str::from_utf8(stream.key()) {
+                            *freq.entry(term.to_owned()).or_default() +=
+                                u64::from(stream.value().doc_freq);
+                        }
+                    }
+                }
+            }
+        }
+        // The closest candidate, then the most common one.
+        let best = freq
+            .into_iter()
+            .filter(|(term, _)| *term != token)
+            .filter_map(|(term, n)| match dfa.eval(&term) {
+                levenshtein_automata::Distance::Exact(d) => Some((d, std::cmp::Reverse(n), term)),
+                levenshtein_automata::Distance::AtLeast(_) => None,
+            })
+            .min();
+        match best {
+            Some((_, std::cmp::Reverse(n), term))
+                if n >= SPELLING_RATIO * doc_freq(&token).max(1) =>
+            {
+                out.push_str(&term);
+                changed = true;
+            }
+            _ => {
+                out.push_str(word);
+                kept.push(token);
+            }
+        }
+    }
+    changed.then_some((out, kept))
+}
+
+/// Whether `hit` names every word in `words` (canonical tokens) in its
+/// name, locality or state.
+fn hit_names_all(hit: &Hit, words: &[String]) -> bool {
+    let mut text = hit.name.clone();
+    for part in [&hit.suburb, &hit.state].into_iter().flatten() {
+        text.push(' ');
+        text.push_str(part);
+    }
+    let tokens: std::collections::HashSet<String> =
+        tokenize_user_input(&text).into_iter().collect();
+    words.iter().all(|word| tokens.contains(word))
+}
+
+/// Walks a term dictionary with a Levenshtein DFA. Tantivy has the same
+/// adapter for `FuzzyTermQuery` but keeps it private.
+struct LevenshteinDfa<'a>(&'a levenshtein_automata::DFA);
+
+impl tantivy_fst::Automaton for LevenshteinDfa<'_> {
+    type State = u32;
+
+    fn start(&self) -> u32 {
+        self.0.initial_state()
+    }
+
+    fn is_match(&self, state: &u32) -> bool {
+        matches!(
+            self.0.distance(*state),
+            levenshtein_automata::Distance::Exact(_)
+        )
+    }
+
+    fn can_match(&self, state: &u32) -> bool {
+        *state != levenshtein_automata::SINK_STATE
+    }
+
+    fn accept(&self, state: &u32, byte: u8) -> u32 {
+        self.0.transition(*state, byte)
+    }
+}
+
 pub fn boosted_score(hit: &Hit, bias: Option<&BiasCoord>) -> f32 {
     match bias {
         None => {
@@ -4177,18 +4342,6 @@ pub struct Hit {
     pub lat: f64,
     pub lng: f64,
     pub score: f32,
-}
-
-// --- Fuzzy (experimental, not yet wired) ---
-
-/// Returns a fuzzy query against the name field. Unused today; kept so we
-/// can wire in typo tolerance via a tuning flag without refactoring.
-pub fn fuzzy_name(schema: &ForwardSchema, token: &str, distance: u8) -> Box<dyn Query> {
-    Box::new(FuzzyTermQuery::new(
-        Term::from_field_text(schema.name, &token.to_ascii_lowercase()),
-        distance,
-        true,
-    ))
 }
 
 #[cfg(test)]
