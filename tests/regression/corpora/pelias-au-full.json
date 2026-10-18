@@ -330,14 +330,18 @@
               "name": "553 St Kilda Road"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-international-0",
       "notes": null,
-      "partial_reason": "normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -389,7 +393,13 @@
               "name": "Australia"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200

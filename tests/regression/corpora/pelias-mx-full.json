@@ -1,174 +1,123 @@
 {
   "name": "pelias-mx-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
-        "checks": [
-          {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          }
-        ],
+        "checks": [],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_boundary_rect-1",
       "notes": null,
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "mx",
           "q": "san francisco"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "no comparable expected fields, request parameter boundary.rect.max_lat, request parameter boundary.rect.max_lon, request parameter boundary.rect.min_lat, request parameter boundary.rect.min_lon"
     },
     {
       "expect": {
-        "checks": [
-          {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Mexico City"
-          }
-        ],
+        "checks": [],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_iso2_to_iso3-1",
       "notes": null,
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "mx",
           "q": "mexico city, mx"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "no comparable expected fields"
     },
     {
       "expect": {
-        "checks": [
-          {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Mexico City"
-          }
-        ],
+        "checks": [],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_iso2_to_iso3-1.1",
       "notes": null,
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "mx",
           "q": "mexico city, mex"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "no comparable expected fields"
     },
     {
       "expect": {
-        "checks": [
-          {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Aguascalientes"
-          }
-        ],
+        "checks": [],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_iso2_to_iso3-2",
       "notes": null,
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "mx",
           "q": "327 Rincon de Romos, Aguascalientes, MX"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "no comparable expected fields"
     },
     {
       "expect": {
-        "checks": [
-          {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Aguascalientes"
-          }
-        ],
+        "checks": [],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_iso2_to_iso3-2.1",
       "notes": null,
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "mx",
           "q": "327 Rincon de Romos, Aguascalientes, MEX"
         }
       },
       "tags": [
         "pelias",
-        "search"
-      ]
+        "autocomplete"
+      ],
+      "unsupported_reason": "no comparable expected fields"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Santa Catarina"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.road",
-            "value": "Prolongacion Avenida Alfonso Reyes"
+            "fields": {
+              "address.city": "Santa Catarina",
+              "address.country_code": "MX",
+              "name": "150 Prolongacion Avenida Alfonso Reyes"
+            },
+            "kind": "result_matches_within",
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
           }
         ],
         "status": 200
@@ -180,7 +129,7 @@
         "path": "/search",
         "query": {
           "country_code": "mx",
-          "q": "Prolongaci\u00f3n Ave. Alfonso Reyes #150 Col. Valle del Poniente Santa Catarina 66196"
+          "q": "Prolongación Ave. Alfonso Reyes #150 Col. Valle del Poniente Santa Catarina 66196"
         }
       },
       "tags": [
@@ -192,25 +141,101 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
+            "fields": {
+              "address.city": "Mexico City",
+              "address.country_code": "MX",
+              "name": "Paseo de la Reforma"
+            },
+            "kind": "result_matches_within",
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-14",
+      "notes": [
+        "Street exists in OSM data but returns various addresses instead of street centroid"
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "mx",
+          "q": "Paseo de la Reforma Colonia Cuauhtemoc Mexico D.F. 06500"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Aguascalientes"
+            "fields": {
+              "address.city": "Guadalajara",
+              "address.country_code": "MX",
+              "name": "Progreso 175"
+            },
+            "kind": "result_matches_within",
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-15",
+      "notes": [
+        "Including the neighborhood, Col. Americana, causes falling back to the locaity"
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "mx",
+          "q": "Progreso 175 Col. Americana Guadalajara 44160"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "Aguascalientes",
+              "address.country_code": "MX",
+              "address.house_number": "327",
+              "address.road": "Rincón De Romos"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_iso2_to_iso3-5",
       "notes": null,
+      "partial_reason": "expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "mx",
           "q": "327 Rincon de Romos, Aguascalientes, MX"
         }
       },

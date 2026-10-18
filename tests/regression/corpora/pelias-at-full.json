@@ -1,56 +1,57 @@
 {
   "name": "pelias-at-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "Anthering"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-deduplication-7",
       "notes": "City record should appear near the top, even if the preferred record started lower down",
+      "partial_reason": "expected field country_a, expected field layer",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "at",
           "q": "Anthering, Austria"
         }
       },
       "tags": [
         "pelias",
-        "search"
+        "autocomplete"
       ]
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Anthering"
+            "fields": {
+              "address.city": "Anthering",
+              "address.country": "Austria",
+              "address.country_code": "AT"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_city_country-5",
       "notes": null,
+      "partial_reason": "expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "at",
           "q": "Anthering, Austria"
         }
       },

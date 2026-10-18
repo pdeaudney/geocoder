@@ -1,19 +1,28 @@
 {
   "name": "pelias-si-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Izola"
+            "fields": {
+              "address.city": "Izola",
+              "address.country_code": "SI",
+              "address.house_number": "10a",
+              "address.road": "Ulica ob starem zidovju"
+            },
+            "kind": "result_matches_within",
+            "limit": 1,
+            "normalizers": {
+              "address.house_number": [
+                "toLowerCase",
+                "stripPunctuation"
+              ],
+              "address.road": [
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
@@ -24,7 +33,6 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "si",
           "q": "Ulica ob starem zidovju 10a Izola Slovenia"
         }
       },
@@ -37,14 +45,23 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Izola"
+            "fields": {
+              "address.city": "Izola",
+              "address.country_code": "SI",
+              "address.house_number": "10a",
+              "address.road": "Ulica ob starem zidovju"
+            },
+            "kind": "result_matches_within",
+            "limit": 1,
+            "normalizers": {
+              "address.house_number": [
+                "toLowerCase",
+                "stripPunctuation"
+              ],
+              "address.road": [
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
@@ -55,7 +72,6 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "si",
           "q": "10a Ulica ob starem zidovju Izola Slovenia"
         }
       },

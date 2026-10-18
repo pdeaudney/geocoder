@@ -1,19 +1,23 @@
 {
   "name": "pelias-es-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Madrid"
+            "fields": {
+              "address.city": "Madrid",
+              "address.country_code": "ES",
+              "name": "Calle de Serrano 75"
+            },
+            "kind": "result_matches_within",
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
           }
         ],
         "status": 200
@@ -37,25 +41,24 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Toledo"
+            "fields": {
+              "address.city": "Toledo",
+              "address.country": "Spain",
+              "address.country_code": "ES"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_city_country-11",
       "notes": null,
+      "partial_reason": "expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "es",
           "q": "toledo, spain"
         }
       },
@@ -68,14 +71,14 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Barcelona"
+            "fields": {
+              "address.city": "Barcelona",
+              "address.country_code": "ES",
+              "address.house_number": "1",
+              "address.road": "Carrer de Balmes"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -86,7 +89,6 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "es",
           "q": "Carrer Balmes 1, barcelona, barcelona"
         }
       },
@@ -99,14 +101,14 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Leon"
+            "fields": {
+              "address.country": "Spain",
+              "address.country_code": "ES",
+              "address.state": "Leon",
+              "name": "Villares De Órbigo"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -117,22 +119,26 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "es",
-          "q": "Villares De \u00d3rbigo, Spain"
+          "q": "Villares De Órbigo, Spain"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "Spain",
+              "address.country_code": "ES",
+              "name": "Navarre"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -143,14 +149,14 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "es",
           "q": "Comunidad Foral De Navarra, ES"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     }
   ]
 }

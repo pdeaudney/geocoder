@@ -231,14 +231,18 @@
               "name": "24 Grosvenor Square"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-international-7",
       "notes": null,
-      "partial_reason": "normalizers",
       "request": {
         "method": "GET",
         "path": "/search",

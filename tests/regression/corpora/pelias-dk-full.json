@@ -1,14 +1,18 @@
 {
   "name": "pelias-dk-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "Denmark",
+              "address.country_code": "DK",
+              "name": "Copenhagen"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -19,7 +23,6 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "dk",
           "q": "Copenhagen"
         }
       },
@@ -27,6 +30,68 @@
         "pelias",
         "search"
       ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "Arden",
+              "address.country_code": "DK",
+              "address.house_number": "18",
+              "address.road": "Hobrovej",
+              "address.state": "Nordjylland"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_postal_cities-4",
+      "notes": "Locality should be set to Arden, but WOF geometry does not include this address and we need postal cities data for Denmark",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "hobrovej 18, 9510, denmark"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "Denmark",
+              "address.country_code": "DK",
+              "name": "Faroe Islands"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-wof_dependencies-3",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "Faroe Islands"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources, upstream status fail"
     }
   ]
 }

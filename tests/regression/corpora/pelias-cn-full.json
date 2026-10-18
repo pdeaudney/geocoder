@@ -1,30 +1,29 @@
 {
   "name": "pelias-cn-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Beijing"
+            "fields": {
+              "address.city": "Beijing",
+              "address.country": "China",
+              "address.country_code": "CN"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_city_country-17",
       "notes": null,
+      "partial_reason": "expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "cn",
           "q": "beijing, china"
         }
       },
@@ -37,19 +36,79 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
+            "fields": {
+              "name": "Beijing"
+            },
+            "kind": "result_matches_within",
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-303",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter country, request parameter locality"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Shanghai"
-          },
+            "fields": {
+              "name": "Chongqing Shi"
+            },
+            "kind": "result_matches_within",
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-503",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter country, request parameter county"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Shanghai"
+            "fields": {
+              "address.city": "Shanghai",
+              "address.country": "China",
+              "address.country_code": "CN",
+              "address.state": "Shanghai",
+              "name": "Shanghai"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -60,14 +119,14 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "cn",
           "q": "Shanghai, China"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     }
   ]
 }

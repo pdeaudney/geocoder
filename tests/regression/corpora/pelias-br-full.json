@@ -1,31 +1,37 @@
 {
   "name": "pelias-br-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "S\u00e3o Paulo"
+            "fields": {
+              "address.city": "São Paulo",
+              "address.country_code": "BR",
+              "name": "Rua Henri Dunant 500"
+            },
+            "kind": "result_matches_within",
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-international-1",
-      "notes": null,
+      "notes": [
+        "match is found by removing neighborhood (WOF locality) Chácara Santo Antônio and "
+      ],
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
           "country_code": "br",
-          "q": "Rua Henri Dunant 500 04709-110 S\u00e3o Paulo"
+          "q": "Rua Henri Dunant 500 04709-110 São Paulo"
         }
       },
       "tags": [
@@ -37,26 +43,33 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Recife"
+            "fields": {
+              "address.city": "Recife",
+              "address.country_code": "BR",
+              "name": "Rua Gonçalves Maia 163"
+            },
+            "kind": "result_matches_within",
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-international-11",
-      "notes": null,
+      "notes": [
+        "fallsback to street centroid",
+        "Brazilian addresses generally fail because they are composed of street intersections"
+      ],
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
           "country_code": "br",
-          "q": "Rua Gon\u00e7alves Maia 163 \u2013 Boa Vista 50070-060 Recife"
+          "q": "Rua Gonçalves Maia 163 – Boa Vista 50070-060 Recife"
         }
       },
       "tags": [

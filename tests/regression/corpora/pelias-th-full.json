@@ -1,30 +1,29 @@
 {
   "name": "pelias-th-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Phuket"
+            "fields": {
+              "address.city": "Phuket",
+              "address.country": "Thailand",
+              "address.country_code": "TH"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_city_country-27",
       "notes": null,
+      "partial_reason": "expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "th",
           "q": "phuket tha"
         }
       },
@@ -37,20 +36,23 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "Thailand",
+              "address.country_code": "TH"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_city_country-32",
       "notes": null,
+      "partial_reason": "expected field layer",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "th",
           "q": "socorro, thailand"
         }
       },
@@ -58,6 +60,38 @@
         "pelias",
         "search"
       ]
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Thailand"
+            },
+            "kind": "result_matches_within",
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-1003",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter country, request parameter sources"
     }
   ]
 }

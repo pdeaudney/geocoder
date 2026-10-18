@@ -1,30 +1,29 @@
 {
   "name": "pelias-jp-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Sendai-shi"
+            "fields": {
+              "address.city": "Sendai-shi",
+              "address.country": "Japan",
+              "address.country_code": "JP"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_city_country-18",
       "notes": null,
+      "partial_reason": "expected field gid",
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "jp",
           "q": "sendai, japan"
         }
       },
@@ -37,19 +36,15 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "\u516b\u738b\u5b50\u5e02"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "\u6771\u4eac"
+            "fields": {
+              "address.city": "八王子市",
+              "address.country": "日本",
+              "address.country_code": "JP",
+              "address.state": "東京",
+              "name": "９丁目"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -60,14 +55,14 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "jp",
-          "q": "\uff19\u4e01\u76ee, Japan"
+          "q": "９丁目, Japan"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter lang, request parameter sources"
     }
   ]
 }

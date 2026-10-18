@@ -34,6 +34,11 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// The adapter only validates normaliser names; the runner applies them.
+#[allow(dead_code)]
+mod normalizers;
+
+use normalizers::Normalizer;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -280,20 +285,11 @@ fn convert_case(case: &Value, suite: &Value, args: &Args) -> Option<Value> {
         unsupported.push("missing text".into());
     }
 
-    for (name, value) in [
-        (
-            "normalizers",
-            case.get("normalizers").or_else(|| suite.get("normalizers")),
-        ),
-        (
-            "weights",
-            case.get("weights").or_else(|| suite.get("weights")),
-        ),
-    ] {
-        if value.is_some_and(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty())) {
-            partial.push(name.into());
-        }
+    let weights = case.get("weights").or_else(|| suite.get("weights"));
+    if weights.is_some_and(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty())) {
+        partial.push("weights".into());
     }
+    let normalizers = field_normalizers(case, suite, &mut partial);
 
     let mut checks = Vec::<Value>::new();
     if properties.is_empty() {
@@ -304,11 +300,14 @@ fn convert_case(case: &Value, suite: &Value, args: &Args) -> Option<Value> {
             partial.push("non-object expected property".into());
             continue;
         };
-        let (mapped, _) = map_fields(endpoint, fields, &mut partial);
+        let (mapped, chains, _) = map_fields(endpoint, fields, &normalizers, &mut partial);
         if !mapped.is_empty() {
-            checks.push(
-                json!({"kind": "result_matches_within", "limit": priority, "fields": mapped}),
-            );
+            let mut check =
+                json!({"kind": "result_matches_within", "limit": priority, "fields": mapped});
+            if !chains.is_empty() {
+                check["normalizers"] = json!(chains);
+            }
+            checks.push(check);
         }
     }
     if let Some(coordinates) = expected.get("coordinates") {
@@ -355,11 +354,16 @@ fn convert_case(case: &Value, suite: &Value, args: &Args) -> Option<Value> {
         if let Some(values) = unexpected.get("properties").and_then(Value::as_array) {
             for property in values {
                 if let Some(fields) = property.as_object() {
-                    let (mapped, complete) = map_fields(endpoint, fields, &mut partial);
+                    let (mapped, chains, complete) =
+                        map_fields(endpoint, fields, &normalizers, &mut partial);
                     // Dropping half of a negative condition would reject
                     // unrelated hits, so only check fully mapped objects.
                     if complete && !mapped.is_empty() {
-                        checks.push(json!({"kind": "result_absent", "fields": mapped}));
+                        let mut check = json!({"kind": "result_absent", "fields": mapped});
+                        if !chains.is_empty() {
+                            check["normalizers"] = json!(chains);
+                        }
+                        checks.push(check);
                     }
                 } else {
                     partial.push("unexpected property value".into());
@@ -408,13 +412,66 @@ fn convert_case(case: &Value, suite: &Value, args: &Args) -> Option<Value> {
     Some(converted)
 }
 
+/// Pelias field normalisers, keyed by Pelias property name. Like
+/// fuzzy-tester's `makeTestContext`, case entries override suite entries
+/// per property. A single string names one normaliser.
+fn field_normalizers(
+    case: &Value,
+    suite: &Value,
+    partial: &mut Vec<String>,
+) -> HashMap<String, Vec<Normalizer>> {
+    let mut chains = HashMap::new();
+    for source in [suite, case] {
+        let Some(entries) = source.get("normalizers").filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let Some(entries) = entries.as_object() else {
+            partial.push("normalizers value".into());
+            continue;
+        };
+        for (field, names) in entries {
+            let names: Vec<Value> = match names {
+                Value::String(_) => vec![names.clone()],
+                Value::Array(list) => list.clone(),
+                _ => {
+                    partial.push(format!("normalizers {field} value"));
+                    chains.remove(field);
+                    continue;
+                }
+            };
+            match names
+                .iter()
+                .map(|name| serde_json::from_value::<Normalizer>(name.clone()).map_err(|_| name))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(chain) => {
+                    chains.insert(field.clone(), chain);
+                }
+                Err(name) => {
+                    partial.push(format!("normalizer {name}"));
+                    chains.remove(field);
+                }
+            }
+        }
+    }
+    chains
+}
+
+/// Returns our field paths with expected values, the normaliser chains
+/// for those paths, and whether every Pelias field mapped.
 fn map_fields(
     endpoint: &str,
     fields: &serde_json::Map<String, Value>,
+    normalizers: &HashMap<String, Vec<Normalizer>>,
     partial: &mut Vec<String>,
-) -> (HashMap<String, String>, bool) {
+) -> (
+    HashMap<String, String>,
+    HashMap<String, Vec<Normalizer>>,
+    bool,
+) {
     let address_name = fields.contains_key("street") && fields.contains_key("housenumber");
     let mut mapped = HashMap::<String, String>::new();
+    let mut chains = HashMap::<String, Vec<Normalizer>>::new();
     let mut complete = true;
     for (name, value) in fields {
         let Some(value) = value.as_str() else {
@@ -435,6 +492,9 @@ fn map_fields(
             ("search", "postalcode") => Some("address.postcode"),
             _ => None,
         };
+        if let (Some(path), Some(chain)) = (path, normalizers.get(name)) {
+            chains.insert(path.into(), chain.clone());
+        }
         match path {
             Some(path) if name == "country_a" => match alpha3_to_alpha2(value) {
                 Some(cc) => {
@@ -454,7 +514,8 @@ fn map_fields(
             }
         }
     }
-    (mapped, complete)
+    chains.retain(|path, _| mapped.contains_key(path));
+    (mapped, chains, complete)
 }
 
 fn alpha3_to_alpha2(alpha3: &str) -> Option<String> {
@@ -572,7 +633,7 @@ mod tests {
                 {"name": "30 West 26th Street", "street": "West 26th Street", "housenumber": "30", "country_a": "USA"}
             ]}
         });
-        let converted = convert_case(&case, &suite, &args).unwrap();
+        let converted = convert_case(&case, &suite, &args).expect("case converts");
         assert_eq!(converted["request"]["path"], "/search");
         assert_eq!(converted["request"]["query"]["bias_lat"], "40.74");
         assert_eq!(converted["request"]["query"]["bias_lng"], "-73.99");
@@ -586,10 +647,10 @@ mod tests {
 
         let mut unsupported = case;
         unsupported["in"]["layers"] = json!("address");
-        let converted = convert_case(&unsupported, &suite, &args).unwrap();
+        let converted = convert_case(&unsupported, &suite, &args).expect("case converts");
         assert!(converted["unsupported_reason"]
             .as_str()
-            .unwrap()
+            .expect("unsupported_reason is a string")
             .contains("request parameter layers"));
 
         let coordinates = json!({
@@ -599,12 +660,12 @@ mod tests {
             "unexpected": {"properties": [{"name": "Chicago"}]},
             "expected": {"coordinates": [-75.16, 39.95], "properties": [{"name": "Philadelphia", "country_a": "USA"}]}
         });
-        let converted = convert_case(&coordinates, &suite, &args).unwrap();
+        let converted = convert_case(&coordinates, &suite, &args).expect("case converts");
         let kinds: Vec<_> = converted["expect"]["checks"]
             .as_array()
-            .unwrap()
+            .expect("checks is an array")
             .iter()
-            .map(|check| check["kind"].as_str().unwrap())
+            .map(|check| check["kind"].as_str().expect("check kind is a string"))
             .collect();
         assert_eq!(
             kinds,
@@ -617,6 +678,55 @@ mod tests {
         );
         assert!(converted.get("unsupported_reason").is_none());
         assert!(converted.get("partial_reason").is_none());
+    }
+
+    #[test]
+    fn carries_pelias_normalizers_onto_mapped_checks() {
+        let args = Args {
+            input: PathBuf::new(),
+            filter_country: Some("us".into()),
+            corpus_name: None,
+        };
+        let suite = json!({"name": "sample", "endpoint": "search", "normalizers": {
+            "name": ["toUpperCase", "abbreviateStreetSuffixes"],
+            "street": "toUpperCase",
+            "macroregion": ["trim"]
+        }});
+        let case = json!({
+            "id": 1,
+            "in": {"text": "3122 16th st"},
+            "normalizers": {"street": ["toUpperCase", "abbreviateStreetSuffixes"]},
+            "expected": {"properties": [
+                {"name": "3122 16th Street", "street": "16th Street", "housenumber": "3122", "country_a": "USA"}
+            ]},
+            "unexpected": {"properties": [{"name": "Other Street"}]}
+        });
+        let converted = convert_case(&case, &suite, &args).expect("case converts");
+        assert!(converted.get("partial_reason").is_none());
+        assert!(converted.get("unsupported_reason").is_none());
+        let checks = &converted["expect"]["checks"];
+        // Case entries override suite entries per field; unmapped fields
+        // and fields without normalisers are not carried.
+        assert_eq!(
+            checks[0]["normalizers"],
+            json!({
+                "name_or_address": ["toUpperCase", "abbreviateStreetSuffixes"],
+                "address.road": ["toUpperCase", "abbreviateStreetSuffixes"]
+            })
+        );
+        assert_eq!(
+            checks[1]["normalizers"],
+            json!({"name": ["toUpperCase", "abbreviateStreetSuffixes"]})
+        );
+
+        let mut unknown = case;
+        unknown["normalizers"] = json!({"street": ["toUpperCase", "slugify"]});
+        let converted = convert_case(&unknown, &suite, &args).expect("case converts");
+        assert_eq!(converted["partial_reason"], "normalizer \"slugify\"");
+        assert_eq!(
+            converted["expect"]["checks"][0]["normalizers"],
+            json!({"name_or_address": ["toUpperCase", "abbreviateStreetSuffixes"]})
+        );
     }
 
     #[test]
