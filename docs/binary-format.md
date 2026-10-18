@@ -427,6 +427,22 @@ source postcode, and WGS84 centroid. Records with invalid coordinates
 or (0,0) are omitted. The TSV is not opened by the server; the resulting
 postcodes live in the existing FST files.
 
+City short names from the WoF admin SQLite files are exported as `wof_aliases.tsv`, an input to `build-forward-index`.
+Its first line is exactly `#wof-aliases-v1\tcountry\tname\tlatitude\tlongitude\talias\trule`; the forward builder refuses any other header.
+Each row has an ISO alpha-2 country code, one of the place's own WoF names (the `spr` name and each preferred English name get a row), the WoF centroid, the alias, and the rule that kept it.
+Only current `locality`, `localadmin` and `borough` records and English (`eng`) names are read.
+An alias is kept only when it is derived from the place's own name:
+
+- `initialism`: capital initials of a 2+ word name, optionally plus `C` for City, dots removed (`NYC`, `N.Y.C.`, `SF`, `LA`), for places with a WoF population of 100,000 or more.
+- `compact`: the name without spaces or punctuation (`Newyork`, `Thunderbay`).
+- `abbreviated`: each word kept, shortened to a 3+ letter prefix that drops 3+ letters, or replaced by the initials of 2+ words (`San Fran`, `NY City`, `North Van`).
+- `shortened`: the first 4+ letters plus `y`, `ie` or `o`, with an optional doubled letter (`Philly`, `Brissie`, `Palmy`).
+
+Aliases that start with `The `, codes of 3-5 capitals that are not initials (`LAX`, `PHL`), and everything else are dropped.
+An alias claimed by two places in one country (or equal to another place's own name) is kept only when one claimant has 10 times the population of the next; WoF records of the same name within 10 km count as one place.
+The forward builder adds each alias to the `alt_name` field of a place or admin document with the same country and (case-insensitive) name within 10 km of the WoF centroid.
+It never creates documents, and a missing file means no aliases.
+
 **`WofCountry` — `wof_countries.bin`**:
 ```rust
 #[repr(C)]
