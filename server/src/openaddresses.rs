@@ -215,6 +215,12 @@ pub fn normalise_street(s: &str) -> Cow<'_, str> {
             suffix_expanded = true;
         }
     }
+    // "168 PL" is 168th Place, as OSM spells it.
+    if suffix_expanded && raw[suffix_at - 1].bytes().all(|b| b.is_ascii_digit()) {
+        if let Ok(number) = raw[suffix_at - 1].parse() {
+            words[suffix_at - 1] = ordinal(number);
+        }
+    }
     // "N ST NE" is the letter street N, not North Street.
     if suffix_at >= 1 && !(suffix_at == 1 && suffix_expanded) {
         if let Some(full) = leading_directional(raw[0]) {
@@ -222,6 +228,18 @@ pub fn normalise_street(s: &str) -> Cow<'_, str> {
         }
     }
     Cow::Owned(words.join(" "))
+}
+
+/// "1st", "22nd", "113th".
+pub fn ordinal(n: u32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }
 
 /// Title-case an ALL-CAPS city or unit; see [`normalise_street`].
@@ -371,7 +389,10 @@ mod tests {
             ("1ST AVE", "1st Avenue"),
             ("2ND AV", "2nd Avenue"),
             ("JACKSON ST", "Jackson Street"),
-            ("W 37 ST", "West 37 Street"),
+            ("W 37 ST", "West 37th Street"),
+            ("168 PL", "168th Place"),
+            ("54 ST", "54th Street"),
+            ("ROUTE 9", "Route 9"),
             ("E MAIN", "East Main"),
             ("N BROADWAY", "North Broadway"),
             ("N ST NE", "N Street NE"),

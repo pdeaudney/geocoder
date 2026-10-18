@@ -131,7 +131,125 @@ const STREET_TYPE_ABBREVIATIONS: &[(&str, &str)] = &[
     ("fwy", "freeway"),
     ("expy", "expressway"),
     ("plz", "plaza"),
+    ("hts", "heights"),
+    ("pt", "point"),
+    ("ctr", "center"),
+    ("cv", "cove"),
+    ("gdns", "gardens"),
+    ("grv", "grove"),
+    ("gve", "grove"),
+    ("gr", "grove"),
+    ("jct", "junction"),
+    ("mnr", "manor"),
+    ("pk", "park"),
+    ("rdg", "ridge"),
+    ("rte", "route"),
+    ("vlg", "village"),
+    ("vw", "view"),
+    ("wy", "way"),
+    ("esp", "esplanade"),
+    ("cct", "circuit"),
+    ("crs", "crescent"),
+    ("qy", "quay"),
+    ("tpke", "turnpike"),
+    ("wk", "walk"),
+    ("wlk", "walk"),
+    ("cswy", "causeway"),
+    ("brg", "bridge"),
+    ("byp", "bypass"),
+    ("lp", "loop"),
+    ("pwy", "parkway"),
+    // Name suffixes ride the same table: "Martin Luther King Jr Blvd".
+    ("jr", "junior"),
+    ("sr", "senior"),
 ];
+
+/// Full street-type words, after `STREET_TYPE_ABBREVIATIONS`.
+fn is_street_type(word: &str) -> bool {
+    matches!(word, "street" | "way")
+        || STREET_TYPE_ABBREVIATIONS
+            .iter()
+            .any(|(_, full)| *full == word && !matches!(*full, "junior" | "senior"))
+}
+
+const ORDINAL_WORDS: &[&str] = &[
+    "first",
+    "second",
+    "third",
+    "fourth",
+    "fifth",
+    "sixth",
+    "seventh",
+    "eighth",
+    "ninth",
+    "tenth",
+    "eleventh",
+    "twelfth",
+    "thirteenth",
+    "fourteenth",
+    "fifteenth",
+    "sixteenth",
+    "seventeenth",
+    "eighteenth",
+    "nineteenth",
+    "twentieth",
+];
+
+/// One spelling for street ordinals, at index and query time alike:
+/// "Fifth", "5th" and "5" before a street type all become "5th" ("West 37
+/// Street" in OpenAddresses is OSM's "West 37th Street"). In a query a
+/// bare number first is a house number, so it stays; indexed names have no
+/// house number ("7 Street"). Tokens are lower case.
+fn canonicalise_ordinals(tokens: &mut [String], first_number_is_house: bool) {
+    for i in 0..tokens.len() {
+        let tok = tokens[i].as_str();
+        let n = if let Some(pos) = ORDINAL_WORDS.iter().position(|w| *w == tok) {
+            Some(pos as u32 + 1)
+        } else if let Some(digits) = ["st", "nd", "rd", "th"]
+            .iter()
+            .find_map(|suffix| tok.strip_suffix(suffix))
+            .filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+        {
+            digits.parse().ok()
+        } else if (i > 0 || !first_number_is_house)
+            && tok.bytes().all(|b| b.is_ascii_digit())
+            && tokens.get(i + 1).is_some_and(|next| is_street_type(next))
+        {
+            tok.parse().ok()
+        } else {
+            None
+        };
+        if let Some(n) = n {
+            tokens[i] = crate::openaddresses::ordinal(n);
+        }
+    }
+}
+
+/// Words that introduce a unit: "Apt 3", "Suite 200", "Unit 5".
+const UNIT_WORDS: &[&str] = &[
+    "apt",
+    "apartment",
+    "unit",
+    "suite",
+    "ste",
+    "flat",
+    "rm",
+    "room",
+];
+
+/// The searchable form of a unit, at index and query time alike: lower
+/// case without its designator, so "APT 3B", "Apt 3b" and "3B" agree.
+pub fn unit_key(unit: &str) -> String {
+    let lower = unit
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .to_ascii_lowercase();
+    match lower.split_once(char::is_whitespace) {
+        Some((word, rest)) if UNIT_WORDS.contains(&word) => rest.trim().to_owned(),
+        _ => lower,
+    }
+}
 
 fn canonicalise_token(token: &str) -> &str {
     for (abbr, full) in STREET_TYPE_ABBREVIATIONS {
@@ -1709,7 +1827,7 @@ fn address_doc(
     );
     doc.add_text(s.housenumber, housenumber.to_ascii_lowercase());
     doc.add_text(s.housenumber_raw, housenumber);
-    doc.add_text(s.unit, unit.to_ascii_lowercase());
+    doc.add_text(s.unit, unit_key(unit));
     doc.add_text(s.unit_raw, unit);
     doc.add_text(s.postcode, normalize_postcode(postcode));
     for extra in extra_localities.into_iter().flatten() {
@@ -2443,8 +2561,28 @@ impl Forward {
                     countries = known;
                 }
             }
+            // An exact match in one country beats a relaxed match in
+            // another: a shard that drops ", new york" to find "26th Street
+            // West" in Saskatoon must not outrank West 26th Street, New York.
             let mut hits = Vec::new();
-            for cc in countries {
+            for cc in &countries {
+                let code = String::from_utf8_lossy(cc);
+                let Some(active) = self.per_country.get(cc) else {
+                    continue;
+                };
+                hits.extend(self.search_once(
+                    active,
+                    &StructuredQuery {
+                        country_code: Some(&code),
+                        ..q.clone()
+                    },
+                    true,
+                    true,
+                    true,
+                )?);
+            }
+            let relax = hits.is_empty();
+            for cc in countries.into_iter().filter(|_| relax) {
                 let code = String::from_utf8_lossy(&cc);
                 hits.extend(self.search_structured_inner(
                     StructuredQuery {
@@ -2980,7 +3118,7 @@ impl Forward {
             ));
             if let Some(unit) = unit {
                 let unit_term = if use_unit {
-                    unit.to_ascii_lowercase()
+                    unit_key(unit)
                 } else {
                     String::new()
                 };
@@ -3680,21 +3818,32 @@ pub fn tokenize_user_input(s: &str) -> Vec<String> {
     .fold(folded, |text, (short, full)| text.replace(short, full));
     let mut raw_tokens = Vec::new();
     for component in folded.split(',') {
-        let mut part: Vec<String> = component
+        let words: Vec<&str> = component
             .split(|c: char| !c.is_alphanumeric())
             .filter(|t| !t.is_empty())
-            .map(|t| {
+            .collect();
+        let mut part: Vec<String> = words
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
                 // Unicode-aware lowercase mirrors tantivy's LowerCaser
                 // for Cyrillic, Greek, and other non-Latin names.
                 let lower: String = t.chars().flat_map(char::to_lowercase).collect();
+                // Same rule as `canonicalise_phrase`: a leading Dr is Doctor.
+                if i == 0 && lower == "dr" && words.len() > 2 {
+                    return "doctor".to_owned();
+                }
                 canonicalise_token(&lower).to_owned()
             })
             .collect();
         // At the end of a comma-delimited street component, "St" is
         // Street. At the start of "St Louis" it still means Saint.
-        if part.len() > 1 && part.last().is_some_and(|s| s == "st") {
-            *part.last_mut().unwrap() = "street".to_owned();
+        if let Some(last) = part.last_mut().filter(|s| *s == "st") {
+            if words.len() > 1 {
+                *last = "street".to_owned();
+            }
         }
+        canonicalise_ordinals(&mut part, true);
         raw_tokens.extend(part);
     }
     apply_place_abbreviation_fold(raw_tokens)
@@ -3760,6 +3909,12 @@ pub fn canonicalise_phrase(s: &str) -> String {
             continue;
         }
 
+        // A leading "Dr" is Doctor ("Dr Martin Luther King Jr Blvd").
+        if i == 0 && key_owned == "dr" && words.len() > 2 {
+            out.push_str("doctor");
+            continue;
+        }
+
         // Street-type abbreviation table (Tce → terrace, Hwy → highway, …).
         if let Some((_, full)) = STREET_TYPE_ABBREVIATIONS
             .iter()
@@ -3787,7 +3942,24 @@ pub fn canonicalise_phrase(s: &str) -> String {
 
         out.push_str(word);
     }
-    out
+    // Callers also store this text for display (the suburb field), so
+    // only the ordinals change; every other word keeps its case.
+    let words: Vec<&str> = out.split_whitespace().collect();
+    let mut tokens: Vec<String> = words
+        .iter()
+        .map(|word| ascii_fold(word.trim_end_matches(['.', ','])).to_lowercase())
+        .collect();
+    let before = tokens.clone();
+    canonicalise_ordinals(&mut tokens, false);
+    if tokens == before {
+        return out;
+    }
+    words
+        .iter()
+        .zip(tokens.iter().zip(&before))
+        .map(|(word, (new, old))| if new == old { *word } else { new.as_str() })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Minimal ASCII folding for text that will go through the tantivy
@@ -4192,19 +4364,64 @@ fn parse_freeform_query_inner(input: &str, country_code: Option<&str>) -> Parsed
             }
         }
     }
-    let tokens = tokenize_user_input(to_tokenise);
+    // "#3" is a unit; the tokenizer would drop the "#" and keep a bare 3.
+    let unit_hash: String;
+    if parsed.unit.is_none() {
+        if let Some(pos) = to_tokenise.find('#') {
+            let after = to_tokenise[pos + 1..].trim_start();
+            let end = after
+                .find(|c: char| !c.is_alphanumeric())
+                .unwrap_or(after.len());
+            if end > 0 {
+                parsed.unit = Some(after[..end].to_ascii_lowercase());
+                let consumed = to_tokenise.len() - after.len() + end;
+                unit_hash = format!("{}{}", &to_tokenise[..pos], &to_tokenise[consumed..]);
+                to_tokenise = &unit_hash;
+            }
+        }
+    }
+    let mut tokens = tokenize_user_input(to_tokenise);
+    let mut unit_prefix = 0;
+    // A leading unit ("Apt 3 450 West 37th Street") comes before the
+    // house number; take it off so the number is first again.
+    if parsed.unit.is_none()
+        && tokens.len() > 2
+        && UNIT_WORDS.contains(&tokens[0].as_str())
+        && tokens[1].starts_with(|c: char| c.is_ascii_digit())
+    {
+        parsed.unit = Some(tokens[1].clone());
+        tokens.drain(..2);
+        unit_prefix = 2;
+    }
     let mut rest: Vec<String> = Vec::with_capacity(tokens.len());
+    let mut skip_next = false;
 
     let last_idx = tokens.len().saturating_sub(1);
     let postcode = trailing_postcode(&tokens, country_code);
     if let Some((_, code)) = &postcode {
         parsed.postcode = Some(code.clone());
     }
-    let first_component_end = to_tokenise
-        .split_once(',')
-        .map(|(part, _)| tokenize_user_input(part).len().saturating_sub(1));
+    let first_component_end = to_tokenise.split_once(',').map(|(part, _)| {
+        tokenize_user_input(part)
+            .len()
+            .saturating_sub(1 + unit_prefix)
+    });
     for (i, tok) in tokens.iter().enumerate() {
         if postcode.as_ref().is_some_and(|(start, _)| i >= *start) {
+            continue;
+        }
+        if std::mem::take(&mut skip_next) {
+            continue;
+        }
+        // "Apt 3", "Suite 200B": a unit word followed by a number-led token.
+        if parsed.unit.is_none()
+            && UNIT_WORDS.contains(&tok.as_str())
+            && tokens.get(i + 1).is_some_and(|next| {
+                next.starts_with(|c: char| c.is_ascii_digit()) || next.len() == 1
+            })
+        {
+            parsed.unit = tokens.get(i + 1).cloned();
+            skip_next = true;
             continue;
         }
         // A floor marker narrows a building's internal position but is
@@ -4229,11 +4446,14 @@ fn parse_freeform_query_inner(input: &str, country_code: Option<&str>) -> Parsed
         // (not all-digit, so the historic `all_digits` branch
         // missed it). The all-digit branches below still apply for
         // trailing postcode / late housenumber heuristics.
+        // "5th Avenue" names a street; "5th" alone may still be a number.
+        let street_ordinal = tokens.len() > 1 && floor_ordinal(tok);
         if i == 0
             && parsed.house_number.is_none()
             && !tok.is_empty()
             && tok.chars().next().is_some_and(|c| c.is_ascii_digit())
             && !all_digits
+            && !street_ordinal
         {
             parsed.house_number = Some(tok.clone());
             continue;
@@ -4342,6 +4562,67 @@ pub struct Hit {
     pub lat: f64,
     pub lng: f64,
     pub score: f32,
+}
+
+#[cfg(test)]
+mod query_normalizer_tests {
+    use super::*;
+
+    fn toks(s: &str) -> Vec<String> {
+        tokenize_user_input(s)
+    }
+
+    #[test]
+    fn ordinals_have_one_spelling_at_index_and_query_time() {
+        assert_eq!(toks("Fifth Avenue"), toks("5th Ave"));
+        assert_eq!(toks("West 37 Street"), toks("West 37th St"));
+        assert_eq!(toks("first avenue"), vec!["1st", "avenue"]);
+        assert_eq!(toks("11 Street, NY")[0], "11");
+        assert_eq!(crate::openaddresses::ordinal(22), "22nd");
+        assert_eq!(crate::openaddresses::ordinal(113), "113th");
+        assert_eq!(canonicalise_phrase("West 37 Street"), "West 37th Street");
+        assert_eq!(canonicalise_phrase("Fifth Avenue"), "5th Avenue");
+        // Indexed names carry no house number: "7 Street" is 7th Street.
+        // Words that are not ordinals keep their display case.
+        assert_eq!(canonicalise_phrase("7 Street"), "7th Street");
+        assert_eq!(canonicalise_phrase("New York"), "New York");
+        // In a query the first number is the house number.
+        assert_eq!(toks("310 7 Street"), vec!["310", "7th", "street"]);
+    }
+
+    #[test]
+    fn leading_dr_is_doctor_and_jr_is_junior() {
+        assert_eq!(
+            toks("Dr Martin Luther King Jr Blvd"),
+            toks("Doctor Martin Luther King Junior Boulevard")
+        );
+        assert_eq!(toks("Smith Dr"), vec!["smith", "drive"]);
+    }
+
+    #[test]
+    fn units_parse_before_after_and_with_hash() {
+        for q in [
+            "Apt 3 450 West 37th Street",
+            "450 West 37th Street Apt 3",
+            "450 West 37th Street #3",
+            "Suite 3, 450 West 37th Street",
+        ] {
+            let p = parse_freeform_query_inner(q, Some("US"));
+            assert_eq!(p.unit.as_deref(), Some("3"), "{q}");
+            assert_eq!(p.house_number.as_deref(), Some("450"), "{q}");
+            assert_eq!(p.rest, vec!["west", "37th", "street"], "{q}");
+        }
+        assert_eq!(unit_key("APT 3B"), "3b");
+        assert_eq!(unit_key("#12"), "12");
+        assert_eq!(unit_key("A"), "a");
+    }
+
+    #[test]
+    fn leading_ordinal_street_is_not_a_house_number() {
+        let p = parse_freeform_query_inner("5th Avenue New York", Some("US"));
+        assert_eq!(p.house_number, None);
+        assert_eq!(p.rest.first().map(String::as_str), Some("5th"));
+    }
 }
 
 #[cfg(test)]
