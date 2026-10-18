@@ -122,6 +122,15 @@ const STREET_TYPE_ABBREVIATIONS: &[(&str, &str)] = &[
     ("ct", "court"),
     ("cl", "close"),
     ("pl", "place"),
+    ("pkwy", "parkway"),
+    ("sq", "square"),
+    ("cir", "circle"),
+    ("trl", "trail"),
+    ("xing", "crossing"),
+    ("aly", "alley"),
+    ("fwy", "freeway"),
+    ("expy", "expressway"),
+    ("plz", "plaza"),
 ];
 
 fn canonicalise_token(token: &str) -> &str {
