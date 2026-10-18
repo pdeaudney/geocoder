@@ -310,7 +310,7 @@ async fn healthz_indexes(
             "countries": snapshot
                 .open_addresses
                 .as_ref()
-                .map(|oa| oa.countries().map(cc_to_string).collect::<Vec<_>>())
+                .map(|oa| sorted(oa.countries().map(cc_to_string)))
                 .unwrap_or_default(),
         }),
     );
@@ -325,7 +325,7 @@ async fn healthz_indexes(
             "loaded": autocomplete_idx.is_some(),
             "countries": autocomplete_idx
                 .as_ref()
-                .map(|a| a.countries().iter().map(cc_to_string).collect::<Vec<_>>())
+                .map(|a| sorted(a.countries().iter().map(cc_to_string)))
                 .unwrap_or_default(),
         }),
     );
@@ -337,7 +337,7 @@ async fn healthz_indexes(
             "loaded": forward_idx.is_some(),
             "countries": forward_idx
                 .as_ref()
-                .map(|f| f.countries().map(cc_to_string).collect::<Vec<_>>())
+                .map(|f| sorted(f.countries().map(cc_to_string)))
                 .unwrap_or_default(),
             // A monolithic fallback covers any country baked into the
             // build, even when `countries` is empty. Routing layers can
@@ -1570,6 +1570,14 @@ fn snapshot_from_search_hit(
 /// street, then reverse-geocode the final coord so the response carries
 /// normalised admin fields (country, state, city, postcode).
 #[cfg(feature = "forward")]
+/// Country lists in /healthz, in a stable order (the indexes keep them
+/// in hash maps).
+fn sorted(countries: impl Iterator<Item = String>) -> Vec<String> {
+    let mut countries: Vec<String> = countries.collect();
+    countries.sort_unstable();
+    countries
+}
+
 fn enrich_hit(
     hit: forward::Hit,
     housenumber: Option<&str>,
@@ -1631,6 +1639,21 @@ fn enrich_hit(
             .or(details.postcode)
     } else if located_address {
         details.postcode
+    } else if hit.kind == forward::KIND_STREET
+        && hit
+            .suburb
+            .as_deref()
+            .zip(details.city)
+            .is_some_and(|(suburb, city)| suburb.eq_ignore_ascii_case(city))
+    {
+        // A street's own point lies on the street, so its postcode is the
+        // street's (as Nominatim reports it). Only when the reverse lookup
+        // agrees on the locality: a long street can cross into another.
+        // Some OSM postal boundaries carry only a name ("Southwest Las
+        // Vegas"), which is not a postcode.
+        details
+            .postcode
+            .filter(|code| code.bytes().any(|b| b.is_ascii_digit()))
     } else {
         None
     };

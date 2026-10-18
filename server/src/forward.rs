@@ -421,7 +421,8 @@ pub struct BuildStats {
 /// that centroid is in Dingley Village, 25 km from the CBD node, with the
 /// same name, the same rank and a slightly higher importance. Of two
 /// same-name, same-rank points within 50 km, drop one that lies outside
-/// any locality of its name when the other lies inside one.
+/// any locality of its name when the other lies inside one; of two inside
+/// it within 15 km, drop the later.
 fn misplaced_place_twins(idx: &crate::Index) -> std::collections::HashSet<usize> {
     let mut skip = std::collections::HashSet::new();
     let Some(pp) = idx.place_points.as_ref() else {
@@ -444,20 +445,29 @@ fn misplaced_place_twins(idx: &crate::Index) -> std::collections::HashSet<usize>
                     .is_some_and(|city| city.eq_ignore_ascii_case(name))
             })
             .collect();
+        let distance = |i: usize, j: usize| {
+            crate::geo::haversine_m(
+                points[i].lat as f64,
+                points[i].lng as f64,
+                points[j].lat as f64,
+                points[j].lng as f64,
+            )
+        };
         for (a, &i) in ids.iter().enumerate() {
-            if home[a] {
-                continue;
-            }
-            let (pi, near) = (&points[i], 50_000.0);
-            if ids.iter().enumerate().any(|(b, &j)| {
-                home[b]
-                    && crate::geo::haversine_m(
-                        pi.lat as f64,
-                        pi.lng as f64,
-                        points[j].lat as f64,
-                        points[j].lng as f64,
-                    ) <= near
-            }) {
+            // Both inside the city (Greensboro's node and its area
+            // centroid, 12 km apart): keep the earlier one. The builder
+            // writes node points before area points, so that is the node.
+            let twin = if home[a] {
+                ids[..a]
+                    .iter()
+                    .enumerate()
+                    .any(|(b, &j)| home[b] && distance(i, j) <= 15_000.0)
+            } else {
+                ids.iter()
+                    .enumerate()
+                    .any(|(b, &j)| home[b] && distance(i, j) <= 50_000.0)
+            };
+            if twin {
                 skip.insert(i);
             }
         }
@@ -482,20 +492,25 @@ fn place_points_by_name(idx: &crate::Index) -> std::collections::HashMap<u32, Ve
 }
 
 /// A city or suburb polygon (admin level 7+) with a same-name place
-/// point inside it is the same place. Its own doc would sit at the
-/// polygon centroid, which for Greater Melbourne is in Dingley Village,
-/// 25 km from the city, and outrank the place point. States and
-/// counties keep their docs: "New York" the state is not the city.
+/// point inside it, or within 30 km of its centroid, is the same place.
+/// Its own doc would sit at the polygon centroid, which for Greater
+/// Melbourne is in Dingley Village, 25 km from the city, and outrank the
+/// place point; Greensboro's detached parcels each made a "Greensboro"
+/// doc 12 km from the city. States and counties keep their docs: "New
+/// York" the state is not the city.
 fn has_same_name_place(
     poly: &crate::AdminPolygon,
     ring: &[NodeCoord],
+    centroid: (f64, f64),
     places: &std::collections::HashMap<u32, Vec<(f64, f64)>>,
 ) -> bool {
+    const NEAR_M: f64 = 30_000.0;
     poly.admin_level >= 7
         && places.get(&poly.name_id).is_some_and(|points| {
-            points
-                .iter()
-                .any(|&(lat, lng)| crate::point_in_polygon_f64(lat, lng, ring))
+            points.iter().any(|&(lat, lng)| {
+                crate::point_in_polygon_f64(lat, lng, ring)
+                    || crate::geo::haversine_m(lat, lng, centroid.0, centroid.1) <= NEAR_M
+            })
         })
 }
 
@@ -971,7 +986,12 @@ pub fn build_with_heap(
         // authoritative (carries the OSM-curated `place=*` rank).
         let (b_lat, b_lng) = coord_bucket(lat, lng);
         if place_signature.contains(&(poly.name_id, b_lat, b_lng))
-            || has_same_name_place(poly, &admin_vertices[off..off + cnt], &places_by_name)
+            || has_same_name_place(
+                poly,
+                &admin_vertices[off..off + cnt],
+                (lat, lng),
+                &places_by_name,
+            )
         {
             continue;
         }
@@ -1478,7 +1498,12 @@ pub fn build_partitioned_with_heap(
                 let (lat, lng) = polygon_centroid(&admin_vertices[off..off + cnt]);
                 let (b_lat, b_lng) = coord_bucket(lat, lng);
                 if place_signature_ref.contains(&(poly.name_id, b_lat, b_lng))
-                    || has_same_name_place(poly, &admin_vertices[off..off + cnt], places_ref)
+                    || has_same_name_place(
+                        poly,
+                        &admin_vertices[off..off + cnt],
+                        (lat, lng),
+                        places_ref,
+                    )
                 {
                     return None;
                 }
@@ -3880,32 +3905,38 @@ impl Forward {
         // still wins against a generic place match because the BM25
         // component dominates the boost.
         let bias = q.bias.as_ref();
-        candidates.sort_by(|a, b| {
-            if bias.is_none() {
-                let exact = |hit: &Hit| {
-                    (matches!(hit.kind, KIND_PLACE | KIND_POI)
-                        && exact_name.is_some_and(|name| hit.name.eq_ignore_ascii_case(name)))
-                        || is_aliased_place(&aliased, hit)
-                };
-                let exact_a = exact(a);
-                let exact_b = exact(b);
-                let order = exact_b.cmp(&exact_a);
-                if order != std::cmp::Ordering::Equal {
-                    return order;
-                }
-                if exact_a {
-                    let prominence = b.importance.cmp(&a.importance);
-                    if prominence != std::cmp::Ordering::Equal {
-                        return prominence;
+        let exact = |hit: &Hit| {
+            (matches!(hit.kind, KIND_PLACE | KIND_POI)
+                && exact_name.is_some_and(|name| hit.name.eq_ignore_ascii_case(name)))
+                || is_aliased_place(&aliased, hit)
+        };
+        // Sort key, best first: (exact name or alias, then a score). Without
+        // a bias, exact matches rank by importance. With a bias, an
+        // exact-name place near it is the one meant ("Cornwall" near
+        // Ottawa, or near Charlottetown): the nearest within
+        // `LOCAL_BIAS_KM` wins, as BM25 between same-name places differs
+        // only by incidental field lengths. Farther away the usual biased
+        // score decides, so "Sydney" from London is still Sydney AU.
+        const LOCAL_BIAS_KM: f64 = 150.0;
+        let key = |hit: &Hit| -> (bool, f32) {
+            let is_exact = exact(hit);
+            match bias {
+                None if is_exact => (true, hit.importance as f32),
+                Some(b) if is_exact && hit.kind == KIND_PLACE => {
+                    let d_km = crate::geo::haversine_m(hit.lat, hit.lng, b.lat, b.lng) / 1_000.0;
+                    if d_km <= LOCAL_BIAS_KM {
+                        (true, -(d_km as f32))
+                    } else {
+                        (false, boosted_score(hit, bias))
                     }
                 }
+                _ => (is_exact && bias.is_none(), boosted_score(hit, bias)),
             }
-            let score_a = boosted_score(a, bias);
-            let score_b = boosted_score(b, bias);
-            score_b
-                .partial_cmp(&score_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        };
+        let mut keyed: Vec<((bool, f32), Hit)> =
+            candidates.into_iter().map(|hit| (key(&hit), hit)).collect();
+        keyed.sort_by(|((ea, sa), _), ((eb, sb), _)| eb.cmp(ea).then_with(|| sb.total_cmp(sa)));
+        let mut candidates: Vec<Hit> = keyed.into_iter().map(|(_, hit)| hit).collect();
         candidates.truncate(limit);
 
         let span = tracing::Span::current();
