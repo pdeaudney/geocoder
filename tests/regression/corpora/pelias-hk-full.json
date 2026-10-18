@@ -1,32 +1,41 @@
 {
   "name": "pelias-hk-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "홍콩",
+              "address.country_code": "HK",
+              "name": "완쯔"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-admin_translations-0",
-      "notes": null,
+      "notes": [
+        "Search for Wan Chai area of HKG. Seems to have lost KO translation at some point",
+        "admin area only",
+        "input: Chinese",
+        "lang: korean"
+      ],
       "request": {
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "hk",
-          "q": "\u7063\u4ed4, \u9999\u6e2f"
+          "q": "灣仔, 香港"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter lang"
     }
   ]
 }

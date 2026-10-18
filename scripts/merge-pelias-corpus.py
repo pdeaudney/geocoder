@@ -53,7 +53,9 @@ def main() -> int:
             merged["endpoint"] = t.get("endpoint") or d.get("endpoint") or "search"
             merged["priorityThresh"] = t.get("priorityThresh", d.get("priorityThresh", 1))
             merged["distanceThresh"] = t.get("distanceThresh", d.get("distanceThresh"))
-            merged["normalizers"] = t.get("normalizers", d.get("normalizers"))
+            # fuzzy-tester merges normalizers per field, case over suite.
+            normalizers = {**(d.get("normalizers") or {}), **(t.get("normalizers") or {})}
+            merged["normalizers"] = normalizers or None
             merged["weights"] = t.get("weights", d.get("weights"))
             combined["tests"].append(merged)
 

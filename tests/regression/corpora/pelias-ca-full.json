@@ -168,14 +168,18 @@
               "name": "490 Sussex Drive"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-international-6",
       "notes": null,
-      "partial_reason": "normalizers",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -199,7 +203,12 @@
               "name": "615 MacLeod Tr SE"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
           }
         ],
         "status": 200
@@ -208,7 +217,6 @@
       "notes": [
         "prod missing locality data. passes on prodbuild"
       ],
-      "partial_reason": "normalizers",
       "request": {
         "method": "GET",
         "path": "/search",

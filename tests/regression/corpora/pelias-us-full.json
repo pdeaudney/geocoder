@@ -18,14 +18,26 @@
               "name_or_address": "101 Saint Marks Place"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "address.road": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ],
+              "name_or_address": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-1",
       "notes": null,
-      "partial_reason": "expected field borough, expected field label, expected field neighbourhood, expected field region_a, normalizers",
+      "partial_reason": "expected field borough, expected field label, expected field neighbourhood, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -48,14 +60,21 @@
               "name": "1 Water Street"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-2",
       "notes": null,
-      "partial_reason": "expected field borough, expected field region_a, normalizers",
+      "partial_reason": "expected field borough, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -78,14 +97,21 @@
               "name": "1 Water Street"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-2.2",
       "notes": null,
-      "partial_reason": "expected field borough, expected field region_a, normalizers",
+      "partial_reason": "expected field borough, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -114,14 +140,26 @@
               "name_or_address": "450 37th Street"
             },
             "kind": "result_matches_within",
-            "limit": 2
+            "limit": 2,
+            "normalizers": {
+              "address.road": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ],
+              "name_or_address": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-3",
       "notes": "result in the wrong zipcode and city shows up first. priorityThresh 2 to account for NY/NYC datasets with differing spelling",
-      "partial_reason": "expected field borough, expected field label, expected field region_a, normalizers",
+      "partial_reason": "expected field borough, expected field label, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -147,14 +185,26 @@
               "name_or_address": "450 West 37th Street"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "address.road": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ],
+              "name_or_address": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-3.1",
       "notes": "result with the wrong zipcode will be returned, but should have lower ranking than zipcoe match ",
-      "partial_reason": "expected field region_a, normalizers",
+      "partial_reason": "expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -181,14 +231,21 @@
               "name": "Starbucks"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-4",
       "notes": null,
-      "partial_reason": "expected field borough, expected field region_a, normalizers",
+      "partial_reason": "expected field borough, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -217,14 +274,26 @@
               "name_or_address": "455 43rd Street"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "address.road": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ],
+              "name_or_address": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-5",
       "notes": null,
-      "partial_reason": "expected field borough, expected field label, expected field neighbourhood, expected field region_a, normalizers",
+      "partial_reason": "expected field borough, expected field label, expected field neighbourhood, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -253,14 +322,26 @@
               "name_or_address": "1 Main Street"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "address.road": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ],
+              "name_or_address": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-6",
       "notes": null,
-      "partial_reason": "expected field borough, expected field label, expected field neighbourhood, expected field region_a, normalizers",
+      "partial_reason": "expected field borough, expected field label, expected field neighbourhood, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -289,7 +370,19 @@
               "name_or_address": "186 Tuskegee Street Southeast"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "address.road": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ],
+              "name_or_address": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
@@ -298,7 +391,7 @@
       "notes": [
         "was failing due to a double-space in the street name"
       ],
-      "partial_reason": "expected field region_a, normalizers",
+      "partial_reason": "expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -326,14 +419,26 @@
               "name_or_address": "3122 16th Street"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "address.road": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ],
+              "name_or_address": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-8",
       "notes": null,
-      "partial_reason": "expected field label, expected field neighbourhood, expected field region_a, normalizers",
+      "partial_reason": "expected field label, expected field neighbourhood, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -362,14 +467,26 @@
               "name_or_address": "3010 20th Street"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "address.road": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ],
+              "name_or_address": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-9",
       "notes": "The mission is now a macrohood, so we won't be able to get this right until that's imported",
-      "partial_reason": "expected field label, expected field region_a, normalizers",
+      "partial_reason": "expected field label, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -398,14 +515,26 @@
               "name_or_address": "3577 Jackson Street"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "address.road": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ],
+              "name_or_address": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-10",
       "notes": null,
-      "partial_reason": "expected field label, expected field region_a, normalizers",
+      "partial_reason": "expected field label, expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -429,14 +558,21 @@
               "name": "Whole Foods"
             },
             "kind": "result_matches_within",
-            "limit": 5
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-address_parsing-11",
       "notes": "this is not a very precise test. Perhaps we should add a focus point. Potentially flaky test",
-      "partial_reason": "expected field region_a, normalizers",
+      "partial_reason": "expected field region_a",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -2021,7 +2157,15 @@
               "name": "Mount Tabor Park"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateDirectionals",
+                "stripPunctuation",
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
@@ -2052,14 +2196,23 @@
               "address.state": "New York"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "address.house_number": [
+                "toLowerCase",
+                "stripPunctuation"
+              ],
+              "address.road": [
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-search_alphanumeric_housenumber-4",
       "notes": "Queens address",
-      "partial_reason": "expected field borough, normalizers",
+      "partial_reason": "expected field borough",
       "request": {
         "method": "GET",
         "path": "/search",
@@ -2853,7 +3006,13 @@
               "name_or_address": "1090 N Charlotte St"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name_or_address": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -2879,7 +3038,13 @@
               "name": "North Charlotte Street"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -2905,7 +3070,13 @@
               "name": "Calle de Lago"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -2931,7 +3102,13 @@
               "name": "Lancaster"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -2957,7 +3134,13 @@
               "name": "1338 Kobbe Ave"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -2983,7 +3166,13 @@
               "name": "5 Russian Hill Pl"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3009,7 +3198,13 @@
               "name": "DUMBO"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3035,14 +3230,26 @@
               "name": "Chelsea"
             },
             "kind": "result_matches_within",
-            "limit": 2
+            "limit": 2,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           },
           {
             "fields": {
               "name": "Chelsea"
             },
             "kind": "result_matches_within",
-            "limit": 2
+            "limit": 2,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3068,7 +3275,13 @@
               "name": "NoHo"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3094,14 +3307,26 @@
               "name": "Manhattan"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           },
           {
             "fields": {
               "name": "Manhattan"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3127,7 +3352,13 @@
               "name": "Manhattan"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3153,7 +3384,13 @@
               "name": "Socorro"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3179,7 +3416,13 @@
               "name": "New York"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3205,7 +3448,13 @@
               "name": "Zickrick"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3231,7 +3480,13 @@
               "name": "Zumbehl"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3257,7 +3512,13 @@
               "name": "Aastad"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3283,7 +3544,13 @@
               "name": "Bloominggrove Township"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3309,14 +3576,26 @@
               "name": "Lancaster County"
             },
             "kind": "result_matches_within",
-            "limit": 2
+            "limit": 2,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           },
           {
             "fields": {
               "name": "Lancaster County"
             },
             "kind": "result_matches_within",
-            "limit": 2
+            "limit": 2,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3342,7 +3621,13 @@
               "name": "Lancaster County"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3368,7 +3653,13 @@
               "name": "Pennsylvania"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3394,7 +3685,13 @@
               "name": "New Mexico"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3420,7 +3717,13 @@
               "name": "United States"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3446,7 +3749,13 @@
               "name": "United States"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200
@@ -3472,7 +3781,13 @@
               "name": "United States"
             },
             "kind": "result_matches_within",
-            "limit": 1
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
           }
         ],
         "status": 200

@@ -13,6 +13,9 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod normalizers;
+
+use normalizers::{apply_all, Normalizer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -89,9 +92,15 @@ enum Check {
     ResultMatchesWithin {
         limit: usize,
         fields: HashMap<String, String>,
+        #[serde(default)]
+        normalizers: FieldNormalizers,
     },
     /// Pelias `unexpected.properties` must not match any returned result.
-    ResultAbsent { fields: HashMap<String, String> },
+    ResultAbsent {
+        fields: HashMap<String, String>,
+        #[serde(default)]
+        normalizers: FieldNormalizers,
+    },
     /// Pelias `expected.coordinates` uses a distance threshold in metres.
     ResultCoordWithin {
         limit: usize,
@@ -114,6 +123,10 @@ enum Check {
         max_m: f64,
     },
 }
+
+/// Pelias `normalizers`, keyed by our field path. Each list is applied
+/// left to right to both the expected and the actual value.
+type FieldNormalizers = HashMap<String, Vec<Normalizer>>;
 
 // -----------------------------------------------------------------------------
 // Report
@@ -512,7 +525,11 @@ fn evaluate_check(body: &Value, check: &Check) -> Result<(), String> {
             }
             Ok(())
         }
-        Check::ResultMatchesWithin { limit, fields } => {
+        Check::ResultMatchesWithin {
+            limit,
+            fields,
+            normalizers,
+        } => {
             let results = body
                 .get("results")
                 .and_then(Value::as_array)
@@ -520,7 +537,7 @@ fn evaluate_check(body: &Value, check: &Check) -> Result<(), String> {
             if results
                 .iter()
                 .take(*limit)
-                .any(|hit| result_matches(hit, fields))
+                .any(|hit| result_matches(hit, fields, normalizers))
             {
                 Ok(())
             } else {
@@ -529,12 +546,18 @@ fn evaluate_check(body: &Value, check: &Check) -> Result<(), String> {
                 ))
             }
         }
-        Check::ResultAbsent { fields } => {
+        Check::ResultAbsent {
+            fields,
+            normalizers,
+        } => {
             let results = body
                 .get("results")
                 .and_then(Value::as_array)
                 .ok_or("results missing or not an array")?;
-            if results.iter().any(|hit| result_matches(hit, fields)) {
+            if results
+                .iter()
+                .any(|hit| result_matches(hit, fields, normalizers))
+            {
                 Err(format!(
                     "result_absent: unexpected result matches {fields:?}"
                 ))
@@ -613,7 +636,11 @@ fn evaluate_check(body: &Value, check: &Check) -> Result<(), String> {
     }
 }
 
-fn result_matches(hit: &Value, fields: &HashMap<String, String>) -> bool {
+fn result_matches(
+    hit: &Value,
+    fields: &HashMap<String, String>,
+    normalizers: &FieldNormalizers,
+) -> bool {
     fields.iter().all(|(path, expected)| {
         let actual = if path == "name_or_address" {
             let number = json_path_lookup(hit, "address.house_number").and_then(Value::as_str);
@@ -629,7 +656,8 @@ fn result_matches(hit: &Value, fields: &HashMap<String, String>) -> bool {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         };
-        actual.as_deref() == Some(expected.as_str())
+        let chain = normalizers.get(path).map_or(&[][..], Vec::as_slice);
+        actual.is_some_and(|actual| apply_all(chain, &actual) == apply_all(chain, expected))
     })
 }
 
@@ -704,11 +732,20 @@ mod tests {
             &body,
             &Check::ResultMatchesWithin {
                 limit: 1,
-                fields: fields.clone()
+                fields: fields.clone(),
+                normalizers: FieldNormalizers::new(),
             }
         )
         .is_err());
-        assert!(evaluate_check(&body, &Check::ResultMatchesWithin { limit: 2, fields }).is_ok());
+        assert!(evaluate_check(
+            &body,
+            &Check::ResultMatchesWithin {
+                limit: 2,
+                fields,
+                normalizers: FieldNormalizers::new(),
+            }
+        )
+        .is_ok());
         assert!(evaluate_check(
             &body,
             &Check::ResultCount {
@@ -726,14 +763,16 @@ mod tests {
         assert!(evaluate_check(
             &body,
             &Check::ResultAbsent {
-                fields: HashMap::from([("name".into(), "Chicago".into())])
+                fields: HashMap::from([("name".into(), "Chicago".into())]),
+                normalizers: FieldNormalizers::new(),
             }
         )
         .is_ok());
         assert!(evaluate_check(
             &body,
             &Check::ResultAbsent {
-                fields: HashMap::from([("name".into(), "New York".into())])
+                fields: HashMap::from([("name".into(), "New York".into())]),
+                normalizers: FieldNormalizers::new(),
             }
         )
         .is_err());
@@ -747,5 +786,44 @@ mod tests {
             }
         )
         .is_ok());
+    }
+
+    #[test]
+    fn normalizers_apply_to_expected_and_actual_from_corpus_json() {
+        let body = serde_json::json!({"results": [
+            {"name": "Other", "address": {"house_number": "3122", "road": "16TH ST"}}
+        ]});
+        let check = |extra: &str| -> Check {
+            serde_json::from_str(&format!(
+                r#"{{"kind": "result_matches_within", "limit": 1,
+                    "fields": {{"name_or_address": "3122 16th Street", "address.road": "16th Street"}}{extra}}}"#
+            ))
+            .expect("check fixture parses")
+        };
+        // Old corpora have no `normalizers`: exact comparison.
+        assert!(evaluate_check(&body, &check("")).is_err());
+        let normalized = check(
+            r#", "normalizers": {"name_or_address": ["toUpperCase", "abbreviateStreetSuffixes"],
+                               "address.road": ["toUpperCase", "abbreviateStreetSuffixes"]}"#,
+        );
+        assert!(evaluate_check(&body, &normalized).is_ok());
+        // Only the named fields are normalised.
+        let road_only = check(
+            r#", "normalizers": {"address.road": ["toUpperCase", "abbreviateStreetSuffixes"]}"#,
+        );
+        assert!(evaluate_check(&body, &road_only).is_err());
+
+        let absent: Check = serde_json::from_str(
+            r#"{"kind": "result_absent", "fields": {"address.road": "16th street"},
+                "normalizers": {"address.road": ["toLowerCase", "removeOrdinals"]}}"#,
+        )
+        .expect("absent fixture parses");
+        // Actual "16TH ST" -> "16 st"; expected "16th street" -> "16 street".
+        assert!(evaluate_check(&body, &absent).is_ok());
+
+        let unknown = serde_json::from_str::<Check>(
+            r#"{"kind": "result_absent", "fields": {}, "normalizers": {"name": ["nope"]}}"#,
+        );
+        assert!(unknown.is_err());
     }
 }

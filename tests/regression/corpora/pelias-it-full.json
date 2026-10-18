@@ -1,50 +1,51 @@
 {
   "name": "pelias-it-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Perugia"
+            "fields": {
+              "name": "Aeroporto Internazionale dell'Umbria - Perugia \"San Francesco d'Assisi"
+            },
+            "kind": "result_matches_within",
+            "limit": 5
           }
         ],
         "status": 200
       },
       "id": "pelias-pelias-combined-autocomplete_poi-3",
       "notes": "searching for perugia airport",
+      "partial_reason": "expected field country_a, expected field region",
       "request": {
         "method": "GET",
-        "path": "/search",
+        "path": "/autocomplete",
         "query": {
-          "country_code": "it",
           "q": "perugia air"
         }
       },
       "tags": [
         "pelias",
-        "search"
+        "autocomplete"
       ]
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.city",
-            "value": "Rome"
+            "fields": {
+              "address.city": "Rome",
+              "address.country_code": "IT",
+              "name": "via Vittorio Veneto 121"
+            },
+            "kind": "result_matches_within",
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
           }
         ],
         "status": 200
@@ -68,14 +69,51 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
+            "fields": {
+              "address.city": "Milano",
+              "address.country_code": "IT",
+              "name": "via Principe Amedeo 2/10"
+            },
+            "kind": "result_matches_within",
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-17",
+      "notes": [
+        "housenumber has a slash. Falls back to street centroid. The building next to it has housenumber 2"
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "it",
+          "q": "via Principe Amedeo 2/10 20121 MILANO"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Perugia"
+            "fields": {
+              "address.country_code": "IT",
+              "address.state": "Perugia",
+              "name": "Aeroporto Internazionale dell'Umbria - Perugia \"San Francesco d'Assisi"
+            },
+            "kind": "result_matches_within",
+            "limit": 10
           }
         ],
         "status": 200
@@ -86,7 +124,6 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "it",
           "q": "perugia airport"
         }
       },
@@ -99,9 +136,157 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.city": "Trieste",
+              "address.country_code": "IT",
+              "address.house_number": "38/2",
+              "address.road": "Via Del Ponticello"
+            },
+            "kind": "result_matches_within",
+            "limit": 1,
+            "normalizers": {
+              "address.house_number": [
+                "toLowerCase",
+                "stripPunctuation"
+              ],
+              "address.road": [
+                "toLowerCase"
+              ]
+            }
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_alphanumeric_housenumber-2",
+      "notes": "Italian address written the localized way. Libpostal parses housenumber poorly",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "Via del Ponticello 38/2 Trieste italy"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "Trieste",
+              "address.country_code": "IT",
+              "address.house_number": "38/2",
+              "address.road": "Via Del Ponticello"
+            },
+            "kind": "result_matches_within",
+            "limit": 1,
+            "normalizers": {
+              "address.house_number": [
+                "toLowerCase",
+                "stripPunctuation"
+              ],
+              "address.road": [
+                "toLowerCase"
+              ]
+            }
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-search_alphanumeric_housenumber-2.1",
+      "notes": "Italian address written the 'american' way. Libpostal parses housenumber poorly",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "38/2 Via del Ponticello Trieste italy"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Marche"
+            },
+            "kind": "result_matches_within",
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-800",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "name": "Marche"
+            },
+            "kind": "result_matches_within",
+            "limit": 1,
+            "normalizers": {
+              "name": [
+                "toUpperCase",
+                "abbreviateStreetSuffixes"
+              ]
+            }
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-structured_geocoding-801",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/search/structured",
+        "query": {}
+      },
+      "tags": [
+        "pelias",
+        "search/structured"
+      ],
+      "unsupported_reason": "endpoint search/structured, missing text, request parameter region"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "Italy",
+              "address.country_code": "IT",
+              "name": "Sardinia"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -112,14 +297,14 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "it",
           "q": "Sardegna, Italy"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     }
   ]
 }

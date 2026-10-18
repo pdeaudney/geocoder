@@ -1,19 +1,58 @@
 {
   "name": "pelias-in-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
+            "fields": {
+              "address.city": "Mumbai",
+              "address.country_code": "IN",
+              "name": "Bandra Kurla Complex (BKC)"
+            },
+            "kind": "result_matches_within",
+            "limit": 5,
+            "normalizers": {
+              "name": [
+                "toUpperCase"
+              ]
+            }
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-international-13",
+      "notes": [
+        "Eliminate abbreviation in parens. Gets neighborhood, Kurla East, instead of a venue"
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "country_code": "in",
+          "q": "Bandra Kurla Complex Mumbai 400051"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Telangana"
+            "fields": {
+              "address.country": "India",
+              "address.country_code": "IN",
+              "address.county": "Hyderabad",
+              "address.state": "Telangana",
+              "name": "Gaddiannaram"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -24,27 +63,27 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "in",
           "q": "Gaddiannaram, India"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
-          },
-          {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "Dadra and Nagar Haveli"
+            "fields": {
+              "address.country": "India",
+              "address.country_code": "IN",
+              "address.state": "Dadra and Nagar Haveli",
+              "name": "Dadra and Nagar Haveli"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -55,14 +94,14 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "in",
           "q": "Dadra and Nagar Haveli, IN"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter sources"
     }
   ]
 }

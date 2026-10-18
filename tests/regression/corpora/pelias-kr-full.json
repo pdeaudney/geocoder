@@ -1,19 +1,223 @@
 {
   "name": "pelias-kr-full",
-  "description": "Converted from pelias/acceptance-tests (pelias-combined). Only cases with an extractable locality/region and status != 'fail' are emitted. Expectation rules: contains_ci on locality/region/name, country_code filter when expected country_a is known.",
+  "description": "Converted from pelias/acceptance-tests (pelias-combined). Comparable cases retain supported request semantics and Pelias top-N expectations; partial and unsupported cases are counted separately.",
   "cases": [
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "name": "혜화로"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "\uc11c\uc6b8\ud2b9\ubcc4\uc2dc"
+            "expected_lat": 37.586582,
+            "expected_lng": 127.000552,
+            "kind": "result_coord_within",
+            "limit": 1,
+            "max_m": 500.0
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-autocomplete_street_centroids-6",
+      "notes": null,
+      "request": {
+        "method": "GET",
+        "path": "/autocomplete",
+        "query": {
+          "q": "혜화로, seoul"
+        }
+      },
+      "tags": [
+        "pelias",
+        "autocomplete"
+      ],
+      "unsupported_reason": "request parameter layers, request parameter sources, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "서울",
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "종로구",
+              "address.road": "자하문로",
+              "address.state": "서울특별시"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_addresses-1",
+      "notes": "existing address, new format, with postalcode",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "3047 서울특별시 청운동 종로구 자하문로 94"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "광명시",
+              "address.road": "모세로",
+              "address.state": "경기도"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_addresses-2",
+      "notes": "",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "모세로 27"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "강서구",
+              "address.road": "허준로",
+              "address.state": "서울특별시"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          },
+          {
+            "fields": {
+              "address.county": "Gangseo-gu"
+            },
+            "kind": "result_absent"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_addresses-3",
+      "notes": "existing address",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "서울시 강서구 허준로 139"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "마포구",
+              "address.road": "서강로9길",
+              "address.state": "서울특별시"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_addresses-4",
+      "notes": "building name after housenumber is not in data, but should not screw up search",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "마포구 서강로9길 12 한솔빌라트"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "제주시",
+              "address.road": "중앙로",
+              "address.state": "제주특별자치도"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_addresses-5",
+      "notes": "new format address",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "제주시 중앙로 236"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "용산구",
+              "address.house_number": "22",
+              "address.road": "독서당로39길",
+              "address.state": "서울특별시"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -24,27 +228,139 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "kr",
-          "q": "\ub3c5\uc11c\ub2f9\ub85c39\uae38 22"
+          "q": "독서당로39길 22"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter lang"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "서초구",
+              "address.house_number": "13-8",
+              "address.state": "서울특별시"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_addresses-7",
+      "notes": "old format",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "방배동 13-8"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "의정부시",
+              "address.house_number": "9",
+              "address.road": "시민로122번길",
+              "address.state": "경기도"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "\uc11c\uc6b8\ud2b9\ubcc4\uc2dc"
+            "fields": {
+              "address.county": "Uijeongbu-si"
+            },
+            "kind": "result_absent"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_addresses-8",
+      "notes": "new format",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "의정부 시민로 122번길 9"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "서울",
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.state": "서울특별시"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
+          },
+          {
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.state": "서울특별시"
+            },
+            "kind": "result_matches_within",
+            "limit": 2
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_admin-1",
+      "notes": "Seoul (locality, region)",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "서울"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "용산구",
+              "address.state": "서울특별시",
+              "name": "용산구"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -55,27 +371,232 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "kr",
-          "q": "\uc6a9\uc0b0\uad6c"
+          "q": "용산구"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter lang"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "경북",
+              "address.state": "경상북도",
+              "name": "포항시"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_admin-3",
+      "notes": "Pohang (localadmin)",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "포항시"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "고양시",
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.state": "경기도",
+              "name": "고양시"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_admin-4",
+      "notes": "Goyang-Si (locality)",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "고양시"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "서울",
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "종로구",
+              "address.state": "서울",
+              "name": "스타벅스"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_venues-1",
+      "notes": "Seoul Starbucks, make sure the top result is in Seoul and not another city",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "서울 스타벅스"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, size value, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "마포구",
+              "address.road": "월드컵북로47길",
+              "address.state": "서울특별시"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_venues-2",
+      "notes": [
+        "input text is `Sangam World Cup Park 2 complex` as the text",
+        "expected result should be as follows:",
+        "new format: 서울특별시 마포구 월드컵북로47길 46",
+        "old format: 상암동, 상암월드컵파크 2단지"
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "마포구 상암동 월드컵파크 2단지"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "포항시",
+              "address.road": "서강로9길",
+              "address.state": "경상북도"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_venues-3",
+      "notes": "input is Gyeongbuk Pohang-si Nam-gu Jigok-ro, Pohang University of Science and Technology",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "경북 포항시 남구 효자동 포항공과대학교 기계실험동"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "대전",
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "서구",
+              "address.state": "대전광역시"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           },
           {
-            "kind": "json_path_contains_ci",
-            "path": "results.0.address.state",
-            "value": "\uacbd\uae30\ub3c4"
+            "fields": {
+              "address.county": "Seo-gu"
+            },
+            "kind": "result_absent"
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_venues-4",
+      "notes": "input is Galleria Department Store",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "갤러리아 타임월드"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "광명시",
+              "address.state": "경기도",
+              "name": "광명성애병원"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -86,22 +607,26 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "kr",
-          "q": "\uad11\uba85\uc131\uc560\ubcd1\uc6d0"
+          "q": "광명성애병원"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter lang"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "name": "영풍문고"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
           }
         ],
         "status": 200
@@ -112,22 +637,175 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "kr",
-          "q": "\uc601\ud48d\ubb38\uace0"
+          "q": "영풍문고"
         }
       },
       "tags": [
         "pelias",
         "search"
-      ]
+      ],
+      "unsupported_reason": "request parameter lang"
     },
     {
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.city": "광주광역시",
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "동구",
+              "address.state": "광주광역시",
+              "name": "조선대학교"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_venues-7",
+      "notes": "input is Chosun University",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "조선대학교"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "서울",
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "종로구",
+              "address.state": "서울특별시",
+              "name": "서울특별시립정독도서관"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_venues-8",
+      "notes": "input is Seoul Metropolitan Government Library",
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "서울특별시립정독도서관"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "북구",
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "포항시",
+              "address.state": "경북",
+              "name": "포항죽도시장"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_venues-9",
+      "notes": [
+        "input is Pohangjukdo Market (it's a supermarket)",
+        "when it's one word the record is found, but when there is a space",
+        "between the two words we can't find it"
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "포항죽도시장"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.city": "북구",
+              "address.country": "한국",
+              "address.country_code": "KR",
+              "address.county": "포항시",
+              "address.state": "경북",
+              "name": "포항죽도시장"
+            },
+            "kind": "result_matches_within",
+            "limit": 1
+          }
+        ],
+        "status": 200
+      },
+      "id": "pelias-pelias-combined-korean_venues-9.1",
+      "notes": [
+        "input is Pohangjukdo Market (it's a supermarket)",
+        "when it's one word the record is found, but when there is a space",
+        "between the two words we can't find it"
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/search",
+        "query": {
+          "q": "포항 죽도시장"
+        }
+      },
+      "tags": [
+        "pelias",
+        "search"
+      ],
+      "unsupported_reason": "request parameter lang, upstream status fail"
+    },
+    {
+      "expect": {
+        "checks": [
+          {
+            "fields": {
+              "address.country_code": "KR",
+              "address.house_number": "35-7",
+              "address.road": "봉화로167번길"
+            },
+            "kind": "result_matches_within",
+            "limit": 1,
+            "normalizers": {
+              "address.house_number": [
+                "toLowerCase",
+                "stripPunctuation"
+              ],
+              "address.road": [
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
@@ -138,8 +816,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "kr",
-          "q": "\ubd09\ud654\ub85c167\ubc88\uae38 35-7"
+          "q": "봉화로167번길 35-7"
         }
       },
       "tags": [
@@ -151,9 +828,22 @@
       "expect": {
         "checks": [
           {
-            "kind": "json_path_min_count",
-            "min": 1,
-            "path": "results"
+            "fields": {
+              "address.country_code": "KR",
+              "address.house_number": "35-7",
+              "address.road": "봉화로167번길"
+            },
+            "kind": "result_matches_within",
+            "limit": 10,
+            "normalizers": {
+              "address.house_number": [
+                "toLowerCase",
+                "stripPunctuation"
+              ],
+              "address.road": [
+                "toLowerCase"
+              ]
+            }
           }
         ],
         "status": 200
@@ -164,8 +854,7 @@
         "method": "GET",
         "path": "/search",
         "query": {
-          "country_code": "kr",
-          "q": "\ubd09\ud654\ub85c167\ubc88\uae38 35"
+          "q": "봉화로167번길 35"
         }
       },
       "tags": [
