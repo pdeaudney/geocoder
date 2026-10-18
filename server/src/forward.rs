@@ -4173,6 +4173,58 @@ pub fn fuzzy_name(schema: &ForwardSchema, token: &str, distance: u8) -> Box<dyn 
 }
 
 #[cfg(test)]
+mod polygon_centroid_tests {
+    use super::*;
+
+    fn n(lat: f32, lng: f32) -> NodeCoord {
+        NodeCoord { lat, lng }
+    }
+
+    #[test]
+    fn bridged_hole_moves_centroid_away_from_hole() {
+        // A 10x10 square with a 4..6 hole bridged in (see build-index
+        // bridge_holes). The hole is centred, so the centroid stays at the
+        // middle; an off-centre hole pushes it the other way.
+        let centred = [
+            n(0.0, 0.0),
+            n(0.0, 10.0),
+            n(10.0, 10.0),
+            n(10.0, 0.0),
+            n(4.0, 4.0),
+            n(6.0, 4.0),
+            n(6.0, 6.0),
+            n(4.0, 6.0),
+            n(4.0, 4.0),
+            n(10.0, 0.0),
+            n(0.0, 0.0),
+        ];
+        let (lat, lng) = polygon_centroid(&centred);
+        assert!(
+            (lat - 5.0).abs() < 1e-9 && (lng - 5.0).abs() < 1e-9,
+            "({lat}, {lng})"
+        );
+
+        let off_centre = [
+            n(0.0, 0.0),
+            n(0.0, 10.0),
+            n(10.0, 10.0),
+            n(10.0, 0.0),
+            n(6.0, 6.0),
+            n(8.0, 6.0),
+            n(8.0, 8.0),
+            n(6.0, 8.0),
+            n(6.0, 6.0),
+            n(10.0, 0.0),
+            n(0.0, 0.0),
+        ];
+        // (100 * 5 - 4 * 7) / 96 = 4.9167
+        let (lat, lng) = polygon_centroid(&off_centre);
+        assert!((lat - 472.0 / 96.0).abs() < 1e-9, "{lat}");
+        assert!((lng - 472.0 / 96.0).abs() < 1e-9, "{lng}");
+    }
+}
+
+#[cfg(test)]
 mod parse_freeform_query_tests {
     use super::*;
 

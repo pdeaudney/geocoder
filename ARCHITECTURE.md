@@ -65,7 +65,7 @@ arithmetic operation over pre-sorted arrays indexed by S2 cell.
 | `street_entries.bin` | `u16 count, u32 ids...` | variable | Per-cell street way IDs |
 | `geo_cells.bin` | `u64 cell_id, u32 street_off, u32 addr_off, u32 interp_off` | 20 | Sorted merged S2 cell index for streets/addrs/interps |
 | `admin_polygons.bin` | `AdminPolygon{vertex_offset, vertex_count, name_id, admin_level, importance, area, country_code}` | 24 | `boundary=administrative`/`postal_code` polygons; `importance` is the same 0..255 prominence score (population log + wikidata + wikipedia) `PlacePoint`/`PoiPoint` carry — admin docs use it for same-name disambiguation |
-| `admin_vertices.bin` | `NodeCoord` | 8 | Polygon vertex pool (Douglas-Peucker simplified; cap is 500–32 000 verts depending on admin_level + country area) |
+| `admin_vertices.bin` | `NodeCoord` | 8 | Polygon vertex pool (Douglas-Peucker simplified; cap is 500–32 000 verts depending on admin_level + country area; holes are bridged into the ring, see `docs/binary-format.md`) |
 | `admin_cells.bin`, `admin_entries.bin` | S2 index | variable | Admin polygon cell lookup with INTERIOR_FLAG short-circuit |
 | `place_points.bin` | `PlacePoint{lat, lng, name_id, rank, importance}` | 16 | `place=city/town/village/suburb/hamlet/neighbourhood/quarter/locality/island/islet/isolated_dwelling/farm` points; `importance` 0..255 |
 | `place_cells.bin`, `place_entries.bin` | S2 index | variable | Place point cell lookup |
