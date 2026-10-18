@@ -251,6 +251,11 @@ The builder drops a hole, and prints a count for each reason, when:
 - the ring would still pass the `u16` vertex limit with every hole at the minimum cap (smallest holes are dropped first).
 
 Each hole is simplified with the same `admin_level` cap as an outer ring, from its own area.
+Simplification can make a valid ring cross itself.
+When S2 rejects a simplified ring, the builder simplifies it again with double the cap, until S2 accepts it or the cap reaches the raw vertex count.
+The outer ring stops at 32 768 vertices, so half of the `u16` limit stays for holes, and a hole stops at what the outer ring leaves.
+A ring that is still invalid at the largest cap keeps the first simplification, and the build summary prints both counts.
+An outer ring that S2 rejects gets a bounding-box cell covering with no `INTERIOR_FLAG` cells.
 When the outer ring and its holes pass the `u16` limit, the hole caps are halved (down to 8) until they fit.
 `area` stays the outer-ring area.
 `find_admin` ranks the polygons that contain a point by area, and an enclave in a skipped hole must still rank below its owner.
