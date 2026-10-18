@@ -269,7 +269,7 @@ fn build_country(
                 .0;
             records.push((cell, point));
             kept += 1;
-            if kept % 1_000_000 == 0 {
+            if kept.is_multiple_of(1_000_000) {
                 eprintln!("    {}M records kept", kept / 1_000_000);
             }
         })?;

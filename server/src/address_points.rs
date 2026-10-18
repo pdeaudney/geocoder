@@ -209,7 +209,7 @@ impl AddressPointIndex {
             ));
         }
         let points_len = fs::metadata(points_path).map_err(|e| e.to_string())?.len() as usize;
-        if points_len == 0 || points_len % std::mem::size_of::<AddressPoint>() != 0 {
+        if points_len == 0 || !points_len.is_multiple_of(std::mem::size_of::<AddressPoint>()) {
             return Err(format!(
                 "{}: invalid point record length",
                 points_path.display()
@@ -305,14 +305,14 @@ impl AddressPointIndex {
     ///
     /// `unit_hint` semantics:
     ///   - `None` → unit is unconstrained; matches both unit-bearing
-    ///              and unit-less stored records (geographic-nearest
-    ///              tiebreak picks one)
+    ///     and unit-less stored records (geographic-nearest
+    ///     tiebreak picks one)
     ///   - `Some("3")` → match stored records where `unit_id` resolves
-    ///                   to `"3"` (case-insensitive exact). Stored
-    ///                   records with no unit are also accepted as a
-    ///                   fallback so `unit=3` against a building that
-    ///                   only has a building-level point still resolves
-    ///                   to the building.
+    ///     to `"3"` (case-insensitive exact). Stored
+    ///     records with no unit are also accepted as a
+    ///     fallback so `unit=3` against a building that
+    ///     only has a building-level point still resolves
+    ///     to the building.
     pub fn find_by_housenumber(
         &self,
         housenumber: &str,
@@ -348,7 +348,7 @@ impl AddressPointIndex {
         let mut best_unit_match: Option<(f64, &AddressPoint)> = None;
         let mut best_fallback: Option<(f64, &AddressPoint)> = None;
 
-        for cell in std::iter::once(origin).chain(neighbours.into_iter()) {
+        for cell in std::iter::once(origin).chain(neighbours) {
             let Some(entry_offset) = lookup_cell_offset(&self.cells, cell.0) else {
                 continue;
             };
@@ -376,7 +376,7 @@ impl AddressPointIndex {
                     if p.unit_id == 0 {
                         // Stored has no unit — only useful as a
                         // building-level fallback.
-                        let take = best_fallback.map_or(true, |(d, _)| dist < d);
+                        let take = best_fallback.is_none_or(|(d, _)| dist < d);
                         if take {
                             best_fallback = Some((dist, p));
                         }
@@ -384,7 +384,7 @@ impl AddressPointIndex {
                     }
                     let stored_unit = self.string_at(p.unit_id);
                     if stored_unit.eq_ignore_ascii_case(unit_needle) {
-                        let take = best_unit_match.map_or(true, |(d, _)| dist < d);
+                        let take = best_unit_match.is_none_or(|(d, _)| dist < d);
                         if take {
                             best_unit_match = Some((dist, p));
                         }
@@ -393,7 +393,7 @@ impl AddressPointIndex {
                 }
 
                 // No unit hint — single track.
-                let take = best_unit_match.map_or(true, |(d, _)| dist < d);
+                let take = best_unit_match.is_none_or(|(d, _)| dist < d);
                 if take {
                     best_unit_match = Some((dist, p));
                 }
@@ -419,7 +419,7 @@ impl AddressPointIndex {
 
         let cos_lat = lat.to_radians().cos();
         let mut best: Option<(f64, &AddressPoint)> = None;
-        for cell in std::iter::once(origin).chain(neighbours.into_iter()) {
+        for cell in std::iter::once(origin).chain(neighbours) {
             let Some(entry_offset) = lookup_cell_offset(&self.cells, cell.0) else {
                 continue;
             };
@@ -430,7 +430,7 @@ impl AddressPointIndex {
                 let dlat = (p.lat as f64 - lat).to_radians();
                 let dlng = (p.lng as f64 - lng).to_radians();
                 let dist = dlat * dlat + dlng * dlng * cos_lat * cos_lat;
-                if best.map_or(true, |(best_dist, _)| dist < best_dist) {
+                if best.is_none_or(|(best_dist, _)| dist < best_dist) {
                     best = Some((dist, p));
                 }
             });

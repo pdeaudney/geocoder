@@ -498,7 +498,7 @@ fn make_progress(total: Option<u64>, opts: &FetchOpts) -> ProgressBar {
         Some(t) => ProgressBar::new(t),
         None => ProgressBar::new_spinner(),
     };
-    let _ = pb.set_style(
+    pb.set_style(
         ProgressStyle::with_template(
             "  {bar:40.cyan/blue} {bytes:>10}/{total_bytes:>10} {bytes_per_sec:>12} eta {eta}",
         )

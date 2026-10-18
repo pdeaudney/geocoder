@@ -167,7 +167,7 @@ pub fn write(dir: &Path, tool: &str, extra: Value) -> std::io::Result<()> {
     let path = dir.join(format!("manifest_{tool}.json"));
     let mut f = std::fs::File::create(&path)?;
     serde_json::to_writer_pretty(&mut f, &obj)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     f.write_all(b"\n")?;
     eprintln!("wrote {}", path.display());
     Ok(())

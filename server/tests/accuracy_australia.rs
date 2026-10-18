@@ -234,7 +234,7 @@ fn australia_accuracy() {
         let mut local = Vec::new();
 
         if let Some(expected) = fx.expect_country {
-            if a.country.as_deref() != Some(expected) {
+            if a.country != Some(expected) {
                 local.push(format!("country: expected {expected:?}, got {:?}", a.country));
             }
         } else if a.country.is_some() {
@@ -251,7 +251,7 @@ fn australia_accuracy() {
         }
 
         if let Some(expected) = fx.expect_state {
-            if a.state.as_deref() != Some(expected) {
+            if a.state != Some(expected) {
                 local.push(format!("state: expected {expected:?}, got {:?}", a.state));
             }
         }
@@ -261,7 +261,7 @@ fn australia_accuracy() {
         }
 
         if let Some(needle) = fx.expect_city_contains {
-            if !contains_ci(a.city.as_deref(), needle) {
+            if !contains_ci(a.city, needle) {
                 local.push(format!(
                     "city: expected substring {needle:?}, got {:?}",
                     a.city
@@ -270,7 +270,7 @@ fn australia_accuracy() {
         }
 
         if let Some(needle) = fx.hint_road_contains {
-            if !contains_ci(a.road.as_deref(), needle) {
+            if !contains_ci(a.road, needle) {
                 hint_misses += 1;
                 eprintln!(
                     "    HINT MISS: road {:?} does not contain {:?}",

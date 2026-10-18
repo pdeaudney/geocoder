@@ -197,7 +197,7 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
                 };
                 out.insert(address_pid.to_string(), (lat, lng));
                 geo_rows += 1;
-                if geo_rows % 2_000_000 == 0 {
+                if geo_rows.is_multiple_of(2_000_000) {
                     eprintln!("  {}M geocodes loaded", geo_rows / 1_000_000);
                 }
             })?;
@@ -315,7 +315,7 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
                 .0;
             records.push((cell, point));
             addr_rows += 1;
-            if addr_rows % 2_000_000 == 0 {
+            if addr_rows.is_multiple_of(2_000_000) {
                 eprintln!("  {}M addresses emitted", addr_rows / 1_000_000);
             }
         })?;

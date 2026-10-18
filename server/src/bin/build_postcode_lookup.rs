@@ -147,7 +147,7 @@ fn run(psv_dir: &Path, out_dir: &Path) -> Result<(), String> {
                 .entry((locality_pid.to_string(), postcode.to_string()))
                 .or_insert(0) += 1;
             rows_scanned += 1;
-            if rows_scanned % 1_000_000 == 0 {
+            if rows_scanned.is_multiple_of(1_000_000) {
                 eprintln!(
                     "  {} rows scanned, {} distinct (locality,postcode) pairs",
                     rows_scanned,

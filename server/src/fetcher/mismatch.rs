@@ -133,10 +133,8 @@ pub fn check_pbf_directory_consistency(dir: &Path, target: Region) -> Result<(),
         );
     let want_planet_pattern = target.is_planet();
 
-    if want_continent_pattern && planet_path.is_some() {
-        return Err(Mismatch::PlanetExistsButContinentsRequested {
-            planet_path: planet_path.unwrap(),
-        });
+    if let Some(planet_path) = planet_path.filter(|_| want_continent_pattern) {
+        return Err(Mismatch::PlanetExistsButContinentsRequested { planet_path });
     }
     if want_planet_pattern && !continent_paths.is_empty() {
         return Err(Mismatch::ContinentsExistButPlanetRequested { continent_paths });

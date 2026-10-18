@@ -284,7 +284,7 @@ fn seen_streets_contains(seen: &[u32], id: u32) -> bool {
     // Linear scan. N is bounded by SEEN_STREETS_CAP and a u32 equality check
     // is single-cycle, so this is consistently faster than hashing for the
     // sizes we see in practice.
-    seen.iter().any(|&s| s == id)
+    seen.contains(&id)
 }
 
 pub struct GeoCellOffsets {
@@ -622,6 +622,8 @@ impl Index {
         NO_DATA
     }
 
+    // tuple mirrors the three independent lookup layers
+    #[allow(clippy::type_complexity)]
     pub fn query_geo(
         &self,
         lat: f64,
@@ -657,7 +659,7 @@ impl Index {
         let mut seen_streets: [u32; SEEN_STREETS_CAP] = [0; SEEN_STREETS_CAP];
         let mut seen_streets_len: usize = 0;
 
-        for c in std::iter::once(cell).chain(neighbors.into_iter()) {
+        for c in std::iter::once(cell).chain(neighbors) {
             let offsets = Self::lookup_geo_cell(&self.geo_cells, c);
 
             Self::for_each_entry(&self.addr_entries, offsets.addr, |id| {
@@ -775,7 +777,7 @@ impl Index {
         const INTERIOR_FLAG: u32 = 0x80000000;
         const ID_MASK: u32 = 0x7FFFFFFF;
 
-        for c in std::iter::once(cell).chain(neighbors.into_iter()) {
+        for c in std::iter::once(cell).chain(neighbors) {
             Self::for_each_entry(
                 &self.admin_entries,
                 Self::lookup_admin_cell(&self.admin_cells, c),
@@ -863,8 +865,8 @@ impl Index {
         // Mapping is delegated to `self.admin_config` — see
         // `server/config/admin-mapping.json` for the defaults and per-country
         // overrides.
-        for level in 0..12usize {
-            let Some((_, poly)) = best_by_level[level] else {
+        for slot in best_by_level.iter().take(12) {
+            let Some((_, poly)) = *slot else {
                 continue;
             };
             if poly.admin_level == 2 {
@@ -967,7 +969,7 @@ impl Index {
         // ("Coober Pedy") is in the same neighbourhood.
         let mut best: Option<(u8, f64, &PlacePoint)> = None;
 
-        for c in std::iter::once(cell).chain(neighbors.into_iter()) {
+        for c in std::iter::once(cell).chain(neighbors) {
             let offset = Self::lookup_admin_cell(cells_mmap, c);
             Self::for_each_entry(entries_mmap, offset, |id| {
                 let p = &all_places[id as usize];
@@ -1020,7 +1022,7 @@ impl Index {
         let cos_lat = lat.to_radians().cos();
 
         let mut best: Option<(u8, f64, &PoiPoint)> = None;
-        for c in std::iter::once(cell).chain(neighbors.into_iter()) {
+        for c in std::iter::once(cell).chain(neighbors) {
             // poi_cells uses the same single-offset-per-cell layout
             // as admin/place cells (12-byte records keyed on u64
             // cell id, written by write_cell_index in the C++
@@ -1112,7 +1114,7 @@ impl Index {
         // G-NAF is authoritative for AU and covers every AU address
         // directly from Geoscape (fresher than the OpenAddresses aggregator).
         // Only try it when we don't have a country hint or the hint is AU.
-        let try_gnaf = country_code.map_or(true, |cc| cc.eq_ignore_ascii_case(b"AU"));
+        let try_gnaf = country_code.is_none_or(|cc| cc.eq_ignore_ascii_case(b"AU"));
         if try_gnaf {
             if let Some(gnaf) = &self.gnaf {
                 if let Some(m) = gnaf.find_by_housenumber(
@@ -1436,7 +1438,7 @@ impl Index {
                 (m.lng - lng).to_radians(),
                 lat.to_radians().cos(),
             );
-            dist < max_dist && addr.map_or(true, |(osm_dist, _)| dist < osm_dist)
+            dist < max_dist && addr.is_none_or(|(osm_dist, _)| dist < osm_dist)
         });
         if let Some(m) = oa_address {
             house_number = Some(Cow::Borrowed(m.housenumber));
@@ -1718,8 +1720,8 @@ pub fn project_point_on_polyline(
     // Convert the in-segment parameter to a polyline-wide parameter using
     // cumulative arc length up to the winning segment.
     let mut prefix: f64 = 0.0;
-    for i in 0..best_seg_idx {
-        prefix += seg_lens[i];
+    for len in &seg_lens[..best_seg_idx] {
+        prefix += len;
     }
     let t = (prefix + best_seg_t * seg_lens[best_seg_idx]) / total_len;
     Some((best_seg_dist, t))

@@ -71,9 +71,7 @@ fn run(index_dir: &Path, out_dir: &Path) -> Result<(), String> {
 
     fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {}", out_dir.display(), e))?;
 
-    let mut summary = Vec::<(String, usize)>::new();
-
-    summary.push(("streets.csv".into(), dump_streets(&idx, &out_dir.join("streets.csv"))?));
+    let mut summary = vec![("streets.csv".to_string(), dump_streets(&idx, &out_dir.join("streets.csv"))?)];
     summary.push((
         "place_points.csv".into(),
         dump_place_points(&idx, &out_dir.join("place_points.csv"))?,

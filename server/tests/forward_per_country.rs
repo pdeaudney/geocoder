@@ -27,7 +27,7 @@ fn au_country_index_is_loaded() {
     let Some(fwd) = load() else { return };
     let countries: Vec<_> = fwd.countries().copied().collect();
     assert!(
-        countries.contains(&*b"au"),
+        countries.contains(b"au"),
         "expected AU in loaded countries, got {:?}",
         countries
     );

@@ -879,6 +879,8 @@ pub fn build_partitioned_with_heap(
         category: &'a str,
     }
 
+    // test fixture builder, positional args keep call sites short
+    #[allow(clippy::too_many_arguments)]
     fn pending_address<'a>(
         name: &'a str,
         housenumber: &'a str,
@@ -1383,7 +1385,7 @@ pub fn build_partitioned_with_heap(
             let writer_threads = std::env::var("TANTIVY_WRITER_THREADS")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or_else(|| if docs.len() >= 1_000_000 { 4 } else { 1 });
+                .unwrap_or(if docs.len() >= 1_000_000 { 4 } else { 1 });
             let mut writer = t_index
                 .writer_with_num_threads(writer_threads, heap_bytes)
                 .map_err(|e| format!("tantivy writer: {e}"))?;
@@ -1494,6 +1496,8 @@ fn dedup_indexed_tokens(s: &str) -> String {
     out
 }
 
+// mirrors the flat schema fields; a params struct would just rename them
+#[allow(clippy::too_many_arguments)]
 fn tantivy_doc(
     s: &ForwardSchema,
     name: &str,
@@ -1664,6 +1668,8 @@ fn tantivy_doc(
     )
 }
 
+// mirrors the flat schema fields; a params struct would just rename them
+#[allow(clippy::too_many_arguments)]
 fn address_doc(
     s: &ForwardSchema,
     street: &str,
@@ -2220,7 +2226,7 @@ impl Forward {
                                         state: Some(state),
                                         country_code: Some(&code),
                                         kind: Some(KIND_PLACE),
-                                        limit: q.limit.max(10).min(50),
+                                        limit: q.limit.clamp(10, 50),
                                         ..q.clone()
                                     },
                                     false,
@@ -2245,7 +2251,7 @@ impl Forward {
                                             q: Some(name),
                                             country_code: Some(&code),
                                             kind: Some(KIND_PLACE),
-                                            limit: q.limit.max(10).min(50),
+                                            limit: q.limit.clamp(10, 50),
                                             ..q.clone()
                                         },
                                         false,
@@ -2265,7 +2271,7 @@ impl Forward {
                                     .then_with(|| b.importance.cmp(&a.importance))
                                     .then_with(|| b.score.total_cmp(&a.score))
                             });
-                            places.truncate(q.limit.max(1).min(50));
+                            places.truncate(q.limit.clamp(1, 50));
                             return Ok(places);
                         }
                     }
@@ -2378,7 +2384,7 @@ impl Forward {
                     })
                     .then_with(|| a.country_code.cmp(&b.country_code))
             });
-            hits.truncate(q.limit.max(1).min(50));
+            hits.truncate(q.limit.clamp(1, 50));
             tracing::Span::current().record("geocoder.stage", "fanout");
             tracing::Span::current().record("geocoder.match_count", hits.len());
             return Ok(hits);
@@ -2722,7 +2728,7 @@ impl Forward {
             ));
         }
         let boolean = BooleanQuery::new(clauses);
-        let limit = limit.max(1).min(50);
+        let limit = limit.clamp(1, 50);
         let searcher = active.reader.searcher();
         let top = searcher
             .search(&boolean, &TopDocs::with_limit(limit * 3))
@@ -2990,7 +2996,7 @@ impl Forward {
         }
 
         let boolean = BooleanQuery::new(clauses);
-        let limit = q.limit.max(1).min(50);
+        let limit = q.limit.clamp(1, 50);
         let exact_name = q.q.map(str::trim).filter(|text| {
             !text.is_empty()
                 && !text.contains(',')
@@ -3045,12 +3051,12 @@ impl Forward {
             // ~50 ms bias-query budget. The 10 000-doc upper bound
             // protects against pathological large-limit queries.
             // Only paid on bias-enabled queries.
-            (limit * 30).max(3_000).min(10_000)
+            (limit * 30).clamp(3_000, 10_000)
         } else if exact_name.is_some() {
             // Same-name places and landmarks can have different BM25
             // scores solely because each document has different context.
             // Fetch enough candidates to compare their prominence.
-            (limit * 3).max(100).min(150)
+            (limit * 3).clamp(100, 150)
         } else {
             (limit * 3).min(150)
         };
@@ -3148,7 +3154,7 @@ impl Forward {
         let s = &active.schema;
         let searcher = active.reader.searcher();
 
-        let limit = q.limit.max(1).min(50);
+        let limit = q.limit.clamp(1, 50);
 
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
