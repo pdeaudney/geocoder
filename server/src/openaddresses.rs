@@ -24,6 +24,7 @@
 //! prefer to always provide the country filter.
 
 use crate::address_points::{AddressMatch, AddressPointIndex};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -187,6 +188,138 @@ pub fn parse_oa_country_prefix(filename: &str) -> Option<[u8; 2]> {
     Some([bytes[0].to_ascii_lowercase(), bytes[1].to_ascii_lowercase()])
 }
 
+/// US and CA OpenAddresses sources often publish ALL-CAPS text with USPS
+/// abbreviations ("3122 16TH ST"). Rewrite it to read like OSM
+/// ("3122 16th Street"), in the spirit of Pelias's openaddresses importer.
+/// A value with any lower-case letter comes from a source that already
+/// cases its text, so it passes through unchanged.
+pub fn normalise_street(s: &str) -> Cow<'_, str> {
+    if !is_all_caps(s) {
+        return Cow::Borrowed(s);
+    }
+    let raw: Vec<&str> = s.split_whitespace().collect();
+    let mut words: Vec<String> = raw.iter().map(|w| title_case_word(w)).collect();
+    let n = raw.len();
+    let suffix_at = if n >= 2 && is_directional(raw[n - 1]) {
+        n - 2
+    } else {
+        n - 1
+    };
+    let mut suffix_expanded = false;
+    // A leading "ST" is Saint ("ST JAMES PL").
+    if suffix_at > 0 {
+        if let Some(full) = street_suffix(raw[suffix_at].trim_end_matches('.')) {
+            words[suffix_at] = full.to_owned();
+            suffix_expanded = true;
+        }
+    }
+    // "N ST NE" is the letter street N, not North Street.
+    if suffix_at >= 1 && !(suffix_at == 1 && suffix_expanded) {
+        if let Some(full) = leading_directional(raw[0]) {
+            words[0] = full.to_owned();
+        }
+    }
+    Cow::Owned(words.join(" "))
+}
+
+/// Title-case an ALL-CAPS city or unit; see [`normalise_street`].
+pub fn normalise_name(s: &str) -> Cow<'_, str> {
+    if !is_all_caps(s) {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(
+        s.split_whitespace()
+            .map(title_case_word)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn is_all_caps(s: &str) -> bool {
+    s.chars().any(char::is_alphabetic) && !s.chars().any(char::is_lowercase)
+}
+
+fn is_directional(w: &str) -> bool {
+    matches!(w, "N" | "S" | "E" | "W" | "NE" | "NW" | "SE" | "SW")
+}
+
+fn leading_directional(w: &str) -> Option<&'static str> {
+    Some(match w {
+        "N" => "North",
+        "S" => "South",
+        "E" => "East",
+        "W" => "West",
+        _ => return None,
+    })
+}
+
+fn street_suffix(w: &str) -> Option<&'static str> {
+    Some(match w {
+        "ST" => "Street",
+        "AVE" | "AV" => "Avenue",
+        "BLVD" => "Boulevard",
+        "DR" => "Drive",
+        "RD" => "Road",
+        "LN" => "Lane",
+        "CT" => "Court",
+        "PL" => "Place",
+        "PKWY" => "Parkway",
+        "HWY" => "Highway",
+        "TER" => "Terrace",
+        "CIR" => "Circle",
+        "TRL" | "TR" => "Trail",
+        "SQ" => "Square",
+        "CRES" => "Crescent",
+        "EXPY" => "Expressway",
+        "FWY" => "Freeway",
+        "ALY" => "Alley",
+        "PLZ" => "Plaza",
+        "XING" => "Crossing",
+        _ => return None,
+    })
+}
+
+fn title_case_word(w: &str) -> String {
+    w.split('-')
+        .map(title_case_part)
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn title_case_part(p: &str) -> String {
+    if p.starts_with(|c: char| c.is_ascii_digit()) {
+        let letters = p.trim_start_matches(|c: char| c.is_ascii_digit());
+        return if matches!(letters, "ST" | "ND" | "RD" | "TH") {
+            p.to_lowercase()
+        } else {
+            p.to_owned()
+        };
+    }
+    if matches!(p, "NE" | "NW" | "SE" | "SW" | "US" | "II" | "III" | "IV") {
+        return p.to_owned();
+    }
+    if let Some(rest) = p.strip_prefix("MC").filter(|r| !r.is_empty()) {
+        return format!("Mc{}", capitalise(rest));
+    }
+    if let Some((head, tail)) = p.split_once('\'') {
+        if head.chars().count() == 1 && !tail.is_empty() {
+            return format!("{head}'{}", capitalise(tail));
+        }
+    }
+    capitalise(p)
+}
+
+fn capitalise(p: &str) -> String {
+    let mut chars = p.chars();
+    match chars.next() {
+        Some(first) => first
+            .to_uppercase()
+            .chain(chars.flat_map(char::to_lowercase))
+            .collect(),
+        None => String::new(),
+    }
+}
+
 fn normalise_code(cc: &[u8; 2]) -> [u8; 2] {
     [cc[0].to_ascii_lowercase(), cc[1].to_ascii_lowercase()]
 }
@@ -226,5 +359,74 @@ mod tests {
     fn code_normalisation_is_case_insensitive() {
         assert_eq!(normalise_code(b"AU"), *b"au");
         assert_eq!(normalise_code(b"aU"), *b"au");
+    }
+
+    #[test]
+    fn caps_streets_read_like_osm() {
+        for (raw, want) in [
+            ("3122 16TH ST", "3122 16th Street"),
+            ("16TH ST", "16th Street"),
+            ("1ST AVE", "1st Avenue"),
+            ("2ND AV", "2nd Avenue"),
+            ("JACKSON ST", "Jackson Street"),
+            ("W 37 ST", "West 37 Street"),
+            ("E MAIN", "East Main"),
+            ("N BROADWAY", "North Broadway"),
+            ("N ST NE", "N Street NE"),
+            ("E ST", "E Street"),
+            ("JACKSON ST SE", "Jackson Street SE"),
+            ("MACLEOD TR SW", "Macleod Trail SW"),
+            ("AVENUE N", "Avenue N"),
+            ("ST JAMES PL", "St James Place"),
+            ("ST", "St"),
+            ("ST PAUL ST", "St Paul Street"),
+            ("MCDONALD AVE", "McDonald Avenue"),
+            ("O'BRIEN CT", "O'Brien Court"),
+            ("WILKES-BARRE BLVD", "Wilkes-Barre Boulevard"),
+            ("PACIFIC COAST HWY", "Pacific Coast Highway"),
+            ("SUNSET PKWY", "Sunset Parkway"),
+            ("ROSE TER", "Rose Terrace"),
+            ("OAK CIR", "Oak Circle"),
+            ("PINE TRL", "Pine Trail"),
+            ("UNION SQ", "Union Square"),
+            ("MAPLE CRES", "Maple Crescent"),
+            ("CROSS BRONX EXPY", "Cross Bronx Expressway"),
+            ("HARBOR FWY", "Harbor Freeway"),
+            ("BACK ALY", "Back Alley"),
+            ("CIVIC PLZ", "Civic Plaza"),
+            ("MILL XING", "Mill Crossing"),
+            ("ELM DR", "Elm Drive"),
+            ("CEDAR RD", "Cedar Road"),
+            ("BIRCH LN", "Birch Lane"),
+            ("CHERRY LOOP", "Cherry Loop"),
+            ("ASPEN WAY", "Aspen Way"),
+            ("US HWY 1", "US Hwy 1"),
+            ("PEÑA BLVD", "Peña Boulevard"),
+        ] {
+            assert_eq!(normalise_street(raw), want, "{raw}");
+        }
+    }
+
+    #[test]
+    fn caps_names_are_title_cased_only() {
+        assert_eq!(normalise_name("WOODBRIDGE"), "Woodbridge");
+        assert_eq!(normalise_name("NEW YORK"), "New York");
+        assert_eq!(normalise_name("ST LOUIS"), "St Louis");
+        assert_eq!(normalise_name("APT 3B"), "Apt 3B");
+    }
+
+    #[test]
+    fn mixed_case_and_letterless_values_pass_through() {
+        for raw in [
+            "3010 20th Street",
+            "Example St",
+            "McDonald Ave",
+            "7",
+            "12-14",
+            "",
+        ] {
+            assert!(matches!(normalise_street(raw), Cow::Borrowed(_)), "{raw}");
+            assert!(matches!(normalise_name(raw), Cow::Borrowed(_)), "{raw}");
+        }
     }
 }

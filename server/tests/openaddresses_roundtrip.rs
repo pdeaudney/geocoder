@@ -118,6 +118,47 @@ fn tiny_synthetic_batch_roundtrips_through_build_and_query() {
 }
 
 #[test]
+fn us_caps_text_is_normalised_and_other_countries_are_not() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let csv_root = tmp.path().join("csv");
+    let out_dir = tmp.path().join("index");
+    for cc in ["us", "nz"] {
+        let dir = csv_root.join(cc);
+        fs::create_dir_all(&dir).expect("mkdir country dir");
+        fs::write(
+            dir.join("test.csv"),
+            "LON,LAT,NUMBER,STREET,UNIT,CITY,DISTRICT,REGION,POSTCODE,ID,HASH\n\
+             -77.25,38.65,3577,W JACKSON ST,APT 3B,WOODBRIDGE,,VA,22192,id,hash\n",
+        )
+        .expect("write test.csv");
+    }
+    let status = Command::new(build_tool())
+        .arg(&csv_root)
+        .arg(&out_dir)
+        .status()
+        .expect("run build-openaddresses-index");
+    assert!(status.success(), "builder exited non-zero");
+
+    let oa = OpenAddresses::open(&out_dir)
+        .expect("OpenAddresses::open succeeds")
+        .expect("per-country index should load");
+    let us = oa
+        .find_by_housenumber(b"us", "3577", None, None, 38.65, -77.25, 17)
+        .expect("US hit");
+    assert_eq!(
+        (us.street, us.locality, us.unit),
+        ("West Jackson Street", "Woodbridge", "Apt 3B")
+    );
+    let nz = oa
+        .find_by_housenumber(b"nz", "3577", None, None, 38.65, -77.25, 17)
+        .expect("NZ hit");
+    assert_eq!(
+        (nz.street, nz.locality, nz.unit),
+        ("W JACKSON ST", "WOODBRIDGE", "APT 3B")
+    );
+}
+
+#[test]
 fn partial_country_shard_fails_to_load() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("oa_gb_cells.bin"), [0u8; 12]).unwrap();

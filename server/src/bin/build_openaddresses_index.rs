@@ -42,9 +42,10 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use query_server::address_points::{AddressPoint, AddressPointIndex, BuildOutputPaths};
-use query_server::openaddresses::oa_prefix;
+use query_server::openaddresses::{normalise_name, normalise_street, oa_prefix};
 use s2::cellid::CellID;
 use s2::latlng::LatLng;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
@@ -216,6 +217,9 @@ fn build_country(
     let mut kept: u64 = 0;
     let mut dropped_no_coord: u64 = 0;
     let mut dropped_no_number: u64 = 0;
+    // US and CA sources publish ALL-CAPS USPS text; other countries' OA
+    // text is already cased the way OSM is.
+    let tidy_text = matches!(cc, b"us" | b"ca");
 
     for csv_path in &csv_paths {
         eprintln!("  reading {}", csv_path.display());
@@ -250,18 +254,31 @@ fn build_country(
             // string would burn a non-zero id on every unit-less row,
             // so use the 0 sentinel like G-NAF does.
             let unit = row.get("UNIT").unwrap_or_default();
+            let (street, city, unit) = if tidy_text {
+                (
+                    normalise_street(street),
+                    normalise_name(city),
+                    normalise_name(unit),
+                )
+            } else {
+                (
+                    Cow::Borrowed(street),
+                    Cow::Borrowed(city),
+                    Cow::Borrowed(unit),
+                )
+            };
 
             let point = AddressPoint {
                 lat,
                 lng: lon,
                 housenumber_id: strings.intern(number),
-                street_id: strings.intern(street),
-                locality_id: strings.intern(city),
+                street_id: strings.intern(&street),
+                locality_id: strings.intern(&city),
                 postcode_id: strings.intern(postcode),
                 unit_id: if unit.trim().is_empty() {
                     0
                 } else {
-                    strings.intern(unit)
+                    strings.intern(&unit)
                 },
             };
             let cell = CellID::from(LatLng::from_degrees(lat as f64, lon as f64))
@@ -483,18 +500,18 @@ mod tests {
 
     #[test]
     fn quoted_newline_is_one_address_record() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("addresses.csv");
         fs::write(
             &path,
             "LON,LAT,NUMBER,STREET\n-77.5,38.3,12533,\"JOSEPHINE\nJOSEPHINE LN\"\n",
         )
-        .unwrap();
+        .expect("write csv");
         let mut streets = Vec::new();
         read_csv(&path, |row| {
-            streets.push(row.get("STREET").unwrap().to_owned())
+            streets.push(row.get("STREET").expect("STREET column").to_owned())
         })
-        .unwrap();
+        .expect("read csv");
         assert_eq!(streets, ["JOSEPHINE\nJOSEPHINE LN"]);
     }
 }
