@@ -109,7 +109,7 @@ fn target_for(pbf_dir: &Path, url: &Url) -> FetchTarget {
     // `planet-latest.osm.pbf`, etc.
     let filename = url
         .path_segments()
-        .and_then(|segs| segs.last())
+        .and_then(|mut segs| segs.next_back())
         .filter(|s| !s.is_empty())
         .unwrap_or("download.osm.pbf");
     let dest = pbf_dir.join(filename);

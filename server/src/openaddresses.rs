@@ -92,6 +92,8 @@ impl OpenAddresses {
     }
 
     /// Housenumber-exact lookup for a specific country.
+    // lookup keys are independent query fields
+    #[allow(clippy::too_many_arguments)]
     pub fn find_by_housenumber(
         &self,
         country_code: &[u8; 2],
@@ -136,7 +138,7 @@ impl OpenAddresses {
         street_level: u64,
     ) -> Option<AddressMatch<'_>> {
         let mut best: Option<(f64, AddressMatch<'_>)> = None;
-        for (_, idx) in &self.per_country {
+        for idx in self.per_country.values() {
             let Some(m) = idx.find_nearest(lat, lng, street_level) else {
                 continue;
             };

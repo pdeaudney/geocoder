@@ -15,7 +15,7 @@ fn dedup_linear_scan(ids: impl IntoIterator<Item = u32>) -> Vec<u32> {
     let mut len = 0usize;
     let mut processed = Vec::new();
     for id in ids {
-        if seen[..len].iter().any(|&s| s == id) {
+        if seen[..len].contains(&id) {
             continue;
         }
         if len < CAP {
@@ -66,7 +66,7 @@ fn realistic_density_has_no_redundant_work() {
                 (cell as u32) * 1_000 + (i as u32)
             };
             actual_unique.insert(id);
-            if !seen[..len].iter().any(|&s| s == id) {
+            if !seen[..len].contains(&id) {
                 if len < CAP {
                     seen[len] = id;
                     len += 1;

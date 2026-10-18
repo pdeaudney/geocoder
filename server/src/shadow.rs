@@ -839,28 +839,24 @@ impl GoogleSnapshot {
         for c in &top.address_components {
             for t in &c.types {
                 match t.as_str() {
-                    "country" => {
+                    "country"
                         // Google's `short_name` is the ISO 3166-1 alpha-2.
                         // Stash both for diagnostics but compare on lowercase.
-                        if snap.country_code.is_none() && !c.short_name.is_empty() {
+                        if snap.country_code.is_none() && !c.short_name.is_empty() => {
                             snap.country_code = Some(c.short_name.to_ascii_lowercase());
                         }
-                    }
-                    "administrative_area_level_1" => {
-                        if snap.state.is_none() {
+                    "administrative_area_level_1"
+                        if snap.state.is_none() => {
                             snap.state = Some(c.long_name.clone());
                         }
-                    }
-                    "locality" | "postal_town" => {
-                        if snap.city.is_none() {
+                    "locality" | "postal_town"
+                        if snap.city.is_none() => {
                             snap.city = Some(c.long_name.clone());
                         }
-                    }
-                    "route" => {
-                        if snap.road.is_none() {
+                    "route"
+                        if snap.road.is_none() => {
                             snap.road = Some(c.long_name.clone());
                         }
-                    }
                     _ => {}
                 }
             }
@@ -1624,12 +1620,11 @@ mod tests {
         // We can't construct DateTime<Utc>::MAX directly because the
         // Utc.with_ymd_and_hms builder rejects out-of-range dates, so
         // we use the actual MAX naive date.
-        use chrono::NaiveDateTime;
         let max_naive = chrono::NaiveDate::MAX
             .and_hms_opt(0, 0, 0)
             .expect("max date 00:00:00 is constructible");
         let extreme = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-            NaiveDateTime::from(max_naive),
+            max_naive,
             chrono::Utc,
         );
         let d = duration_until_next_utc_midnight_from(extreme);

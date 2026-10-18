@@ -60,7 +60,7 @@ fn reverse_geocode_returns_exact_postcode_from_gnaf() {
     // for Baulkham Hills, but G-NAF's is per-address and would differ in
     // a multi-postcode suburb).
     let addr = idx.query(-33.7369, 150.9803);
-    assert_eq!(addr.address.postcode.as_deref(), Some("2153"));
+    assert_eq!(addr.address.postcode, Some("2153"));
 }
 
 #[test]
@@ -69,6 +69,6 @@ fn gnaf_covers_a_cbd_address() {
     // Query a well-known Sydney CBD coord — any G-NAF-covered address
     // nearby should resolve the reverse query's postcode to 2000.
     let addr = idx.query(-33.8688, 151.2093);
-    assert_eq!(addr.address.postcode.as_deref(), Some("2000"));
-    assert_eq!(addr.address.state.as_deref(), Some("New South Wales"));
+    assert_eq!(addr.address.postcode, Some("2000"));
+    assert_eq!(addr.address.state, Some("New South Wales"));
 }

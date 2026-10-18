@@ -3,7 +3,7 @@
 //! Address-point datasets store house numbers in a mix of forms:
 //! - **Single**: `"42"`, `"42A"`, `"Lot 5"`
 //! - **Range**:  `"255-257"` (G-NAF NUMBER_FIRST + NUMBER_LAST joined),
-//!               `"10-12"` (OSM `addr:housenumber=10-12`)
+//!   `"10-12"` (OSM `addr:housenumber=10-12`)
 //!
 //! The G-NAF builder at `server/src/bin/build_gnaf_index.rs:347-363`
 //! emits hyphenated ranges as a single record. The OSM area handler

@@ -182,6 +182,8 @@ struct SearchParams {
 /// Resolve the `h3_res` query param to a validated list of resolutions.
 /// Returns an empty Vec when unset (no enrichment). Returns a 400 error
 /// response when the input is malformed so the handler can short-circuit.
+// tonic Status / axum Response are the required error types; boxing would change signatures
+#[allow(clippy::result_large_err)]
 fn resolve_h3_res(raw: Option<&str>) -> Result<Vec<u8>, Response> {
     match raw {
         None => Ok(Vec::new()),

@@ -419,7 +419,7 @@ fn parse_ring(v: &Value) -> Option<Vec<(f64, f64)>> {
     let mut out = Vec::with_capacity(arr.len());
     for pair in arr {
         let p = pair.as_array()?;
-        let lng = p.get(0)?.as_f64()?;
+        let lng = p.first()?.as_f64()?;
         let lat = p.get(1)?.as_f64()?;
         out.push((lng, lat));
     }
@@ -473,8 +473,7 @@ fn simplify_dp(ring: &[(f64, f64)], eps: f64) -> Vec<(f64, f64)> {
 
         let mut max_d = 0.0f64;
         let mut max_k = i;
-        for k in (i + 1)..j {
-            let (px, py) = ring[k];
+        for (k, &(px, py)) in ring.iter().enumerate().take(j).skip(i + 1) {
             // Perpendicular distance from p to segment a-b.
             let d = if ab_len_sq < f64::EPSILON {
                 // Degenerate segment: a == b, just use point-point distance.

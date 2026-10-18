@@ -212,7 +212,7 @@ mod tests {
         // Two POIs (entity_id 100 and 200) each with three aliases.
         // We'll partition_point + take_while on entity 100 and pin
         // both the order and the field surfacing.
-        let mut recs = vec![
+        let mut recs = [
             // entity 100
             I18nRecord {
                 entity_type: ENTITY_POI, alias_type: ALIAS_PRIMARY,

@@ -38,7 +38,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Per-stage timing — see build-pipeline-perf-plan stage 6.
@@ -202,6 +202,7 @@ struct PostalCandidate<'a> {
 ///     "Hague", "Le Havre" → "Havre".
 ///   - Apostrophe-elision: "L'Aquila" → "Aquila", "L'Aigle" → "Aigle"
 ///     (Italian / French / Catalan; both ASCII `'` and Unicode `’`).
+///
 /// The article match is case-insensitive; the returned remainder is
 /// untouched so the existing FST normaliser handles the rest.
 ///
@@ -269,7 +270,7 @@ fn strip_leading_article(name: &str) -> Option<String> {
 }
 
 fn run(
-    dir: &PathBuf,
+    dir: &Path,
     country_filter: Option<&HashSet<[u8; 2]>>,
     layout: Layout,
 ) -> Result<RunStats, String> {
@@ -482,7 +483,7 @@ fn run(
                     name,
                     aliases,
                     kind: KIND_PLACE,
-                    rank: p.rank as u8,
+                    rank: p.rank,
                     lat: p.lat,
                     lng: p.lng,
                     suburb: admin.city,
@@ -573,7 +574,7 @@ fn run(
                         name,
                         aliases,
                         kind: KIND_POI,
-                        rank: poi.rank as u8,
+                        rank: poi.rank,
                         lat: poi.lat,
                         lng: poi.lng,
                         suburb,

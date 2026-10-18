@@ -252,7 +252,8 @@ where
     let formatted: Box<dyn Layer<S> + Send + Sync + 'static> = match format {
         "json" => base.json().with_current_span(true).with_span_list(true).boxed(),
         "pretty" => base.pretty().boxed(),
-        "compact" | _ => base.compact().boxed(),
+        // "compact" and any unrecognised value
+        _ => base.compact().boxed(),
     };
 
     // Wrap the formatted layer in a per-callsite dedup filter scoped to
@@ -348,6 +349,8 @@ where
 /// Returns `Ok(None)` when tracing is disabled — that's a normal startup
 /// path, not an error. Returns `Err` only when the operator asked for
 /// tracing and we couldn't deliver it.
+// one-off return type, an alias would not clarify
+#[allow(clippy::type_complexity)]
 fn build_otlp_layer<S>() -> Result<Option<(Box<dyn Layer<S> + Send + Sync + 'static>, SdkTracerProvider)>, String>
 where
     S: Subscriber + for<'a> LookupSpan<'a> + Send + Sync,

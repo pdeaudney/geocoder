@@ -677,6 +677,8 @@ fn empty_to_none(s: &str) -> Option<&str> {
 /// `Status::invalid_argument`. Caps live in
 /// `query_server::limits` — same set the REST handlers use, so the
 /// two surfaces can't drift on what they accept.
+// tonic Status / axum Response are the required error types; boxing would change signatures
+#[allow(clippy::result_large_err)]
 fn check_text(name: &str, val: &str, max: usize) -> Result<(), Status> {
     crate::limits::check(name, val, max).map_err(Status::invalid_argument)
 }
@@ -684,6 +686,8 @@ fn check_text(name: &str, val: &str, max: usize) -> Result<(), Status> {
 /// Validate H3 resolutions coming off the wire (proto carries them as
 /// `uint32` but H3 cells only exist at 0–15). Mirrors the REST path's
 /// `parse_h3_res` validation so the two surfaces can't diverge.
+// tonic Status / axum Response are the required error types; boxing would change signatures
+#[allow(clippy::result_large_err)]
 fn validate_h3_res(raw: &[u32]) -> Result<Vec<u8>, Status> {
     if raw.len() > h3_cell::MAX_RESOLUTIONS {
         return Err(Status::invalid_argument(format!(

@@ -335,6 +335,8 @@ async fn autocomplete_at_cap_boundary_passes_length_check() {
 /// too aggressively, this test fails — independent of any service
 /// state, so it always runs.
 #[test]
+// the test exists to pin these constants against a floor
+#[allow(clippy::assertions_on_constants)]
 fn cap_constants_above_realistic_lower_bounds() {
     // Pelias accepts up to ~256 chars of search q; we should be at
     // least that.
