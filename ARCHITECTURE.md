@@ -87,6 +87,7 @@ arithmetic operation over pre-sorted arrays indexed by S2 cell.
 | `postcode_lookup.bin`, `postcode_lookup_strings.bin` | `build-postcode-lookup` | Suburb-modal postcode lookup (AU G-NAF) |
 | `i18n_names.bin` | emitted by `build-index` from alias-family OSM tags (`name:<lang>`, `official_name`, `alt_name`, `short_name`, `old_name`, `loc_name`, `int_name`, `reg_name`, `ref`, `int_ref`, `nat_ref`, plus per-language variants) | Localised / alternate names keyed on `(entity_type, entity_id, alias_type, lang_code)`; used by `/reverse?lang=...` and forward-index alternates expansion |
 | `wof_countries.bin`, `wof_countries_vertices.bin`, `wof_countries_strings.bin` | `wof-importer` (tools/) | Who's on First country polygons. Fallback for `find_admin` when an extract lacks the OSM `admin_level=2` relation (common on per-country Geofabrik extracts). |
+| `wof_postcodes.tsv`, `wof_aliases.tsv` | `wof-importer` (tools/) | WoF postcode centroids (autocomplete FST input) and city short names such as `NYC` (forward-index `alt_name` input). See docs/binary-format.md. |
 
 **Not on disk**: H3 cell IDs are computed at query time from the response
 coord via the `h3o` crate when the caller passes `h3_res=...`. No file

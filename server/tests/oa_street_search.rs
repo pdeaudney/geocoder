@@ -102,7 +102,7 @@ fn ordinal_and_directional_queries_match_an_expanded_oa_street() {
     build_index(dir.path(), "W 37 ST");
     let fwd = Forward::open(dir.path()).expect("open forward index");
 
-    for q in ["3577 W 37 St", "3577 West 37 Street"] {
+    for q in ["3577 W 37 St", "3577 West 37 Street", "3577 W 37th St"] {
         let name = top_name(
             &fwd,
             StructuredQuery {
@@ -111,6 +111,6 @@ fn ordinal_and_directional_queries_match_an_expanded_oa_street() {
                 ..Default::default()
             },
         );
-        assert_eq!(name.as_deref(), Some("West 37 Street"), "q={q}");
+        assert_eq!(name.as_deref(), Some("West 37th Street"), "q={q}");
     }
 }

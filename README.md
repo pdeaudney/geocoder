@@ -217,7 +217,9 @@ cargo build --release -p wof-importer
 # whosonfirst-data-admin-*.db SQLite that `fetch-data --wof` placed
 # in ./data/ and writes wof_countries.bin into the index dir. When
 # --wof-postcodes was fetched, it also exports valid postal centroids
-# for the autocomplete FST; records at (0,0) are skipped.
+# for the autocomplete FST; records at (0,0) are skipped. It also
+# writes wof_aliases.tsv (city short names such as NYC, San Fran and
+# Philly) for build-forward-index; `--aliases-only` writes just that.
 ./target/release/wof-importer ./data ./data/index
 
 # WoF data includes source-specific attribution terms:
@@ -632,7 +634,7 @@ In-flight queries keep the old `Arc<Index>` until they return; new queries see t
 | Binary | Purpose |
 |---|---|
 | `build-index` (C++) | Parse OSM PBF → OSM binary index |
-| `wof-importer` | WhosOnFirst SQLite → `wof_countries.bin` and postcode candidates for the autocomplete FST |
+| `wof-importer` | WhosOnFirst SQLite → `wof_countries.bin`, postcode candidates for the autocomplete FST, and city aliases for the forward index |
 | `build-forward-index` | Tantivy index for `/search`. `--partition-by-country` emits per-country indexes |
 | `build-autocomplete-fst` | FST prefix index for `/autocomplete` + `/search` fast-path |
 | `build-postcode-lookup` | G-NAF suburb-modal postcode table |
