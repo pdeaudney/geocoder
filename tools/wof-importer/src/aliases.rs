@@ -29,6 +29,9 @@ enum Rule {
     Compact,
     Abbreviated,
     Shortened,
+    /// Another preferred English name of the place ("New York City" for
+    /// New York): OSM names the city by only one of them.
+    Preferred,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -48,6 +51,7 @@ impl Rule {
             Rule::Compact => "compact",
             Rule::Abbreviated => "abbreviated",
             Rule::Shortened => "shortened",
+            Rule::Preferred => "preferred",
         }
     }
 }
@@ -99,8 +103,8 @@ fn compact(name: &str) -> String {
 }
 
 const COMMON_WORDS: &[&str] = &[
-    "a", "an", "and", "as", "at", "be", "by", "do", "go", "he", "if", "in", "is", "it", "me",
-    "my", "no", "of", "oh", "ok", "on", "or", "so", "to", "up", "us", "we",
+    "a", "an", "and", "as", "at", "be", "by", "do", "go", "he", "if", "in", "is", "it", "me", "my",
+    "no", "of", "oh", "ok", "on", "or", "so", "to", "up", "us", "we",
 ];
 
 /// Decide whether `alias` (already passed through [`tidy`]) is a short
@@ -340,6 +344,20 @@ pub fn import_aliases(sqlite_dir: &Path, out_dir: &Path) -> Result<(), String> {
         let canonical: Vec<&str> = place.canonical.iter().map(String::as_str).collect();
         let mut done: HashSet<String> = canonical.iter().map(|c| c.to_lowercase()).collect();
         let tally = counts.entry(place.country.clone()).or_default();
+        // A shorter preferred name is a truncation that can also be a
+        // brand ("Coles" for Coles Bay); keep only the full forms.
+        for name in place.canonical.iter().skip(1) {
+            let alias = tidy(name);
+            if !alias.is_empty()
+                && !alias.eq_ignore_ascii_case(&place.name)
+                && alias.split_whitespace().count() >= place.name.split_whitespace().count()
+            {
+                claims
+                    .entry((place.country.clone(), alias.to_lowercase()))
+                    .or_default()
+                    .push((i, Rule::Preferred, alias));
+            }
+        }
         for raw in &place.candidates {
             let alias = tidy(raw);
             if alias.is_empty() || !done.insert(alias.to_lowercase()) {
@@ -615,6 +633,7 @@ mod tests {
         assert_eq!(rule("SC", &["Los Angeles"]), Err(Reject::NoRule));
         assert_eq!(rule("Lotus", &["Los Angeles"]), Err(Reject::NoRule));
         assert_eq!(rule("NO", &["New Orleans"]), Err(Reject::CommonWord));
+        assert_eq!(rule("Coles", &["Coles Bay"]), Err(Reject::NoRule));
         assert_eq!(rule("Smell A", &["Los Angeles"]), Err(Reject::NoRule));
     }
 
