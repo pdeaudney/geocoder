@@ -399,6 +399,126 @@ fn build_admin_metro_keep_set(
     best_per_cluster.values().map(|v| v.0).collect()
 }
 
+/// City short names from `wof_aliases.tsv` (written by `wof-importer`;
+/// schema in docs/binary-format.md), keyed by country and WoF place
+/// name as query tokens, so OSM "Saint Petersburg" finds WoF "St.
+/// Petersburg". Empty when the file is absent.
+#[derive(Default)]
+struct WofAliases(std::collections::HashMap<([u8; 2], String), Vec<WofAlias>>);
+
+struct WofAlias {
+    lat: f64,
+    lng: f64,
+    alias: String,
+    /// The alias as query tokens, so "N.Y.C." and "nyc" compare equal.
+    tokens: String,
+}
+
+/// A WoF centroid can sit several km from the OSM place node or admin
+/// polygon centroid of the same city.
+const WOF_ALIAS_MATCH_M: f64 = 10_000.0;
+
+impl WofAliases {
+    fn load(dir: &Path) -> Result<Self, String> {
+        let path = dir.join("wof_aliases.tsv");
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let mut lines = text.lines();
+        if lines.next() != Some("#wof-aliases-v1\tcountry\tname\tlatitude\tlongitude\talias\trule")
+        {
+            return Err(format!("{}: unsupported WoF alias schema", path.display()));
+        }
+        let mut map: std::collections::HashMap<_, Vec<_>> = std::collections::HashMap::new();
+        for (n, line) in lines.enumerate() {
+            let bad = |what: &str| format!("{} line {}: {what}", path.display(), n + 2);
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [cc, name, lat, lng, alias, _rule] = fields.as_slice() else {
+                return Err(bad("malformed alias row"));
+            };
+            let cc: [u8; 2] = cc
+                .as_bytes()
+                .try_into()
+                .ok()
+                .filter(|cc: &[u8; 2]| cc.iter().all(u8::is_ascii_uppercase))
+                .ok_or_else(|| bad("invalid country"))?;
+            map.entry((cc, place_key(name)))
+                .or_default()
+                .push(WofAlias {
+                    lat: lat.parse().map_err(|e| bad(&format!("latitude: {e}")))?,
+                    lng: lng.parse().map_err(|e| bad(&format!("longitude: {e}")))?,
+                    alias: (*alias).to_owned(),
+                    tokens: place_key(alias),
+                });
+        }
+        Ok(Self(map))
+    }
+
+    fn for_place<'a>(
+        &'a self,
+        country_code: Option<[u8; 2]>,
+        name: &str,
+        lat: f64,
+        lng: f64,
+    ) -> impl Iterator<Item = &'a str> {
+        country_code
+            .and_then(|cc| self.0.get(&(cc, place_key(name))))
+            .into_iter()
+            .flatten()
+            .filter(move |a| crate::geo::haversine_m(lat, lng, a.lat, a.lng) < WOF_ALIAS_MATCH_M)
+            .map(|a| a.alias.as_str())
+    }
+
+    /// The places that `query` names by one of their aliases.
+    fn places_named(&self, query: Option<&str>) -> Vec<AliasedPlace<'_>> {
+        let Some(tokens) = query.map(place_key) else {
+            return Vec::new();
+        };
+        self.0
+            .iter()
+            .flat_map(|((cc, name), aliases)| {
+                aliases
+                    .iter()
+                    .filter(|a| !a.tokens.is_empty() && a.tokens == tokens)
+                    .map(move |a| AliasedPlace {
+                        cc,
+                        name,
+                        lat: a.lat,
+                        lng: a.lng,
+                    })
+            })
+            .collect()
+    }
+}
+
+struct AliasedPlace<'a> {
+    cc: &'a [u8; 2],
+    /// [`place_key`] of the WoF place name.
+    name: &'a str,
+    lat: f64,
+    lng: f64,
+}
+
+fn place_key(name: &str) -> String {
+    tokenize_user_input(name).join(" ")
+}
+
+fn is_aliased_place(places: &[AliasedPlace<'_>], hit: &Hit) -> bool {
+    if hit.kind != KIND_PLACE || places.is_empty() {
+        return false;
+    }
+    let name = place_key(&hit.name);
+    places.iter().any(|p| {
+        hit.country_code
+            .as_deref()
+            .is_some_and(|c| c.as_bytes() == p.cc)
+            && name == p.name
+            && crate::geo::haversine_m(hit.lat, hit.lng, p.lat, p.lng) < WOF_ALIAS_MATCH_M
+    })
+}
+
 /// Build a single monolithic tantivy index at `dest`. Everything goes in
 /// one bucket — queries are filtered by the indexed `country_code` field
 /// rather than dispatched to a different tantivy per country.
@@ -437,6 +557,8 @@ pub fn build_with_heap(
     )?;
 
     let schema_handle = ForwardSchema::build();
+    let wof_aliases = WofAliases::load(source)?;
+    eprintln!("WoF aliases for {} place names", wof_aliases.0.len());
 
     if dest.exists() {
         std::fs::remove_dir_all(dest).map_err(|e| format!("clear {}: {}", dest.display(), e))?;
@@ -471,7 +593,7 @@ pub fn build_with_heap(
             // field only). entity_type=1, entity_id=index in
             // place_points (matches the C++ builder; see
             // builder/src/build_index.cpp:633).
-            let alternates: Vec<&str> = idx
+            let mut alternates: Vec<&str> = idx
                 .i18n_names
                 .as_ref()
                 .map(|i| {
@@ -481,6 +603,7 @@ pub fn build_with_heap(
                         .collect()
                 })
                 .unwrap_or_default();
+            alternates.extend(wof_aliases.for_place(admin.country_code, name, lat, lng));
 
             writer
                 .add_document(tantivy_doc(
@@ -563,7 +686,7 @@ pub fn build_with_heap(
 
         // entity_type=0 for admin polygons (mirrors the C++ builder's
         // i18n_names emission at builder/src/build_index.cpp:816).
-        let alternates: Vec<&str> = match idx.i18n_names.as_ref() {
+        let mut alternates: Vec<&str> = match idx.i18n_names.as_ref() {
             Some(i) => i
                 .alternates_for(crate::i18n::ENTITY_ADMIN, poly_id as u32)
                 .map(|(_, _, name_id)| idx.get_string(name_id))
@@ -571,6 +694,7 @@ pub fn build_with_heap(
                 .collect(),
             None => Vec::new(),
         };
+        alternates.extend(wof_aliases.for_place(admin.country_code, name, lat, lng));
 
         // Rank derived from admin_level: level 4 (state) → 12, level 8
         // (municipality) → 16, level 10 (suburb) → 18. Lower = more
@@ -846,6 +970,8 @@ pub fn build_partitioned_with_heap(
         DEFAULT_SEARCH_DISTANCE,
     )?;
     let schema_handle = ForwardSchema::build();
+    let wof_aliases = WofAliases::load(source)?;
+    eprintln!("WoF aliases for {} place names", wof_aliases.0.len());
 
     std::fs::create_dir_all(dest_root)
         .map_err(|e| format!("mkdir {}: {}", dest_root.display(), e))?;
@@ -963,7 +1089,7 @@ pub fn build_partitioned_with_heap(
                 // the slice index into place_points.bin (the C++
                 // builder uses `place_points.size()` as the id pre-
                 // push; see builder/src/build_index.cpp:633).
-                let alternates: Vec<&str> = idx
+                let mut alternates: Vec<&str> = idx
                     .i18n_names
                     .as_ref()
                     .map(|i| {
@@ -973,6 +1099,7 @@ pub fn build_partitioned_with_heap(
                             .collect()
                     })
                     .unwrap_or_default();
+                alternates.extend(wof_aliases.for_place(Some(cc), name, lat, lng));
 
                 Some((
                     cc,
@@ -1061,7 +1188,7 @@ pub fn build_partitioned_with_heap(
 
                 // entity_type=0 for admin polygons (mirrors the C++
                 // builder at builder/src/build_index.cpp:816).
-                let alternates: Vec<&str> = match idx.i18n_names.as_ref() {
+                let mut alternates: Vec<&str> = match idx.i18n_names.as_ref() {
                     Some(i) => i
                         .alternates_for(crate::i18n::ENTITY_ADMIN, poly_id as u32)
                         .map(|(_, _, name_id)| idx.get_string(name_id))
@@ -1069,6 +1196,7 @@ pub fn build_partitioned_with_heap(
                         .collect(),
                     None => Vec::new(),
                 };
+                alternates.extend(wof_aliases.for_place(Some(cc), name, lat, lng));
 
                 // Rank from admin_level: level 4 (state) → 12, level
                 // 8 (municipality) → 16, level 10 (suburb) → 18.
@@ -1773,6 +1901,7 @@ pub struct Forward {
     per_country: std::collections::HashMap<[u8; 2], FieldedIndex>,
     default: Option<FieldedIndex>,
     country_aliases: std::collections::HashMap<String, String>,
+    wof_aliases: WofAliases,
 }
 
 /// Structured forward-geocoding query. Any field can be `None`; the query
@@ -1916,6 +2045,7 @@ impl Forward {
                 per_country: std::collections::HashMap::new(),
                 default: Some(Self::open_one(dir)?),
                 country_aliases: std::collections::HashMap::new(),
+                wof_aliases: WofAliases::default(),
             });
         }
 
@@ -1998,6 +2128,7 @@ impl Forward {
             per_country,
             default,
             country_aliases,
+            wof_aliases: WofAliases::load(dir)?,
         })
     }
 
@@ -2468,9 +2599,11 @@ impl Forward {
             } else {
                 None
             };
+            let aliased = self.wof_aliases.places_named(exact_place);
             let prominence = |hit: &Hit| {
                 if hit.kind == KIND_PLACE
-                    && exact_place.is_some_and(|name| hit.name.eq_ignore_ascii_case(name))
+                    && (exact_place.is_some_and(|name| hit.name.eq_ignore_ascii_case(name))
+                        || is_aliased_place(&aliased, hit))
                 {
                     hit.importance
                 } else {
@@ -3025,12 +3158,6 @@ impl Forward {
             ));
         }
 
-        if clauses.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let boolean = BooleanQuery::new(clauses);
-        let limit = q.limit.clamp(1, 50);
         let exact_name = q.q.map(str::trim).filter(|text| {
             !text.is_empty()
                 && !text.contains(',')
@@ -3040,6 +3167,40 @@ impl Forward {
                 && q.city.is_none()
                 && q.state.is_none()
         });
+        // A WoF alias ("NYC") reaches its city only through the long
+        // alt_name field, so POIs named "NYC" outscore the city and push
+        // it out of the candidate pool. Boost documents that also carry
+        // the aliased place's own name.
+        const ALIASED_PLACE_BOOST: f32 = 5.0;
+        let aliased = self.wof_aliases.places_named(exact_name);
+        let aliased_names: std::collections::HashSet<&str> =
+            aliased.iter().map(|p| p.name).collect();
+        for name in aliased_names {
+            let name_q = BooleanQuery::new(
+                name.split(' ')
+                    .map(|tok| {
+                        (
+                            Occur::Must,
+                            Box::new(TermQuery::new(
+                                Term::from_field_text(s.name, tok),
+                                IndexRecordOption::WithFreqs,
+                            )) as Box<dyn Query>,
+                        )
+                    })
+                    .collect(),
+            );
+            clauses.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(Box::new(name_q), ALIASED_PLACE_BOOST)),
+            ));
+        }
+
+        if clauses.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let boolean = BooleanQuery::new(clauses);
+        let limit = q.limit.clamp(1, 50);
         // Over-fetch so we can re-rank without losing interesting
         // candidates that a pure BM25 sort would miss. Two regimes:
         //
@@ -3114,8 +3275,9 @@ impl Forward {
         candidates.sort_by(|a, b| {
             if bias.is_none() {
                 let exact = |hit: &Hit| {
-                    matches!(hit.kind, KIND_PLACE | KIND_POI)
-                        && exact_name.is_some_and(|name| hit.name.eq_ignore_ascii_case(name))
+                    (matches!(hit.kind, KIND_PLACE | KIND_POI)
+                        && exact_name.is_some_and(|name| hit.name.eq_ignore_ascii_case(name)))
+                        || is_aliased_place(&aliased, hit)
                 };
                 let exact_a = exact(a);
                 let exact_b = exact(b);
@@ -3667,17 +3829,9 @@ fn hit_from_doc(doc: &TantivyDocument, s: &ForwardSchema, score: f32) -> Result<
 /// didn't produce), wire it here as a Vec<String> expansion before
 /// `apply_place_abbreviation_fold`.
 pub fn tokenize_user_input(s: &str) -> Vec<String> {
-    // Dotted compass suffixes are one street token in the source
-    // ("Macleod Trail SE"), even when typed as "S.E.".
-    let folded = ascii_fold(s).to_ascii_lowercase();
-    let folded = [
-        ("n.e.", "ne"),
-        ("n.w.", "nw"),
-        ("s.e.", "se"),
-        ("s.w.", "sw"),
-    ]
-    .into_iter()
-    .fold(folded, |text, (short, full)| text.replace(short, full));
+    // Dotted initials are one token in the source ("Macleod Trail SE",
+    // the WoF alias "NYC"), even when typed as "S.E." or "N.Y.C.".
+    let folded = join_dotted_initials(&ascii_fold(s).to_ascii_lowercase());
     let mut raw_tokens = Vec::new();
     for component in folded.split(',') {
         let mut part: Vec<String> = component
@@ -3698,6 +3852,37 @@ pub fn tokenize_user_input(s: &str) -> Vec<String> {
         raw_tokens.extend(part);
     }
     apply_place_abbreviation_fold(raw_tokens)
+}
+
+/// Join a word made of 2+ dotted single letters: "n.y.c." -> "nyc",
+/// "l.a" -> "la". "st. kilda" and "j. smith" are left alone.
+fn join_dotted_initials(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let mut letters = String::new();
+        let mut j = i;
+        if i == 0 || !chars[i - 1].is_alphanumeric() {
+            while chars.get(j).is_some_and(|c| c.is_alphabetic()) && chars.get(j + 1) == Some(&'.')
+            {
+                letters.push(chars[j]);
+                j += 2;
+            }
+            if !letters.is_empty() && chars.get(j).is_some_and(|c| c.is_alphabetic()) {
+                letters.push(chars[j]);
+                j += 1;
+            }
+        }
+        if letters.chars().count() >= 2 && chars.get(j).is_none_or(|c| !c.is_alphanumeric()) {
+            out.push_str(&letters);
+            i = j;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Apply the same Saint/Mount/Fort fold as
@@ -4393,6 +4578,102 @@ mod polygon_centroid_tests {
         let (lat, lng) = polygon_centroid(&off_centre);
         assert!((lat - 472.0 / 96.0).abs() < 1e-9, "{lat}");
         assert!((lng - 472.0 / 96.0).abs() < 1e-9, "{lng}");
+    }
+}
+
+#[cfg(test)]
+mod wof_alias_tests {
+    use super::*;
+
+    #[test]
+    fn aliases_attach_only_to_the_nearby_same_name_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(WofAliases::load(dir.path())
+            .expect("absent file")
+            .0
+            .is_empty());
+        std::fs::write(
+            dir.path().join("wof_aliases.tsv"),
+            "#wof-aliases-v1\tcountry\tname\tlatitude\tlongitude\talias\trule\n\
+             US\tNew York\t40.68295\t-73.9708\tNYC\tinitialism\n\
+             US\tSt. Petersburg\t27.759293\t-82.622172\tSt Pete\tabbreviated\n",
+        )
+        .expect("write fixture");
+        let aliases = WofAliases::load(dir.path()).expect("load");
+        let near: Vec<&str> = aliases
+            .for_place(Some(*b"US"), "New York", 40.7127, -74.0059)
+            .collect();
+        assert_eq!(near, ["NYC"]);
+        assert_eq!(
+            aliases
+                .for_place(Some(*b"US"), "New York", 39.65, -93.92)
+                .count(),
+            0
+        );
+        assert_eq!(
+            aliases
+                .for_place(Some(*b"CA"), "New York", 40.7127, -74.0059)
+                .count(),
+            0
+        );
+        assert_eq!(
+            aliases
+                .for_place(None, "New York", 40.7127, -74.0059)
+                .count(),
+            0
+        );
+        let pete: Vec<&str> = aliases
+            .for_place(Some(*b"US"), "Saint Petersburg", 27.77, -82.63)
+            .collect();
+        assert_eq!(pete, ["St Pete"]);
+
+        let place = |name: &str, kind: u64, lat: f64, lng: f64| Hit {
+            name: name.to_owned(),
+            housenumber: None,
+            unit: None,
+            postcode: None,
+            suburb: None,
+            state: None,
+            country_code: Some("US".to_owned()),
+            kind,
+            rank: 16,
+            importance: 0,
+            lat,
+            lng,
+            score: 1.0,
+        };
+        let nyc = aliases.places_named(Some("N.Y.C."));
+        assert!(is_aliased_place(
+            &nyc,
+            &place("New York", KIND_PLACE, 40.7127, -74.0059)
+        ));
+        assert!(!is_aliased_place(
+            &nyc,
+            &place("New York", KIND_PLACE, 42.92, -75.60)
+        ));
+        assert!(!is_aliased_place(
+            &nyc,
+            &place("NYC", KIND_POI, 40.7127, -74.0059)
+        ));
+        assert!(aliases.places_named(Some("New York")).is_empty());
+    }
+
+    #[test]
+    fn dotted_initials_join_into_one_token() {
+        assert_eq!(tokenize_user_input("N.Y.C."), ["nyc"]);
+        assert_eq!(tokenize_user_input("pizza n.y.c"), ["pizza", "nyc"]);
+        assert_eq!(tokenize_user_input("L.A."), ["la"]);
+        assert_eq!(tokenize_user_input("St. Kilda"), ["st", "kilda"]);
+        assert_eq!(tokenize_user_input("J. Smith Ln"), ["j", "smith", "lane"]);
+    }
+
+    #[test]
+    fn bare_la_is_a_place_but_trailing_la_is_louisiana() {
+        let bare = parse_freeform_query_in_country("LA", Some("US"));
+        assert_eq!((bare.state, bare.rest), (None, vec!["la".to_owned()]));
+        let address = parse_freeform_query_in_country("Main Street, Baton Rouge, LA", Some("US"));
+        assert_eq!(address.state.as_deref(), Some("Louisiana"));
+        assert_eq!(address.rest, ["main", "street", "baton", "rouge"]);
     }
 }
 

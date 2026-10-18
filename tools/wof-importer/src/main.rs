@@ -15,10 +15,13 @@
 //! Output: `wof_countries.bin` + `wof_countries_vertices.bin` +
 //! `wof_countries_strings.bin` in a target index directory. Schema
 //! deliberately mirrors our existing `AdminPolygon` record layout
-//! so the server reads the file the same way.
+//! so the server reads the file the same way. Also writes
+//! `wof_postcodes.tsv` and `wof_aliases.tsv` (see `aliases`).
 //!
 //! Usage:
-//!   wof-importer <wof-sqlite-dir> <output-index-dir> [--postcodes-only]
+//!   wof-importer <wof-sqlite-dir> <output-index-dir> [--postcodes-only | --aliases-only]
+
+mod aliases;
 
 // mimalloc global allocator — see build-pipeline-perf-plan stage 2.
 #[global_allocator]
@@ -62,17 +65,24 @@ struct NodeCoord {
 fn main() {
     let _total = Stage::new("total");
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 || args.len() > 4 || args.get(3).is_some_and(|a| a != "--postcodes-only") {
-        eprintln!("Usage: {} <wof-sqlite-dir> <output-index-dir> [--postcodes-only]", args[0]);
+    let mode = args.get(3).map(String::as_str);
+    if args.len() < 3
+        || args.len() > 4
+        || mode.is_some_and(|a| a != "--postcodes-only" && a != "--aliases-only")
+    {
+        eprintln!(
+            "Usage: {} <wof-sqlite-dir> <output-index-dir> [--postcodes-only | --aliases-only]",
+            args[0]
+        );
         std::process::exit(2);
     }
     let sqlite_dir = PathBuf::from(&args[1]);
     let out_dir = PathBuf::from(&args[2]);
 
-    let result = if args.get(3).is_some_and(|a| a == "--postcodes-only") {
-        import_postcodes(&sqlite_dir, &out_dir)
-    } else {
-        run(&sqlite_dir, &out_dir)
+    let result = match mode {
+        Some("--postcodes-only") => import_postcodes(&sqlite_dir, &out_dir),
+        Some(_) => aliases::import_aliases(&sqlite_dir, &out_dir),
+        None => run(&sqlite_dir, &out_dir),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
@@ -148,7 +158,7 @@ fn run(sqlite_dir: &Path, out_dir: &Path) -> Result<(), String> {
         strings.len()
     );
     import_postcodes(sqlite_dir, out_dir)?;
-    Ok(())
+    aliases::import_aliases(sqlite_dir, out_dir)
 }
 
 /// Export usable WoF postcode centroids for the autocomplete builder. Postalcode
