@@ -29,12 +29,17 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical reference: on-disk
 
 ```bash
 docker build -t geocoder:local .
+mkdir -p data
 # Download, build every available index stage, then exit.
-docker run --rm -e REGION=oceania -v geocoder-data:/data geocoder:local build
-# Serve the completed index.
-docker run --rm -v geocoder-data:/data -p 3000:3000 geocoder:local serve
+docker run --rm -e REGION=oceania -v "$PWD/data:/data" geocoder:local build
+# Serve the completed index from the persistent bind mount.
+docker compose up -d
 ```
 
+`docker compose up` uses `serve` and never rebuilds the mounted index. Run the
+explicit `build` command again after changing source data or index format.
+The mount stays writable because Tantivy creates reader lock files when it opens
+the forward index.
 The default `auto` mode combines `build` and `serve`. `build` always rebuilds
 into `/data/index.next` and replaces `/data/index` only after every enabled
 stage succeeds. `auto` reuses a completed index when its source files have not
@@ -60,16 +65,12 @@ services:
   geocoder:
     build: .
     image: geocoder:local
-    environment:
-      - REGION=australia
+    command: serve
     ports:
       - "3000:3000"   # REST
       - "3001:3001"   # gRPC
     volumes:
-      - geocoder-data:/data
-
-volumes:
-  geocoder-data:
+      - ./data:/data
 ```
 
 `PBF_URLS="https://... https://..."` as an alternative to `REGION`; pass any PBF URL(s) and the builder will use them instead.
@@ -179,21 +180,23 @@ Mix and match sources by combining flags. License-gated sources
 structured warning otherwise.
 
 ```bash
-# AU + OpenAddresses + MaxMind + G-NAF
+# AU + MaxMind + G-NAF
 export MAXMIND_LICENSE_KEY=...   # free signup: maxmind.com/en/geolite2/signup
 export GNAF_ARCHIVE_URL=https://...  # license-accepted URL from data.gov.au
-./target/release/fetch-data --region au --wof --openaddresses au --maxmind --gnaf
+./target/release/fetch-data --region au --wof --maxmind --gnaf
 
 # WoF admin and separate postalcode data, scoped to specific countries
 ./target/release/fetch-data --wof --wof-postcodes --wof-countries "au gb us"
 ```
 
-The `fetch-data --openaddresses` path uses OpenAddresses' Requester-Pays
-S3 bucket and requires an account with access. For selected public
-per-source GeoJSON files, `scripts/import-oa-geojson.py` downloads and
-converts them to the CSV layout expected by `build-openaddresses-index`.
+`fetch-data --openaddresses --oa-sources "us ca"` downloads raw archives from
+OpenAddresses' Requester-Pays S3 bucket and requires AWS credentials. The
+index builder needs CSVs under `data/openaddresses/<country>/`; it does not
+read those archives directly. For selected public sources,
+`scripts/import-oa-geojson.py` downloads and converts GeoJSON to that layout.
 OpenAddresses sources have different licenses; check each source before
-including it in a deployment. G-NAF remains the preferred AU source.
+including it in a deployment. [CREDITS.md](CREDITS.md) records the sources
+used in the local US/Canada build. G-NAF remains the preferred AU source.
 
 Build the indexes:
 
@@ -344,6 +347,16 @@ Parameters:
 | `h3_res` | Comma-separated H3 resolutions (0–15, max 4); returns an `h3` map per hit. |
 
 Response includes each hit's `confidence` label (`exact`, `interpolated`, `fallback`) and a `source` field when served from the FST fast-path.
+
+Structured street-and-house searches can repair one missing or misplaced
+space, such as `Ke ats Street` or `NewBrunswick Drive`. Supply one country and
+a city or postcode. Repairs preserve supplied address constraints and decline
+ambiguous matches. See the [serving implementation and accuracy results](docs/search-accuracy.md).
+
+Freeform addresses with comma-separated street/locality sections, or `q` text
+containing only a house and street with explicit locality fields, can use the
+same repair. Uncertain undelimited street/locality boundaries are declined. See the
+[freeform implementation and tests](docs/search-accuracy.md).
 
 #### Disambiguating ambiguous queries
 

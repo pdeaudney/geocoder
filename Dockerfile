@@ -82,6 +82,7 @@ COPY --from=builder-rust /src/server/target/release/fetch-data /usr/local/bin/
 COPY --from=builder-rust /src/tools/wof-importer/target/release/wof-importer /usr/local/bin/
 COPY scripts/import-oa-geojson.py /usr/local/bin/
 COPY entrypoint.sh /usr/local/bin/
+COPY CREDITS.md /usr/share/doc/geocoder/CREDITS.md
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

@@ -471,6 +471,10 @@ see the new Index. Dropped refcount frees the old mmaps.
 
 ## How this compares to Radar's HorizonDB
 
+The [current serving implementation and accuracy results](docs/search-accuracy.md)
+cover native spelling correction and whitespace repair. Radar's exact correction
+policy is not disclosed by these posts.
+
 Radar published two posts
 ([1](https://radar.com/blog/high-performance-geocoding-in-rust),
 [2](https://radar.com/blog/building-horizondb-in-production)) describing
@@ -489,7 +493,7 @@ compares shape-by-shape.
 | Storage | mmap'd flat binaries | RocksDB (LSM) + mmap |
 | Country partitioning | Per-country `tantivy_<cc>/` + `oa_<cc>_*.bin` + `fst_<cc>.*` | ISO-2 prefix in FST, ~250 country partitions |
 | FST fast-path for common queries | `/autocomplete` + `/search` exact-match, 400 ns | "Serves 80% of traffic, order-of-magnitude faster than tantivy" |
-| Fuzzy fallback | FuzzyTermQuery (Levenshtein-1) on zero hits | FastText n-gram embeddings + Levenshtein |
+| Fuzzy fallback | Dictionary spelling fallback; bounded structured whitespace repair | FastText subword embeddings; exact correction policy not disclosed |
 | Open-source intent | Yes | "Plan to open source" their S2 bindings |
 
 Both architectures rejected the same class of alternatives: no
@@ -500,7 +504,7 @@ process, multi-threaded, S2 + Tantivy is apparently the right answer.
 
 | Thing | Radar | Ours |
 |---|---|---|
-| **ML-driven query understanding** | FastText n-gram embeddings for typo tolerance; LightGBM classifier routes queries by intent. | FuzzyTermQuery (Levenshtein 1) as last-resort fallback. No ML intent classification. |
+| **ML-driven query understanding** | FastText n-gram embeddings for typo tolerance; LightGBM classifier routes queries by intent. | Dictionary frequency/Levenshtein spelling correction and bounded whitespace repair. No ML intent classification. |
 | **Data pipeline** | Apache Spark, versioned S3 assets, ingest+eval new sources "within a day". | Per-dataset CLI builders + shell scripts. |
 | **Separate stores per domain** | Separate tantivy indexes + RocksDB stores for **Addresses / Regions / Places**. | Single tantivy with a `kind` fast field. Address-point, admin, and place indexes are already separate bin files, but forward search is one index. |
 | **RocksDB-backed KV** | Point lookups over RocksDB for record retrieval. | mmap'd fixed-record arrays indexed by S2 cells. |

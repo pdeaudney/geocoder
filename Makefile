@@ -13,6 +13,7 @@ help:
 	@echo "  bench                 Run criterion benches and refresh docs/performance/benchmarks.md"
 	@echo "  bench-fixtures        Build / refresh the planet load-test fixtures (Geonames + Pelias)"
 	@echo "  bench-accuracy        Run the bench-fixture accuracy sweep against ./data/index"
+	@echo "  bench-house-numbers   Sample indexed addresses and measure house-number search"
 	@echo "  inspect-dump          Dump the index to CSV under data/index/dump-csv/ for DuckDB"
 	@echo "  wof-import            Import WoF countries and downloaded postcodes into WOF_INDEX_DIR"
 	@echo "  wof-postcodes-import  Refresh WoF postcodes without rewriting country polygons"
@@ -57,6 +58,11 @@ clean: builder-clean
 
 test:
 	cargo test
+
+.PHONY: bench-house-numbers
+bench-house-numbers:
+	cargo build --release -p query-server --bin query-server --bin sample-addresses -p regression-runner --bin regression-runner
+	python3 scripts/bench-house-numbers.py --index "$(or $(INDEX),./data/index)" --sample "$(or $(SAMPLE),1000)"
 
 regression-au:
 	./scripts/run-regression.sh

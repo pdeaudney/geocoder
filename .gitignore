@@ -1,5 +1,6 @@
 build/
 target/
+__pycache__/
 test-output/
 *.osm.pbf
 data/
@@ -16,6 +17,7 @@ packer/packer_cache/
 
 # Regression runner outputs. Corpora are committed; reports aren't.
 tests/regression/reports/*.json
+tests/regression/reports/house-numbers-*/
 
 # Test data downloaded by scripts/fetch-test-data.sh (not yet built).
 test-data/

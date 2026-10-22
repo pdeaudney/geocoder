@@ -1,8 +1,8 @@
 //! End-to-end forward-geocoding accuracy against the AU tantivy index.
 //!
 //! Requires `GEOCODER_INDEX_DIR` pointing at a directory that contains both
-//! the binary reverse-geocoding index *and* a `tantivy/` subdirectory built
-//! by `build-forward-index`. Skipped otherwise.
+//! the binary reverse-geocoding index and a `tantivy/` or `tantivy_au/` index.
+//! Skipped only when the environment variable is unset.
 
 #![cfg(feature = "forward")]
 
@@ -11,18 +11,13 @@ use std::path::PathBuf;
 
 fn load_forward() -> Option<Forward> {
     let dir = std::env::var("GEOCODER_INDEX_DIR").ok()?;
-    let path = PathBuf::from(dir).join("tantivy");
-    if !path.exists() {
-        eprintln!("SKIP: {} not found; run build-forward-index first", path.display());
-        return None;
-    }
-    match Forward::open(&path) {
-        Ok(f) => Some(f),
-        Err(e) => {
-            eprintln!("FAIL: could not open forward index: {e}");
-            None
-        }
-    }
+    let forward = Forward::open(&PathBuf::from(dir)).expect("open configured forward index");
+    assert!(!forward.is_empty(), "configured index has no forward data");
+    assert!(
+        forward.has_default() || forward.countries().any(|cc| cc == b"au"),
+        "configured index has no AU shard"
+    );
+    Some(forward)
 }
 
 fn first_hit_name_ci(hits: &[Hit], needle: &str) -> Option<String> {

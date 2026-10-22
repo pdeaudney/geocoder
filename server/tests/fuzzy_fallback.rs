@@ -64,20 +64,23 @@ fn typos_in_an_address_still_resolve() {
         eprintln!("SKIP: no US shard");
         return;
     }
-    let hits = fwd
-        .search_structured(StructuredQuery {
-            q: Some("3577 Jakson Stret San Fransisco"),
-            limit: 5,
-            ..Default::default()
-        })
-        .expect("search");
-    let top = hits.first().expect("corrected query finds the address");
-    assert_eq!(top.housenumber.as_deref(), Some("3577"));
-    assert!(
-        top.name.to_ascii_lowercase().contains("jackson"),
-        "top: {}",
-        top.name
-    );
+    for country_code in [None, Some("US,CA,AU")] {
+        let hits = fwd
+            .search_structured(StructuredQuery {
+                q: Some("3577 Jakson Stret San Fransisco"),
+                country_code,
+                limit: 5,
+                ..Default::default()
+            })
+            .expect("search");
+        let top = hits.first().expect("corrected query finds the address");
+        assert_eq!(top.housenumber.as_deref(), Some("3577"));
+        assert!(
+            top.name.to_ascii_lowercase().contains("jackson"),
+            "top: {}",
+            top.name
+        );
+    }
 }
 
 #[test]

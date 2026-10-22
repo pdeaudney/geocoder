@@ -2,12 +2,8 @@ services:
   geocoder:
     build: .
     image: geocoder:local
-    environment:
-      - PBF_URLS=https://download.geofabrik.de/europe/monaco-latest.osm.pbf
+    command: serve
     ports:
       - "3000:3000"
     volumes:
-      - geocoder-data:/data
-
-volumes:
-  geocoder-data:
+      - ./data:/data

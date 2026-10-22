@@ -156,21 +156,26 @@ fn run(psv_dir: &Path, out_dir: &Path, street_level: u64) -> Result<Stats, Strin
     let pass3 = |out: &mut HashMap<String, String>| -> Result<(), String> {
         for path in list_files(psv_dir, "_STREET_LOCALITY_psv.psv")? {
             read_psv(&path, |fields| {
-                if fields.len() < 6 {
+                if fields.len() < 7 {
                     return;
                 }
                 let pid = fields[0];
                 let retired = fields[2];
                 let name = fields[4];
                 let type_code = fields[5];
+                let suffix_code = fields[6];
                 if pid.is_empty() || !retired.is_empty() || name.is_empty() {
                     return;
                 }
-                let display = if type_code.is_empty() {
+                let mut display = if type_code.is_empty() {
                     title_case(name)
                 } else {
                     format!("{} {}", title_case(name), title_case(type_code))
                 };
+                if !suffix_code.is_empty() {
+                    display.push(' ');
+                    display.push_str(suffix_code);
+                }
                 out.insert(pid.to_string(), display);
             })?;
         }
@@ -555,5 +560,94 @@ impl StringPool {
 
     fn into_bytes(self) -> Vec<u8> {
         self.data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use query_server::gnaf::Gnaf;
+
+    #[test]
+    fn street_suffixes_survive_psv_join_and_index_reload() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        fs::write(
+            source.path().join("ACT_STATE_psv.psv"),
+            "STATE_PID|DATE_CREATED|DATE_RETIRED|STATE_NAME|STATE_ABBREVIATION\nstate|||AUSTRALIAN CAPITAL TERRITORY|ACT\n",
+        )
+        .unwrap();
+        fs::write(
+            source.path().join("ACT_LOCALITY_psv.psv"),
+            "LOCALITY_PID|DATE_CREATED|DATE_RETIRED|LOCALITY_NAME\nlocality|||CANBERRA\n",
+        )
+        .unwrap();
+        let mut streets = String::from(
+            "STREET_LOCALITY_PID|DATE_CREATED|DATE_RETIRED|STREET_CLASS_CODE|STREET_NAME|STREET_TYPE_CODE|STREET_SUFFIX_CODE\n",
+        );
+        let mut addresses = String::from("ADDRESS_DETAIL\n");
+        let mut geocodes = String::from("ADDRESS_DEFAULT_GEOCODE\n");
+        for (id, name, street_type, suffix, retired) in [
+            ("east", "PARKES", "PLACE", "E", ""),
+            ("west", "PARKES", "PLACE", "W", ""),
+            ("northeast", "PARKES", "PLACE", "NE", ""),
+            ("plain", "ALYSSE", "CLOSE", "", ""),
+            ("untyped", "NORTH ACCESS", "", "N", ""),
+            ("unknown", "PARKES", "PLACE", "ZZ", ""),
+            ("retired", "PARKES", "PLACE", "S", "2020-01-01"),
+        ] {
+            streets.push_str(&format!("{id}||{retired}||{name}|{street_type}|{suffix}\n"));
+            let mut fields = vec![""; 27];
+            fields[0] = id;
+            fields[17] = "12";
+            fields[22] = id;
+            fields[24] = "locality";
+            fields[26] = "2600";
+            addresses.push_str(&fields.join("|"));
+            addresses.push('\n');
+            geocodes.push_str(&format!("{id}|||{id}||149.13|-35.30\n"));
+        }
+        for (filename, content) in [
+            ("ACT_STREET_LOCALITY_psv.psv", streets),
+            ("ACT_ADDRESS_DETAIL_psv.psv", addresses),
+            ("ACT_ADDRESS_DEFAULT_GEOCODE_psv.psv", geocodes),
+        ] {
+            fs::write(source.path().join(filename), content).unwrap();
+        }
+
+        let stats = run(source.path(), output.path(), DEFAULT_STREET_CELL_LEVEL).unwrap();
+        assert_eq!(stats.points, 6);
+        let index = Gnaf::open(output.path()).unwrap().unwrap();
+        let mut names: Vec<_> = index
+            .points()
+            .iter()
+            .map(|p| index.string_at(p.street_id))
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "Alysse Close",
+                "North Access N",
+                "Parkes Place E",
+                "Parkes Place NE",
+                "Parkes Place W",
+                "Parkes Place ZZ",
+            ]
+        );
+        for suffix in ["E", "W", "NE", "ZZ"] {
+            let street = format!("Parkes Place {suffix}");
+            let found = index
+                .find_by_housenumber(
+                    "12",
+                    Some(&street),
+                    None,
+                    -35.30,
+                    149.13,
+                    DEFAULT_STREET_CELL_LEVEL,
+                )
+                .unwrap();
+            assert_eq!(found.street, street);
+        }
     }
 }

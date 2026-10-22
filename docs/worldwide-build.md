@@ -125,9 +125,10 @@ review each source's licence before use. To add AU G-NAF, set a
 license-accepted `GNAF_ARCHIVE_URL` on the host and pass
 `-e GNAF_ARCHIVE_URL` to `docker run`. Prepared G-NAF PSV files, WoF SQLite,
 or OpenAddresses CSVs under `/data` are also imported without a fetch flag.
-Use `docker run -v "$PWD/data:/data" -p 3000:3000 geocoder:local serve`
-after the build. An explicit `build` regenerates all stages; `auto` serves an
-unchanged completed index and rebuilds when source files change.
+Omit `OA_GEOJSON_SOURCES` when those CSVs are already on the mount to avoid
+downloading them again. After the build, `docker compose up -d` serves
+`./data/index` from a persistent bind mount; container restarts do not rebuild.
+Run the explicit `build` command only when source data or index format changes.
 
 ## Download
 

@@ -7,7 +7,7 @@
 //!
 //! Validation tests run without a real index. Behaviour tests require
 //! `GEOCODER_INDEX_DIR` (AU) for Saint-Kilda-style same-name cases or
-//! `GEOCODER_PLANET_INDEX_DIR` for the cross-country Cambridge case.
+//! `GEOCODER_PLANET_INDEX_DIR` for Cambridge, falling back to `GEOCODER_INDEX_DIR`.
 
 #![cfg(feature = "grpc")]
 #![cfg(feature = "forward")]
@@ -24,20 +24,42 @@ use std::sync::Arc;
 use tonic::{Code, Request};
 
 fn try_service(env_var: &str) -> Option<GeocoderService> {
-    let dir = std::env::var(env_var).ok()?;
+    let dir = std::env::var(env_var)
+        .or_else(|err| {
+            if env_var == "GEOCODER_PLANET_INDEX_DIR" {
+                std::env::var("GEOCODER_INDEX_DIR")
+            } else {
+                Err(err)
+            }
+        })
+        .ok()?;
     let path = PathBuf::from(&dir);
     let idx = Index::load(
-        path.to_str()?,
+        path.to_str().expect("index path"),
         DEFAULT_STREET_CELL_LEVEL,
         DEFAULT_ADMIN_CELL_LEVEL,
         DEFAULT_SEARCH_DISTANCE,
     )
-    .ok()?;
-    let forward = Forward::open(&path)
-        .ok()
-        .filter(|f| !f.is_empty())
+    .expect("load configured reverse index");
+    let forward = Forward::open(&path).expect("open configured forward index");
+    assert!(!forward.is_empty(), "configured index has no forward data");
+    if env_var == "GEOCODER_PLANET_INDEX_DIR"
+        && !forward.has_default()
+        && ![b"us", b"gb"]
+            .iter()
+            .all(|cc| forward.countries().any(|loaded| loaded == *cc))
+    {
+        assert!(
+            std::env::var_os(env_var).is_none(),
+            "configured planet index needs US and GB shards"
+        );
+        eprintln!("SKIP: Cambridge needs both US and GB shards");
+        return None;
+    }
+    let forward = Some(Arc::new(forward));
+    let autocomplete = Autocomplete::open(&path)
+        .expect("open configured autocomplete index")
         .map(Arc::new);
-    let autocomplete = Autocomplete::open(&path).ok().flatten().map(Arc::new);
     Some(GeocoderService {
         index: Arc::new(ArcSwap::from_pointee(idx)),
         forward,
@@ -240,7 +262,7 @@ async fn grpc_search_sydney_unaffected_by_bias() {
 }
 
 /// Cross-country same-name disambiguation. Cambridge UK (52.20, 0.12)
-/// vs Cambridge MA (42.37, -71.11). Planet-gated.
+/// vs Cambridge MA (42.37, -71.11). Requires US and GB data.
 #[tokio::test]
 async fn grpc_search_cambridge_with_us_bias_picks_ma() {
     let Some(svc) = try_service("GEOCODER_PLANET_INDEX_DIR") else { return };
