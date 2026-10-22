@@ -191,6 +191,11 @@ name = "query-server"
 path = "src/main.rs"
 
 [[bin]]
+name = "sample-addresses"
+path = "src/bin/sample_addresses.rs"
+required-features = ["forward"]
+
+[[bin]]
 name = "build-forward-index"
 path = "src/bin/build_forward_index.rs"
 required-features = ["forward", "translit"]

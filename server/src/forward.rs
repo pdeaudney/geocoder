@@ -23,6 +23,7 @@ use crate::{
     DEFAULT_SEARCH_DISTANCE, DEFAULT_STREET_CELL_LEVEL,
 };
 use std::path::Path;
+use std::sync::Mutex;
 use tantivy::collector::TopDocs;
 use tantivy::query::{
     AllQuery, BooleanQuery, BoostQuery, ConstScoreQuery, Occur, Query, TermQuery,
@@ -242,6 +243,20 @@ fn is_directional(word: &str) -> bool {
     )
 }
 
+fn directional_aliases(word: &str) -> &'static [&'static str] {
+    match word {
+        "n" | "north" => &["n", "north"],
+        "s" | "south" => &["s", "south"],
+        "e" | "east" => &["e", "east"],
+        "w" | "west" => &["w", "west"],
+        "ne" | "northeast" => &["ne", "northeast"],
+        "nw" | "northwest" => &["nw", "northwest"],
+        "se" | "southeast" => &["se", "southeast"],
+        "sw" | "southwest" => &["sw", "southwest"],
+        _ => &[],
+    }
+}
+
 /// Index of the token that is the street type when "St" means Street:
 /// the last token, or the one before trailing compass words ("Jackson St
 /// SE"). A leading "St" is Saint ("St Kilda").
@@ -282,6 +297,49 @@ const ORDINAL_WORDS: &[&str] = &[
     "nineteenth",
     "twentieth",
 ];
+
+fn canonicalise_compound_ordinals(words: &mut Vec<String>) {
+    let mut i = 0;
+    while i + 1 < words.len() {
+        let tens = match words[i].to_ascii_lowercase().as_str() {
+            "twenty" => 20,
+            "thirty" => 30,
+            "forty" => 40,
+            "fifty" => 50,
+            "sixty" => 60,
+            "seventy" => 70,
+            "eighty" => 80,
+            "ninety" => 90,
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        if let Some(ones) = ORDINAL_WORDS[..9]
+            .iter()
+            .position(|word| *word == words[i + 1].to_ascii_lowercase())
+        {
+            words[i] = crate::openaddresses::ordinal(tens + ones as u32 + 1);
+            words.remove(i + 1);
+        }
+        i += 1;
+    }
+}
+
+fn contains_whole_phrase(text: &str, phrase: &str) -> bool {
+    !phrase.is_empty()
+        && text.match_indices(phrase).any(|(start, _)| {
+            let end = start + phrase.len();
+            text[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric())
+                && text[end..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric())
+        })
+}
 
 /// One spelling for street ordinals, at index and query time alike:
 /// "Fifth", "5th" and "5" before a street type all become "5th" ("West 37
@@ -608,10 +666,8 @@ fn wide_coord_bucket(lat: f64, lng: f64) -> (i32, i32) {
 /// `name:en=Frankfurt` for the same row, so the synthesis is a
 /// belt-and-braces measure on top of i18n).
 ///
-/// Does NOT split on hyphens — French compound names like
-/// "Boulogne-sur-Mer" use hyphenated prepositions, but tantivy's
-/// SimpleTokenizer already splits hyphens into separate tokens, so
-/// the leading part is matchable as-is via the standard name field.
+/// The hyphenated "-under-" form needs the same alias for
+/// Newcastle-under-Lyme; other hyphens stay part of the full name.
 fn synthesize_short_form(name: &str) -> Option<&str> {
     let lower = name.to_ascii_lowercase();
     // Compound prepositions surrounded by spaces. The first match
@@ -624,6 +680,7 @@ fn synthesize_short_form(name: &str) -> Option<&str> {
         " upon ",  // Newcastle upon Tyne, Stratford upon Avon
         " on ", // Stoke on Trent, Newcastle on Tyne (hyphenated form lost on hyphen-split anyway)
         " under ", // Newcastle under Lyme
+        "-under-", // Newcastle-under-Lyme
         " im ", // Speyer im Rhein
         " bei ", // Munich bei München
         " sur ", // Boulogne sur Mer (space form)
@@ -822,6 +879,11 @@ fn is_aliased_place(places: &[AliasedPlace<'_>], hit: &Hit) -> bool {
             && name == p.name
             && crate::geo::haversine_m(hit.lat, hit.lng, p.lat, p.lng) < WOF_ALIAS_MATCH_M
     })
+}
+
+fn has_short_name(hit: &Hit, text: &str) -> bool {
+    hit.kind == KIND_PLACE
+        && synthesize_short_form(&hit.name).is_some_and(|short| short.eq_ignore_ascii_case(text))
 }
 
 /// Build a single monolithic tantivy index at `dest`. Everything goes in
@@ -2197,6 +2259,7 @@ struct FieldedIndex {
     index: TIndex,
     reader: IndexReader,
     schema: ForwardSchema,
+    trailing_city_cache: Mutex<std::collections::HashMap<String, Option<(String, u64)>>>,
     /// On-disk directory name (e.g. `tantivy`, `tantivy_au`). Recorded on
     /// every span that uses this index so an operator can correlate a
     /// suspect query to a specific file set without guessing which
@@ -2502,6 +2565,7 @@ impl Forward {
             index: t_index,
             reader,
             schema,
+            trailing_city_cache: Mutex::new(std::collections::HashMap::new()),
             dir_name,
         })
     }
@@ -2574,8 +2638,9 @@ impl Forward {
     /// become required field-specific matches; tokens from `q` become
     /// should-match matches against name + suburb + state with name boosted.
     ///
-    /// If only country shards are loaded, an unscoped query searches each
-    /// shard and merges the results. Explicit filters remain constraints:
+    /// An unscoped query over country shards, or a comma-separated country
+    /// filter, searches each selected country and merges the results.
+    /// Explicit filters remain constraints:
     /// a miss in New York must not turn into a result in Chicago or Canada.
     #[tracing::instrument(
         name = "forward.search_structured",
@@ -2596,6 +2661,22 @@ impl Forward {
     )]
     pub fn search_structured(&self, q: StructuredQuery<'_>) -> Result<Vec<Hit>, String> {
         let hits = self.search_structured_inner(q.clone(), true)?;
+        let repaired = if q.q.is_some() {
+            self.repair_freeform_whitespace(&q, &hits)?
+        } else {
+            self.repair_street_whitespace(&q, &hits)?
+        };
+        if let Some(repaired) = repaired {
+            tracing::Span::current().record(
+                "geocoder.stage",
+                if q.q.is_some() {
+                    "freeform_whitespace"
+                } else {
+                    "street_whitespace"
+                },
+            );
+            return Ok(repaired);
+        }
         if !hits.is_empty() {
             return Ok(hits);
         }
@@ -2610,10 +2691,10 @@ impl Forward {
                 .map(|(_, cc)| cc)
         });
         let shards: Vec<&FieldedIndex> = match country.as_deref() {
-            Some(cc) => match self.pick(Some(cc)) {
-                Some((active, _)) => vec![active],
-                None => return Ok(hits),
-            },
+            Some(cc) => cc
+                .split(',')
+                .filter_map(|cc| self.pick(Some(cc.trim())).map(|(active, _)| active))
+                .collect(),
             None => self
                 .per_country
                 .values()
@@ -2651,6 +2732,310 @@ impl Forward {
             tracing::Span::current().record("geocoder.stage", "spelling");
         }
         Ok(hits)
+    }
+
+    fn repair_freeform_whitespace(
+        &self,
+        q: &StructuredQuery<'_>,
+        original: &[Hit],
+    ) -> Result<Option<Vec<Hit>>, String> {
+        let Some(cc) = q.country_code.filter(|cc| parse_country_code(cc).is_some()) else {
+            return Ok(None);
+        };
+        if q.street.is_some() || q.limit == 0 || q.kind.is_some_and(|k| k != KIND_ADDRESS) {
+            return Ok(None);
+        }
+        if q.q.is_some_and(|text| !text.contains(',')) {
+            return self.repair_plain_whitespace(q, original, cc);
+        }
+        let Some(address) = q.q.and_then(|text| whitespace_address_span(text, cc)) else {
+            return Ok(None);
+        };
+        let state = address
+            .state
+            .map(|state| match cc.to_ascii_uppercase().as_str() {
+                "AU" => canonicalise_state(state).unwrap_or(state),
+                "US" => canonicalise_us_state(state).unwrap_or(state),
+                "CA" => canonicalise_ca_province(state).unwrap_or(state),
+                _ => state,
+            });
+        // Conflicting explicit fields must not hide text from the freeform input.
+        if [
+            (q.housenumber, Some(address.house.as_str())),
+            (q.city, address.city),
+            (q.state, state),
+        ]
+        .into_iter()
+        .any(|(a, b)| {
+            a.zip(b)
+                .is_some_and(|(a, b)| address_text_key(a) != address_text_key(b))
+        }) || q
+            .unit
+            .zip(address.unit.as_deref())
+            .is_some_and(|(a, b)| unit_key(a) != unit_key(b))
+            || q.postcode
+                .zip(address.postcode)
+                .is_some_and(|(a, b)| normalize_postcode(a) != normalize_postcode(b))
+        {
+            return Ok(None);
+        }
+        let adapted = StructuredQuery {
+            q: None,
+            street: Some(address.street),
+            housenumber: q.housenumber.or(Some(&address.house)),
+            unit: q.unit.or(address.unit.as_deref()),
+            city: q.city.or(address.city),
+            state: q.state.or(state),
+            postcode: q.postcode.or(address.postcode),
+            ..q.clone()
+        };
+        if adapted.city.is_none() && adapted.postcode.is_none() {
+            return Ok(None);
+        }
+        // A street fallback can already resolve the typed house during API enrichment.
+        if original.first().is_some_and(|hit| {
+            tokenize_user_input(&hit.name) == tokenize_user_input(address.street)
+                || requested_address_matches(&adapted, hit, None)
+        }) {
+            return Ok(None);
+        }
+        let Some((active, _)) = self.active_index(&adapted) else {
+            return Ok(None);
+        };
+        let unchanged = self.search_strict(active, &adapted)?;
+        if unchanged
+            .iter()
+            .any(|hit| requested_address_matches(&adapted, hit, Some(address.street)))
+        {
+            return Ok(None);
+        }
+        self.repair_street_whitespace(&adapted, original)
+    }
+
+    fn repair_plain_whitespace(
+        &self,
+        q: &StructuredQuery<'_>,
+        original: &[Hit],
+        cc: &str,
+    ) -> Result<Option<Vec<Hit>>, String> {
+        let spans = plain_whitespace_spans(q.q.unwrap_or_default(), cc);
+        if spans.is_empty() {
+            return Ok(None);
+        }
+        // A context-free street can itself end in a locality name; keep an existing literal match.
+        if original.first().is_some_and(|hit| {
+            spans.iter().any(|(address, tail)| {
+                tokenize_user_input(&hit.name) == tokenize_user_input(address.street)
+                    && plain_context_matches(tail, hit, cc, address.postcode.or(q.postcode).is_some())
+            })
+        }) {
+            return Ok(None);
+        }
+        let Some((active, _)) = self.active_index(q) else {
+            return Ok(None);
+        };
+        let searcher = active.reader.searcher();
+        let dictionaries = |field| {
+            searcher
+                .segment_readers()
+                .iter()
+                .map(|segment| segment.inverted_index(field))
+                .collect::<tantivy::Result<Vec<_>>>()
+                .map_err(|e| format!("address terms: {e}"))
+        };
+        let names = dictionaries(active.schema.name)?;
+        let contexts = [
+            dictionaries(active.schema.suburb)?,
+            dictionaries(active.schema.state)?,
+        ]
+        .concat();
+        let indexed = |indexes: &[std::sync::Arc<tantivy::InvertedIndexReader>], word: &str| {
+            indexes
+                .iter()
+                .any(|index| index.terms().get(word).ok().flatten().is_some())
+        };
+        let mut proposals = Vec::new();
+        for (address, tail) in spans {
+            if q.housenumber
+                .is_some_and(|s| address_text_key(s) != address_text_key(&address.house))
+                || q.unit
+                    .zip(address.unit.as_deref())
+                    .is_some_and(|(a, b)| unit_key(a) != unit_key(b))
+                || q.postcode
+                    .zip(address.postcode)
+                    .is_some_and(|(a, b)| normalize_postcode(a) != normalize_postcode(b))
+                || (tail.is_empty()
+                    && address.postcode.is_none()
+                    && q.city.is_none()
+                    && q.postcode.is_none())
+            {
+                continue;
+            }
+            let parsed = parse_freeform_query_inner(tail, Some(cc));
+            let mut context_tokens = parsed.rest;
+            if let Some(state) = parsed.state {
+                context_tokens.extend(tokenize_user_input(&state));
+            }
+            if context_tokens.iter().any(|word| !indexed(&contexts, word)) {
+                continue;
+            }
+            let Some(candidates) = whitespace_candidates(address.street, |word| {
+                let tokens = tokenize_user_input(word);
+                tokens.len() == 1 && indexed(&names, &tokens[0])
+            }) else {
+                return Ok(None);
+            };
+            proposals.push((address, tail, candidates));
+        }
+        // shortcut: cap all interpretations at 32 strict queries; abstain rather than truncate ambiguity checks.
+        if proposals
+            .iter()
+            .map(|(_, _, candidates)| 1 + candidates.len())
+            .sum::<usize>()
+            > 32
+        {
+            return Ok(None);
+        }
+        let mut found = Vec::new();
+        for edited in [false, true] {
+            for (address, tail, candidates) in &proposals {
+                let adapted = StructuredQuery {
+                    q: (!tail.is_empty()).then_some(*tail),
+                    housenumber: Some(&address.house),
+                    unit: q.unit.or(address.unit.as_deref()),
+                    postcode: q.postcode.or(address.postcode),
+                    kind: Some(KIND_ADDRESS),
+                    limit: 5,
+                    ..q.clone()
+                };
+                let matches = |hit: &Hit, street: &str| {
+                    requested_address_matches(&adapted, hit, Some(street))
+                        && plain_context_matches(tail, hit, cc, adapted.postcode.is_some())
+                };
+                if original
+                    .first()
+                    .is_some_and(|hit| matches(hit, address.street))
+                {
+                    return Ok(None);
+                }
+                let streets: Vec<&str> = if edited {
+                    candidates.iter().map(String::as_str).collect()
+                } else {
+                    vec![address.street]
+                };
+                for street in streets {
+                    let hits = self.search_strict(
+                        active,
+                        &StructuredQuery {
+                            street: Some(street),
+                            ..adapted.clone()
+                        },
+                    )?;
+                    if hits.len() >= 5 {
+                        return Ok(None);
+                    }
+                    if !hits.iter().any(|hit| matches(hit, street)) {
+                        continue;
+                    }
+                    // Preserve an unchanged interpretation before considering any boundary edit.
+                    if !edited || !matches(&hits[0], street) {
+                        return Ok(None);
+                    }
+                    for hit in hits.into_iter().filter(|hit| matches(hit, street)) {
+                        if found
+                            .first()
+                            .is_some_and(|first| !same_repaired_address(first, &hit))
+                        {
+                            return Ok(None);
+                        }
+                        found.push(hit);
+                    }
+                }
+            }
+        }
+        found.truncate(q.limit);
+        Ok((!found.is_empty()).then_some(found))
+    }
+
+    fn repair_street_whitespace(
+        &self,
+        q: &StructuredQuery<'_>,
+        original: &[Hit],
+    ) -> Result<Option<Vec<Hit>>, String> {
+        if q.q.is_some()
+            || q.limit == 0
+            || q.kind.is_some_and(|k| k != KIND_ADDRESS)
+            || q.housenumber.is_none_or(|s| s.trim().is_empty())
+            || !(q.city.is_some_and(|s| !s.trim().is_empty())
+                || q.postcode.is_some_and(|s| !s.trim().is_empty()))
+            || q.country_code.and_then(parse_country_code).is_none()
+            || original
+                .first()
+                .is_some_and(|h| requested_address_matches(q, h, None))
+        {
+            return Ok(None);
+        }
+        let Some(street) = q.street.filter(|s| !s.trim().is_empty() && s.len() <= 128) else {
+            return Ok(None);
+        };
+        let Some((active, _)) = self.active_index(q) else {
+            return Ok(None);
+        };
+        let searcher = active.reader.searcher();
+        let indexes = searcher
+            .segment_readers()
+            .iter()
+            .map(|segment| segment.inverted_index(active.schema.name))
+            .collect::<tantivy::Result<Vec<_>>>()
+            .map_err(|e| format!("street terms: {e}"))?;
+        let Some(candidates) = whitespace_candidates(street, |word| {
+            let tokens = tokenize_user_input(word);
+            tokens.len() == 1
+                && indexes
+                    .iter()
+                    .any(|index| index.terms().get(&tokens[0]).ok().flatten().is_some())
+        }) else {
+            return Ok(None);
+        };
+        let mut found: Vec<Hit> = Vec::new();
+        for candidate in candidates {
+            let hits = self.search_strict(
+                active,
+                &StructuredQuery {
+                    street: Some(&candidate),
+                    kind: Some(KIND_ADDRESS),
+                    limit: 5,
+                    ..q.clone()
+                },
+            )?;
+            if !hits
+                .first()
+                .is_some_and(|h| requested_address_matches(q, h, Some(&candidate)))
+            {
+                continue;
+            }
+            // A full page cannot prove uniqueness, including when the caller asks for one hit.
+            if hits.len() >= 5 {
+                return Ok(None);
+            }
+            for hit in hits
+                .into_iter()
+                .filter(|h| requested_address_matches(q, h, Some(&candidate)))
+            {
+                if found
+                    .first()
+                    .is_some_and(|first| !same_repaired_address(first, &hit))
+                {
+                    return Ok(None);
+                }
+                found.push(hit);
+            }
+        }
+        if found.is_empty() {
+            return Ok(None);
+        }
+        found.truncate(q.limit);
+        Ok(Some(found))
     }
 
     fn search_structured_inner(
@@ -2692,9 +3077,11 @@ impl Forward {
                 .q
                 .and_then(|text| country_suffix(text, Some(&self.country_aliases), q.country_code))
             {
-                if q.country_code
-                    .is_none_or(|explicit| explicit.eq_ignore_ascii_case(&cc))
-                {
+                if q.country_code.is_none_or(|explicit| {
+                    explicit
+                        .split(',')
+                        .any(|code| code.trim().eq_ignore_ascii_case(&cc))
+                }) {
                     return self.search_structured_inner(
                         StructuredQuery {
                             q: Some(body),
@@ -2706,9 +3093,18 @@ impl Forward {
                 }
             }
         }
-        if q.country_code.is_none() && self.default.is_none() {
-            let mut countries: Vec<_> = self.per_country.keys().copied().collect();
+        if q.country_code.is_some_and(|cc| cc.contains(','))
+            || (q.country_code.is_none() && self.default.is_none())
+        {
+            let mut countries: Vec<_> = match q.country_code {
+                Some(cc) => cc
+                    .split(',')
+                    .filter_map(|cc| parse_country_code(cc.trim()))
+                    .collect(),
+                None => self.per_country.keys().copied().collect(),
+            };
             countries.sort_unstable();
+            countries.dedup();
             // A comma-delimited city and region is a place lookup. Query
             // each shard with its own region spelling before its POIs can
             // dominate a shared name (for example San Francisco, CA).
@@ -2873,7 +3269,7 @@ impl Forward {
                 let mut known = Vec::new();
                 for cc in &countries {
                     let cc_str = String::from_utf8_lossy(cc);
-                    let Some(active) = self.per_country.get(cc) else {
+                    let Some((active, _)) = self.pick(Some(&cc_str)) else {
                         continue;
                     };
                     let located = self.search_once(
@@ -2907,7 +3303,7 @@ impl Forward {
             let mut hits = Vec::new();
             for cc in countries.iter().filter(|_| q.bias.is_none()) {
                 let code = String::from_utf8_lossy(cc);
-                let Some(active) = self.per_country.get(cc) else {
+                let Some((active, _)) = self.pick(Some(&code)) else {
                     continue;
                 };
                 hits.extend(self.search_strict(
@@ -2947,6 +3343,7 @@ impl Forward {
             let prominence = |hit: &Hit| {
                 if hit.kind == KIND_PLACE
                     && (exact_place.is_some_and(|name| hit.name.eq_ignore_ascii_case(name))
+                        || exact_place.is_some_and(|name| has_short_name(hit, name))
                         || is_aliased_place(&aliased, hit))
                 {
                     hit.importance
@@ -2974,7 +3371,9 @@ impl Forward {
             // A city the query names by its WoF short name ("new york
             // city") explains the query as fully as its own name would.
             let full_match = |hit: &Hit| {
-                if is_aliased_place(&aliased, hit) {
+                if is_aliased_place(&aliased, hit)
+                    || exact_place.is_some_and(|name| has_short_name(hit, name))
+                {
                     return Explains::ByName;
                 }
                 typed
@@ -3000,14 +3399,16 @@ impl Forward {
                     .then_with(|| fb.cmp(fa))
                     .then_with(|| pb.cmp(pa))
                     .then_with(|| {
-                        if bias.is_none() {
-                            cb.cmp(ca)
+                        if bias.is_some() {
+                            let (ea, sa) = ranking_key(a, bias, *fa == Explains::ByName);
+                            let (eb, sb) = ranking_key(b, bias, *fb == Explains::ByName);
+                            eb.cmp(&ea).then_with(|| sb.total_cmp(&sa))
                         } else {
-                            std::cmp::Ordering::Equal
+                            cb.cmp(ca).then_with(|| ob.cmp(oa)).then_with(|| {
+                                boosted_score(b, None).total_cmp(&boosted_score(a, None))
+                            })
                         }
                     })
-                    .then_with(|| ob.cmp(oa))
-                    .then_with(|| boosted_score(b, bias).total_cmp(&boosted_score(a, bias)))
                     .then_with(|| a.country_code.cmp(&b.country_code))
             });
             let mut hits: Vec<Hit> = keyed.into_iter().map(|(_, _, _, _, hit)| hit).collect();
@@ -3404,29 +3805,55 @@ impl Forward {
         for n in (1..=3).rev().filter(|&n| n < words.len()) {
             let (body, tail) = words.split_at(words.len() - n);
             let tail = tail.join(" ");
-            let places = self.search_once(
-                active,
-                &StructuredQuery {
-                    q: Some(&tail),
-                    kind: Some(KIND_PLACE),
-                    limit: 5,
-                    country_code: q.country_code,
-                    ..Default::default()
-                },
-                false,
-                false,
-                false,
-            )?;
-            let tail_tokens = name_tokens(&tail);
-            if let Some(place) = places
-                .into_iter()
-                .filter(|p| (13..=16).contains(&p.rank) && name_tokens(&p.name) == tail_tokens)
-                .max_by_key(|p| p.importance)
-            {
+            let key = format!(
+                "{}\0{}",
+                q.country_code.unwrap_or_default(),
+                tail.to_lowercase()
+            );
+            let cached = active
+                .trailing_city_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .cloned();
+            let city = if let Some(city) = cached {
+                city
+            } else {
+                let places = self.search_once(
+                    active,
+                    &StructuredQuery {
+                        q: Some(&tail),
+                        kind: Some(KIND_PLACE),
+                        limit: 5,
+                        country_code: q.country_code,
+                        ..Default::default()
+                    },
+                    false,
+                    false,
+                    false,
+                )?;
+                let tail_tokens = name_tokens(&tail);
+                let city = places
+                    .into_iter()
+                    .filter(|p| (13..=16).contains(&p.rank) && name_tokens(&p.name) == tail_tokens)
+                    .max_by_key(|p| p.importance)
+                    .map(|p| (p.name, p.importance));
+                let mut cache = active
+                    .trailing_city_cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                // shortcut: clear at capacity; use LRU if diverse tails cause repeated cold misses.
+                if cache.len() >= 1024 {
+                    cache.clear();
+                }
+                cache.insert(key, city.clone());
+                city
+            };
+            if let Some((name, importance)) = city {
                 return Ok(Some(TrailingCity {
                     body: body.join(" "),
-                    name: place.name,
-                    importance: place.importance,
+                    name,
+                    importance,
                 }));
             }
         }
@@ -3522,11 +3949,27 @@ impl Forward {
         // Structured fields: MUST match each requested token.
         if let Some(street) = q.street.filter(|s| !s.trim().is_empty()) {
             for tok in tokenize_user_input(street) {
+                let aliases = directional_aliases(&tok);
+                let terms = if aliases.is_empty() {
+                    vec![tok.as_str()]
+                } else {
+                    aliases.to_vec()
+                };
                 clauses.push((
                     Occur::Must,
-                    Box::new(TermQuery::new(
-                        Term::from_field_text(s.name, &tok),
-                        IndexRecordOption::WithFreqs,
+                    Box::new(BooleanQuery::new(
+                        terms
+                            .into_iter()
+                            .map(|term| {
+                                (
+                                    Occur::Should,
+                                    Box::new(TermQuery::new(
+                                        Term::from_field_text(s.name, term),
+                                        IndexRecordOption::WithFreqs,
+                                    )) as Box<dyn Query>,
+                                )
+                            })
+                            .collect(),
                     )),
                 ));
             }
@@ -3603,25 +4046,10 @@ impl Forward {
                 // ("1 Water St Manhattan") or Saint ("St Louis").
                 // Search both indexed forms; the other query terms and
                 // address context decide which document wins.
-                let aliases: &[&str] = match tok.as_str() {
-                    "st" => &["st", "street"],
-                    "n" => &["n", "north"],
-                    "north" => &["north", "n"],
-                    "s" => &["s", "south"],
-                    "south" => &["south", "s"],
-                    "e" => &["e", "east"],
-                    "east" => &["east", "e"],
-                    "w" => &["w", "west"],
-                    "west" => &["west", "w"],
-                    "ne" => &["ne", "northeast"],
-                    "northeast" => &["northeast", "ne"],
-                    "nw" => &["nw", "northwest"],
-                    "northwest" => &["northwest", "nw"],
-                    "se" => &["se", "southeast"],
-                    "southeast" => &["southeast", "se"],
-                    "sw" => &["sw", "southwest"],
-                    "southwest" => &["southwest", "sw"],
-                    _ => &[],
+                let aliases: &[&str] = if tok == "st" {
+                    &["st", "street"]
+                } else {
+                    directional_aliases(tok)
                 };
                 let name_term: Box<dyn Query> = if !aliases.is_empty() {
                     Box::new(BooleanQuery::new(
@@ -3885,6 +4313,7 @@ impl Forward {
             .search(&boolean, &TopDocs::with_limit(oversample))
             .map_err(|e| format!("search: {e}"))?;
 
+        let raw_query = q.q.map(str::to_lowercase);
         let mut candidates: Vec<Hit> = Vec::with_capacity(top.len());
         for (score, addr) in top {
             let doc: TantivyDocument = searcher.doc(addr).map_err(|e| format!("fetch doc: {e}"))?;
@@ -3894,6 +4323,14 @@ impl Forward {
             // street is at least as prominent as any POI.
             if street_intent && hit.kind == KIND_STREET {
                 hit.score *= 1.24;
+            }
+            if hit.kind == KIND_ADDRESS
+                && raw_query
+                    .as_deref()
+                    .is_some_and(|query| contains_whole_phrase(query, &hit.name.to_lowercase()))
+            {
+                // Prefer the displayed street spelling when OA and OSM normalize to the same tokens.
+                hit.score *= 1.1;
             }
             candidates.push(hit);
         }
@@ -3908,35 +4345,36 @@ impl Forward {
         let exact = |hit: &Hit| {
             (matches!(hit.kind, KIND_PLACE | KIND_POI)
                 && exact_name.is_some_and(|name| hit.name.eq_ignore_ascii_case(name)))
+                || exact_name.is_some_and(|name| has_short_name(hit, name))
                 || is_aliased_place(&aliased, hit)
         };
-        // Sort key, best first: (exact name or alias, then a score). Without
-        // a bias, exact matches rank by importance. With a bias, an
-        // exact-name place near it is the one meant ("Cornwall" near
-        // Ottawa, or near Charlottetown): the nearest within
-        // `LOCAL_BIAS_KM` wins, as BM25 between same-name places differs
-        // only by incidental field lengths. Farther away the usual biased
-        // score decides, so "Sydney" from London is still Sydney AU.
-        const LOCAL_BIAS_KM: f64 = 150.0;
-        let key = |hit: &Hit| -> (bool, f32) {
-            let is_exact = exact(hit);
-            match bias {
-                None if is_exact => (true, hit.importance as f32),
-                Some(b) if is_exact && hit.kind == KIND_PLACE => {
-                    let d_km = crate::geo::haversine_m(hit.lat, hit.lng, b.lat, b.lng) / 1_000.0;
-                    if d_km <= LOCAL_BIAS_KM {
-                        (true, -(d_km as f32))
-                    } else {
-                        (false, boosted_score(hit, bias))
-                    }
+        let mut keyed: Vec<((bool, f32), Hit)> = candidates
+            .into_iter()
+            .map(|hit| (ranking_key(&hit, bias, exact(&hit)), hit))
+            .collect();
+        keyed.sort_by(|((ea, sa), a), ((eb, sb), b)| {
+            eb.cmp(ea).then_with(|| sb.total_cmp(sa)).then_with(|| {
+                if unit.is_none() && a.kind == KIND_ADDRESS && b.kind == KIND_ADDRESS {
+                    b.unit.is_none().cmp(&a.unit.is_none())
+                } else {
+                    std::cmp::Ordering::Equal
                 }
-                _ => (is_exact && bias.is_none(), boosted_score(hit, bias)),
-            }
-        };
-        let mut keyed: Vec<((bool, f32), Hit)> =
-            candidates.into_iter().map(|hit| (key(&hit), hit)).collect();
-        keyed.sort_by(|((ea, sa), _), ((eb, sb), _)| eb.cmp(ea).then_with(|| sb.total_cmp(sa)));
+            })
+        });
         let mut candidates: Vec<Hit> = keyed.into_iter().map(|(_, hit)| hit).collect();
+        if unit.is_none() {
+            let mut seen = std::collections::HashSet::new();
+            candidates.retain(|hit| {
+                hit.kind != KIND_ADDRESS
+                    || seen.insert((
+                        hit.name.to_ascii_lowercase(),
+                        hit.housenumber.clone(),
+                        hit.postcode.clone(),
+                        hit.lat.to_bits(),
+                        hit.lng.to_bits(),
+                    ))
+            });
+        }
         candidates.truncate(limit);
 
         let span = tracing::Span::current();
@@ -4231,6 +4669,286 @@ fn correct_spelling(shards: &[&FieldedIndex], text: &str) -> Option<(String, Vec
     changed.then_some((out, kept))
 }
 
+struct WhitespaceAddressSpan<'a> {
+    street: &'a str,
+    house: String,
+    unit: Option<String>,
+    city: Option<&'a str>,
+    state: Option<&'a str>,
+    postcode: Option<&'a str>,
+}
+
+/// Keep raw byte boundaries: only the proposed street is allowed to change whitespace.
+fn plain_whitespace_spans<'a>(
+    text: &'a str,
+    cc: &str,
+) -> Vec<(WhitespaceAddressSpan<'a>, &'a str)> {
+    if text.len() > 512 || text.contains(',') {
+        return Vec::new();
+    }
+    let mut offset = 0;
+    let mut words: Vec<_> = text
+        .split_whitespace()
+        .map(|word| {
+            offset += text[offset..].find(word).unwrap();
+            let start = offset;
+            offset += word.len();
+            (start, word)
+        })
+        .collect();
+    if words.len() < 3 || words.len() > 24 {
+        return Vec::new();
+    }
+    let mut postcode = None;
+    if let Some((_, code)) = trailing_postcode(&tokenize_user_input(text), Some(cc)) {
+        for n in (1..=2).rev() {
+            let start = words[words.len() - n].0;
+            if normalize_postcode(&text[start..]) == code {
+                postcode = Some(text[start..].trim());
+                words.truncate(words.len() - n);
+                break;
+            }
+        }
+    }
+    let mut unit = None;
+    if words.len() >= 4 && UNIT_WORDS.contains(&words[0].1.to_ascii_lowercase().as_str()) {
+        unit = Some(unit_key(words[1].1));
+        words.drain(..2);
+    } else if words.len() >= 3 && words[0].1.starts_with('#') {
+        unit = Some(unit_key(words[0].1));
+        words.remove(0);
+    }
+    let Some(&(start, _)) = words.first() else {
+        return Vec::new();
+    };
+    let end = words
+        .last()
+        .map(|(start, word)| start + word.len())
+        .unwrap();
+    let mut spans = Vec::new();
+    for boundary in words
+        .iter()
+        .skip(2)
+        .map(|(start, _)| *start)
+        .chain(std::iter::once(end))
+    {
+        let Some(mut address) = whitespace_address_span(text[start..boundary].trim(), cc) else {
+            continue;
+        };
+        if let Some(unit) = &unit {
+            if address.unit.is_some()
+                || unit.is_empty()
+                || !unit.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            {
+                continue;
+            }
+            address.unit = Some(unit.clone());
+        }
+        address.postcode = postcode;
+        spans.push((address, text[boundary..end].trim()));
+    }
+    spans
+}
+
+fn plain_context_matches(tail: &str, hit: &Hit, cc: &str, has_postcode: bool) -> bool {
+    let tail = address_text_key(tail);
+    if tail.is_empty() {
+        return true;
+    }
+    let city = hit.suburb.as_deref().unwrap_or_default();
+    let state = hit.state.as_deref().unwrap_or_default();
+    if (!city.is_empty() && tail == address_text_key(city))
+        || (has_postcode && tail == address_text_key(state))
+        || (!city.is_empty() && tail == address_text_key(&format!("{city} {state}")))
+    {
+        return true;
+    }
+    let (city_tail, state_tail) = tail.rsplit_once(' ').unwrap_or(("", &tail));
+    let canonical = match cc.to_ascii_uppercase().as_str() {
+        "AU" => canonicalise_state(state_tail),
+        "US" => canonicalise_us_state(state_tail),
+        "CA" => canonicalise_ca_province(state_tail),
+        _ => None,
+    };
+    canonical.is_some_and(|s| address_text_key(s) == address_text_key(state))
+        && ((has_postcode && city_tail.is_empty())
+            || (!city_tail.is_empty() && city_tail == address_text_key(city)))
+}
+
+/// Borrow the street slice so punctuation and numeric tokens survive candidate generation.
+fn whitespace_address_span<'a>(text: &'a str, cc: &str) -> Option<WhitespaceAddressSpan<'a>> {
+    if text.len() > 512 {
+        return None;
+    }
+    let mut sections: Vec<_> = text.split(',').map(str::trim).collect();
+    if sections.len() > 5 || sections.iter().any(|s| s.is_empty()) {
+        return None;
+    }
+    let mut unit = None;
+    let words: Vec<_> = sections[0].split_whitespace().collect();
+    if words.len() == 2 && UNIT_WORDS.contains(&words[0].to_ascii_lowercase().as_str()) {
+        unit = Some(unit_key(sections.remove(0)));
+    } else if words.len() == 1 && words[0].starts_with('#') {
+        unit = Some(unit_key(sections.remove(0)));
+    }
+    let head = *sections.first()?;
+    let (house, street) = if let Some((slash_unit, house, offset)) = consume_au_unit_prefix(head) {
+        if unit.is_some() {
+            return None;
+        }
+        unit = Some(slash_unit);
+        (house, head[offset..].trim_start())
+    } else {
+        let (house, street) = head.split_once(char::is_whitespace)?;
+        (house.to_owned(), street.trim_start())
+    };
+    if house.len() > 32
+        || !house.starts_with(|c: char| c.is_ascii_digit())
+        || !house.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        || street.is_empty()
+        || street.len() > 128
+        || unit.as_deref().is_some_and(|u| {
+            u.is_empty() || !u.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+    {
+        return None;
+    }
+    let parsed_head = parse_freeform_query_inner(head, Some(cc));
+    if parsed_head.house_number
+        .as_deref()
+        .is_none_or(|parsed| !parsed.eq_ignore_ascii_case(&house))
+        || parsed_head.state.is_some()
+        || parsed_head.postcode.is_some()
+        || parsed_head.unit.as_deref().is_some_and(|parsed| {
+            unit.as_deref().is_none_or(|unit| unit_key(parsed) != unit_key(unit))
+        })
+    {
+        return None;
+    }
+    sections.remove(0);
+    let mut postcode = None;
+    if let Some(last) = sections.last() {
+        let tokens = tokenize_user_input(last);
+        if trailing_postcode(&tokens, Some(cc))
+            .is_some_and(|(start, code)| start == 0 && code == normalize_postcode(last))
+        {
+            postcode = sections.pop();
+        }
+    }
+    // Commas establish city/state here; undelimited input is checked against stored address fields.
+    if sections.len() > 2 {
+        return None;
+    }
+    Some(WhitespaceAddressSpan {
+        street,
+        house,
+        unit,
+        city: sections.first().copied(),
+        state: sections.get(1).copied(),
+        postcode,
+    })
+}
+
+/// One alphabetic boundary edit; the existing name dictionary prunes impossible words.
+fn whitespace_candidates(street: &str, mut indexed: impl FnMut(&str) -> bool) -> Option<Vec<String>> {
+    if street.len() > 128 {
+        return None;
+    }
+    let words: Vec<_> = street.split_whitespace().collect();
+    if words.len() > 12 {
+        return None;
+    }
+    let mut candidates = std::collections::BTreeSet::new();
+    for (i, word) in words.iter().enumerate() {
+        if !word.chars().all(char::is_alphabetic) {
+            continue;
+        }
+        for (at, _) in word.char_indices().skip(1) {
+            let (left, right) = word.split_at(at);
+            if indexed(left) && indexed(right) {
+                let mut parts = words.clone();
+                let split = format!("{left} {right}");
+                parts[i] = &split;
+                candidates.insert(parts.join(" "));
+            }
+        }
+        if let Some(next) = words
+            .get(i + 1)
+            .filter(|s| s.chars().all(char::is_alphabetic))
+        {
+            let joined = format!("{word}{next}");
+            if indexed(&joined) {
+                let mut parts = words.clone();
+                parts[i] = &joined;
+                parts.remove(i + 1);
+                candidates.insert(parts.join(" "));
+            }
+        }
+        // shortcut: abstain beyond 16 candidates; revisit only if validation shows useful misses.
+        if candidates.len() > 16 {
+            return None;
+        }
+    }
+    Some(candidates.into_iter().collect())
+}
+
+fn address_text_key(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn requested_address_matches(q: &StructuredQuery<'_>, hit: &Hit, street: Option<&str>) -> bool {
+    hit.kind == KIND_ADDRESS
+        && hit.housenumber.as_deref().is_some_and(|s| !s.is_empty())
+        && hit.lat.is_finite()
+        && hit.lat.abs() <= 90.0
+        && hit.lng.is_finite()
+        && hit.lng.abs() <= 180.0
+        && [
+            (q.housenumber, hit.housenumber.as_deref()),
+            (q.city, hit.suburb.as_deref()),
+            (q.state, hit.state.as_deref()),
+            (q.country_code, hit.country_code.as_deref()),
+        ]
+        .into_iter()
+        .all(|(wanted, got)| {
+            wanted
+                .filter(|s| !s.trim().is_empty())
+                .is_none_or(|s| got.is_some_and(|got| address_text_key(s) == address_text_key(got)))
+        })
+        && q.unit.filter(|s| !s.trim().is_empty()).is_none_or(|s| {
+            hit.unit
+                .as_deref()
+                .is_some_and(|got| unit_key(s) == unit_key(got))
+        })
+        && q.postcode.filter(|s| !s.trim().is_empty()).is_none_or(|s| {
+            hit.postcode
+                .as_deref()
+                .is_some_and(|got| normalize_postcode(s) == normalize_postcode(got))
+        })
+        && street.is_none_or(|s| tokenize_user_input(s) == tokenize_user_input(&hit.name))
+}
+
+fn same_repaired_address(a: &Hit, b: &Hit) -> bool {
+    tokenize_user_input(&a.name) == tokenize_user_input(&b.name)
+        && [
+            (a.housenumber.as_deref(), b.housenumber.as_deref()),
+            (a.unit.as_deref(), b.unit.as_deref()),
+            (a.suburb.as_deref(), b.suburb.as_deref()),
+            (a.state.as_deref(), b.state.as_deref()),
+            (a.country_code.as_deref(), b.country_code.as_deref()),
+        ]
+        .into_iter()
+        .all(|(a, b)| address_text_key(a.unwrap_or("")) == address_text_key(b.unwrap_or("")))
+        && normalize_postcode(a.postcode.as_deref().unwrap_or(""))
+            == normalize_postcode(b.postcode.as_deref().unwrap_or(""))
+        && (a.lat * 10000.0).round() == (b.lat * 10000.0).round()
+        && (a.lng * 10000.0).round() == (b.lng * 10000.0).round()
+}
+
+
 /// Whether `hit` names every word in `words` (canonical tokens) in its
 /// name, locality or state.
 fn hit_names_all(hit: &Hit, words: &[String]) -> bool {
@@ -4268,6 +4986,22 @@ impl tantivy_fst::Automaton for LevenshteinDfa<'_> {
 
     fn accept(&self, state: &u32, byte: u8) -> u32 {
         self.0.transition(*state, byte)
+    }
+}
+
+// Exact places within 150 km rank nearest first, within a shard and across countries.
+fn ranking_key(hit: &Hit, bias: Option<&BiasCoord>, is_exact: bool) -> (bool, f32) {
+    match bias {
+        None if is_exact => (true, hit.importance as f32),
+        Some(b) if is_exact && hit.kind == KIND_PLACE => {
+            let d_km = crate::geo::haversine_m(hit.lat, hit.lng, b.lat, b.lng) / 1_000.0;
+            if d_km <= 150.0 {
+                (true, -(d_km as f32))
+            } else {
+                (false, boosted_score(hit, bias))
+            }
+        }
+        _ => (is_exact && bias.is_none(), boosted_score(hit, bias)),
     }
 }
 
@@ -4499,6 +5233,7 @@ pub fn tokenize_user_input(s: &str) -> Vec<String> {
                 part[pos] = "street".to_owned();
             }
         }
+        canonicalise_compound_ordinals(&mut part);
         canonicalise_ordinals(&mut part, true);
         raw_tokens.extend(part);
     }
@@ -4636,20 +5371,28 @@ pub fn canonicalise_phrase(s: &str) -> String {
     }
     // Callers also store this text for display (the suburb field), so
     // only the ordinals change; every other word keeps its case.
-    let words: Vec<&str> = out.split_whitespace().collect();
+    let mut words: Vec<String> = out.split_whitespace().map(str::to_owned).collect();
+    canonicalise_compound_ordinals(&mut words);
+    let compound_changed = words.len() != out.split_whitespace().count();
     let mut tokens: Vec<String> = words
         .iter()
         .map(|word| ascii_fold(word.trim_end_matches(['.', ','])).to_lowercase())
         .collect();
     let before = tokens.clone();
     canonicalise_ordinals(&mut tokens, false);
-    if tokens == before {
+    if tokens == before && !compound_changed {
         return out;
     }
     words
         .iter()
         .zip(tokens.iter().zip(&before))
-        .map(|(word, (new, old))| if new == old { *word } else { new.as_str() })
+        .map(|(word, (new, old))| {
+            if new == old {
+                word.as_str()
+            } else {
+                new.as_str()
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -5265,6 +6008,37 @@ pub struct Hit {
 mod query_normalizer_tests {
     use super::*;
 
+    #[test]
+    fn whitespace_candidates_preserve_numbers_and_punctuation_and_bound_work() {
+        let dictionary = |s: &str| ["Keats", "New", "Brunswick", "École"].contains(&s);
+        assert_eq!(
+            whitespace_candidates("Ke ats Street", dictionary).unwrap(),
+            ["Keats Street"]
+        );
+        assert_eq!(
+            whitespace_candidates("NewBrunswick Drive", dictionary).unwrap(),
+            ["New Brunswick Drive"]
+        );
+        assert_eq!(
+            whitespace_candidates("Éc ole Road", dictionary).unwrap(),
+            ["École Road"]
+        );
+        assert!(whitespace_candidates("16 8th Place", |_| true)
+            .unwrap()
+            .iter()
+            .all(|s| s.starts_with("16 8th ")));
+        assert!(whitespace_candidates("8thPlace", |_| true).unwrap().is_empty());
+        assert!(whitespace_candidates("Ke-ats", |_| true).unwrap().is_empty());
+        assert!(whitespace_candidates(&"a".repeat(129), |_| true).is_none());
+        assert!(whitespace_candidates("abcdefghijklmnopqrst", |_| true).is_none());
+    }
+
+
+
+
+
+
+
     fn toks(s: &str) -> Vec<String> {
         tokenize_user_input(s)
     }
@@ -5273,18 +6047,62 @@ mod query_normalizer_tests {
     fn ordinals_have_one_spelling_at_index_and_query_time() {
         assert_eq!(toks("Fifth Avenue"), toks("5th Ave"));
         assert_eq!(toks("West 37 Street"), toks("West 37th St"));
+        assert_eq!(toks("Thirty Seventh Street"), toks("37th St"));
+        assert_eq!(toks("Twenty-First Avenue"), toks("21st Ave"));
         assert_eq!(toks("first avenue"), vec!["1st", "avenue"]);
         assert_eq!(toks("11 Street, NY")[0], "11");
         assert_eq!(crate::openaddresses::ordinal(22), "22nd");
         assert_eq!(crate::openaddresses::ordinal(113), "113th");
         assert_eq!(canonicalise_phrase("West 37 Street"), "West 37th Street");
         assert_eq!(canonicalise_phrase("Fifth Avenue"), "5th Avenue");
+        assert_eq!(canonicalise_phrase("Thirty Seventh Street"), "37th Street");
         // Indexed names carry no house number: "7 Street" is 7th Street.
         // Words that are not ordinals keep their display case.
         assert_eq!(canonicalise_phrase("7 Street"), "7th Street");
         assert_eq!(canonicalise_phrase("New York"), "New York");
         // In a query the first number is the house number.
         assert_eq!(toks("310 7 Street"), vec!["310", "7th", "street"]);
+    }
+
+    #[test]
+    fn hyphenated_newcastle_has_a_short_search_form() {
+        assert_eq!(
+            synthesize_short_form("Newcastle-under-Lyme"),
+            Some("Newcastle")
+        );
+        assert_eq!(synthesize_short_form("Boulogne-sur-Mer"), None);
+    }
+
+    #[test]
+    fn raw_street_match_requires_word_boundaries() {
+        assert!(contains_whole_phrase(
+            "280 bloor street west toronto",
+            "bloor street west"
+        ));
+        assert!(!contains_whole_phrase(
+            "280 bloor street west toronto",
+            "bloor st w"
+        ));
+        assert!(!contains_whole_phrase("mainland", "main"));
+    }
+
+    #[test]
+    fn repeated_trailing_city_query_keeps_the_same_result() {
+        let Ok(dir) = std::env::var("GEOCODER_INDEX_DIR") else {
+            return;
+        };
+        let forward = Forward::open(std::path::Path::new(&dir)).unwrap();
+        let query = StructuredQuery {
+            q: Some("Broadway New York"),
+            country_code: Some("us"),
+            limit: 5,
+            ..Default::default()
+        };
+        let first = forward.search_structured(query.clone()).unwrap();
+        let second = forward.search_structured(query).unwrap();
+        assert!(!first.is_empty());
+        assert_eq!(first[0].name, second[0].name);
+        assert_eq!((first[0].lat, first[0].lng), (second[0].lat, second[0].lng));
     }
 
     #[test]

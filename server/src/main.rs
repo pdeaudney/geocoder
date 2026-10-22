@@ -1280,64 +1280,36 @@ async fn search(
         }
     }
 
-    let hits = if country_codes.len() > 1 {
-        tracing::Span::current().record("geocoder.path", "tantivy_multi_country");
-        let mut merged: Vec<forward::Hit> = Vec::new();
-        for cc in &country_codes {
-            let structured = forward::StructuredQuery {
-                q: params.q.as_deref(),
-                street: params.street.as_deref(),
-                housenumber: params.housenumber.as_deref(),
-                unit: params.unit.as_deref(),
-                postcode: params.postcode.as_deref(),
-                city: params.city.as_deref(),
-                state: params.state.as_deref(),
-                country_code: Some(cc),
-                kind: kind_filter,
-                limit,
-                bias,
-            };
-            match fwd.search_structured(structured) {
-                Ok(mut h) => merged.append(&mut h),
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("search failed: {e}"),
-                    )
-                        .into_response()
-                }
-            }
-        }
-        merged.sort_by(|a, b| {
-            forward::boosted_score(b, bias.as_ref())
-                .total_cmp(&forward::boosted_score(a, bias.as_ref()))
-        });
-        merged.truncate(limit);
-        merged
-    } else {
-        tracing::Span::current().record("geocoder.path", "tantivy");
-        let structured = forward::StructuredQuery {
-            q: params.q.as_deref(),
-            street: params.street.as_deref(),
-            housenumber: params.housenumber.as_deref(),
-            unit: params.unit.as_deref(),
-            postcode: params.postcode.as_deref(),
-            city: params.city.as_deref(),
-            state: params.state.as_deref(),
-            country_code: country_codes.first().copied(),
-            kind: kind_filter,
-            limit,
-            bias,
-        };
-        match fwd.search_structured(structured) {
-            Ok(h) => h,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("search failed: {e}"),
-                )
-                    .into_response()
-            }
+    tracing::Span::current().record(
+        "geocoder.path",
+        if country_codes.len() > 1 {
+            "tantivy_multi_country"
+        } else {
+            "tantivy"
+        },
+    );
+    let country_filter = country_codes.join(",");
+    let structured = forward::StructuredQuery {
+        q: params.q.as_deref(),
+        street: params.street.as_deref(),
+        housenumber: params.housenumber.as_deref(),
+        unit: params.unit.as_deref(),
+        postcode: params.postcode.as_deref(),
+        city: params.city.as_deref(),
+        state: params.state.as_deref(),
+        country_code: (!country_filter.is_empty()).then_some(country_filter.as_str()),
+        kind: kind_filter,
+        limit,
+        bias,
+    };
+    let hits = match fwd.search_structured(structured) {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("search failed: {e}"),
+            )
+                .into_response()
         }
     };
 

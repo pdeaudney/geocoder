@@ -94,6 +94,9 @@ enum Check {
         fields: HashMap<String, String>,
         #[serde(default)]
         normalizers: FieldNormalizers,
+        /// If supplied, the same result must also match this coordinate.
+        #[serde(default)]
+        coordinates: Option<Coordinates>,
     },
     /// Pelias `unexpected.properties` must not match any returned result.
     ResultAbsent {
@@ -128,6 +131,13 @@ enum Check {
 /// left to right to both the expected and the actual value.
 type FieldNormalizers = HashMap<String, Vec<Normalizer>>;
 
+#[derive(Debug, Deserialize)]
+struct Coordinates {
+    lat: f64,
+    lon: f64,
+    max_m: f64,
+}
+
 // -----------------------------------------------------------------------------
 // Report
 // -----------------------------------------------------------------------------
@@ -161,6 +171,10 @@ struct CaseReport {
     elapsed_ms: u64,
     http_status: Option<u16>,
     failures: Vec<String>,
+    /// One outcome per expectation, in corpus order; empty when no checks ran.
+    check_results: Vec<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unsupported_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -305,6 +319,8 @@ fn main() -> ExitCode {
                 elapsed_ms: 0,
                 http_status: None,
                 failures: Vec::new(),
+                check_results: Vec::new(),
+                first_result: None,
                 unsupported_reason: Some(reason.to_string()),
                 partial_reason: None,
             });
@@ -403,6 +419,8 @@ fn run_case(agent: &ureq::Agent, base_url: &str, case: &Case) -> (CaseReport, bo
                     elapsed_ms: 0,
                     http_status: None,
                     failures: vec![format!("unsupported method {other}")],
+                    check_results: Vec::new(),
+                    first_result: None,
                     unsupported_reason: None,
                     partial_reason: None,
                 },
@@ -434,6 +452,8 @@ fn run_case(agent: &ureq::Agent, base_url: &str, case: &Case) -> (CaseReport, bo
                     elapsed_ms: t0.elapsed().as_millis() as u64,
                     http_status: None,
                     failures: vec![format!("request failed: {e}")],
+                    check_results: Vec::new(),
+                    first_result: None,
                     unsupported_reason: None,
                     partial_reason: None,
                 },
@@ -450,11 +470,18 @@ fn run_case(agent: &ureq::Agent, base_url: &str, case: &Case) -> (CaseReport, bo
         }
     }
 
-    for check in &case.expect.checks {
-        if let Err(msg) = evaluate_check(&body_json, check) {
-            failures.push(msg);
-        }
-    }
+    let check_results = case
+        .expect
+        .checks
+        .iter()
+        .map(|check| match evaluate_check(&body_json, check) {
+            Ok(()) => true,
+            Err(msg) => {
+                failures.push(msg);
+                false
+            }
+        })
+        .collect();
 
     let passed = failures.is_empty();
     (
@@ -465,6 +492,12 @@ fn run_case(agent: &ureq::Agent, base_url: &str, case: &Case) -> (CaseReport, bo
             elapsed_ms: t0.elapsed().as_millis() as u64,
             http_status: Some(status),
             failures,
+            check_results,
+            first_result: body_json
+                .get("results")
+                .and_then(Value::as_array)
+                .and_then(|hits| hits.first())
+                .cloned(),
             unsupported_reason: None,
             partial_reason: None,
         },
@@ -529,20 +562,33 @@ fn evaluate_check(body: &Value, check: &Check) -> Result<(), String> {
             limit,
             fields,
             normalizers,
+            coordinates,
         } => {
             let results = body
                 .get("results")
                 .and_then(Value::as_array)
                 .ok_or("results missing or not an array")?;
-            if results
-                .iter()
-                .take(*limit)
-                .any(|hit| result_matches(hit, fields, normalizers))
-            {
+            if results.iter().take(*limit).any(|hit| {
+                result_matches(hit, fields, normalizers)
+                    && coordinates.as_ref().is_none_or(|c| {
+                        match (json_path_number(hit, "lat"), json_path_number(hit, "lon")) {
+                            (Some(lat), Some(lon)) => {
+                                c.max_m.is_finite()
+                                    && c.max_m >= 0.0
+                                    && (-90.0..=90.0).contains(&lat)
+                                    && (-180.0..=180.0).contains(&lon)
+                                    && (-90.0..=90.0).contains(&c.lat)
+                                    && (-180.0..=180.0).contains(&c.lon)
+                                    && haversine_m(lat, lon, c.lat, c.lon) <= c.max_m
+                            }
+                            _ => false,
+                        }
+                    })
+            }) {
                 Ok(())
             } else {
                 Err(format!(
-                    "result_matches_within: no single result in top {limit} matches {fields:?}"
+                    "result_matches_within: no single result in top {limit} matches {fields:?} and coordinate {coordinates:?}"
                 ))
             }
         }
@@ -698,6 +744,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn address_fields_and_coordinates_must_belong_to_the_same_hit() {
+        let check: Check = serde_json::from_value(serde_json::json!({
+            "kind": "result_matches_within", "limit": 5,
+            "fields": {"address.house_number": "12A", "address.unit": "3B", "address.road": "Main Street"},
+            "normalizers": {"address.road": ["toUpperCase", "abbreviateStreetSuffixes"]},
+            "coordinates": {"lat": 40.0, "lon": -74.0, "max_m": 25.0}
+        })).unwrap();
+        let good = serde_json::json!({"lat": 40.0, "lon": -74.0,
+            "address": {"house_number": "12A", "unit": "3B", "road": "MAIN ST"}});
+        let mut far = good.clone();
+        far["lat"] = serde_json::json!(41.0);
+        let mut wrong_house = good.clone();
+        wrong_house["address"]["house_number"] = serde_json::json!("12B");
+        let body = |hits: Vec<Value>| serde_json::json!({"results": hits});
+        assert!(evaluate_check(&body(vec![far, wrong_house]), &check).is_err());
+        assert!(evaluate_check(&body(vec![good.clone()]), &check).is_ok());
+        for path in ["house_number", "unit"] {
+            let mut missing = good.clone();
+            missing["address"][path] = Value::Null;
+            assert!(evaluate_check(&body(vec![missing]), &check).is_err());
+        }
+        let mut wrong_unit = good.clone();
+        wrong_unit["address"]["unit"] = serde_json::json!("3C");
+        assert!(evaluate_check(&body(vec![wrong_unit]), &check).is_err());
+        let mut invalid_coord = good;
+        invalid_coord["lon"] = serde_json::json!(286.0);
+        assert!(evaluate_check(&body(vec![invalid_coord]), &check).is_err());
+    }
+
+    #[test]
     fn haversine_known_sydney_melbourne() {
         // Sydney Opera House to Flinders Street Station, Melbourne.
         let d = haversine_m(-33.8568, 151.2153, -37.8183, 144.9671);
@@ -734,6 +810,7 @@ mod tests {
                 limit: 1,
                 fields: fields.clone(),
                 normalizers: FieldNormalizers::new(),
+                coordinates: None,
             }
         )
         .is_err());
@@ -743,6 +820,7 @@ mod tests {
                 limit: 2,
                 fields,
                 normalizers: FieldNormalizers::new(),
+                coordinates: None,
             }
         )
         .is_ok());

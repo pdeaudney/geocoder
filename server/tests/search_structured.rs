@@ -9,11 +9,13 @@ use std::path::PathBuf;
 
 fn load_forward() -> Option<Forward> {
     let dir = std::env::var("GEOCODER_INDEX_DIR").ok()?;
-    let path = PathBuf::from(dir).join("tantivy");
-    if !path.exists() {
-        return None;
-    }
-    Forward::open(&path).ok()
+    let forward = Forward::open(&PathBuf::from(dir)).expect("open configured forward index");
+    assert!(!forward.is_empty(), "configured index has no forward data");
+    assert!(
+        forward.has_default() || forward.countries().any(|cc| cc == b"au"),
+        "configured index has no AU shard"
+    );
+    Some(forward)
 }
 
 fn dump(label: &str, hits: &[Hit]) {

@@ -24,6 +24,67 @@ The runner writes a JSON report to
 `tests/regression/reports/au-<UTC>.json` for each run
 (gitignored; committed corpora are the source of truth).
 
+## House-number retrieval benchmark
+
+Run against an existing per-country forward index:
+
+```bash
+make bench-house-numbers INDEX=./data/index SAMPLE=1000
+# Small smoke run:
+make bench-house-numbers INDEX=./data/index SAMPLE=10
+```
+
+This samples 1,000 unique indexed address identities per country by default,
+using fixed seeds and random document positions across each shard. It reserves
+up to 10% each for units, suffixes, and numeric ranges, filling any shortfall
+from the available addresses. Actual strata counts are in the report; this is
+not an independently verified or uniformly urban/rural sample.
+
+Every address is searched with structured fields and freeform text. Up to 100
+abbreviation variants and 100 single-character deletion typos per country are
+also tried. Country is supplied; coordinate bias is never supplied. Range
+records are searched as recorded, without inferring individual house locations
+from their endpoints.
+
+Each query checks the first result and top five at 25, 50, and 100 metres. The
+same result must match house number, normalized street, country, recorded unit
+when requested, and postcode when the reference has one. Field-only results
+are reported separately. Street normalization uses the existing Pelias field
+normalizers; postcodes use the server's display formatting. Missing responses
+and HTTP errors count as failures.
+
+Reports go into `tests/regression/reports/house-numbers-<UTC>/`:
+
+- `addresses.json`: sampled references, including coordinates and strata.
+- `corpus.json`: requests and ordered checks, runnable with `regression-runner`.
+- `results.json`: every case's ordered `check_results` and first result.
+- `summary.json`: metrics by country, query variant, and stratum, plus index and
+  binary identity. `number_returned` is diagnostic; it does not establish that
+  the returned property is correct.
+- `failures.json`: all queries that fail the first-result 50-metre check.
+- `server.log` and `runner.log`: startup and per-case failures.
+
+This is **retrieval from imported data**, not independent address coverage.
+The current `/search` house-number path returns stored address points or street
+fallbacks; it does not interpolate house locations. A returned street without a
+matched house number never passes an address check.
+
+Controlled suffix, range, unit, and nonexistent-number cases are in
+`server/tests/oa_street_search.rs`. The runner's own tests reject mixed-result
+field/coordinate matches, wrong house suffixes, missing or wrong units, and
+invalid coordinates. Run the benchmark generator/report checks with:
+
+```bash
+python3 -m unittest discover -s scripts -p test_bench_house_numbers.py
+```
+
+## Combined field and coordinate checks
+
+For optional `result_matches_within.coordinates`, use
+`{"lat": -33.73698, "lon": 150.9796, "max_m": 50}`. Existing field-only
+checks are unchanged. The runner's aggregate pass count requires every check;
+use the benchmark summary for each rank and distance threshold.
+
 ## Corpus schema
 
 One file per corpus under `corpora/`:

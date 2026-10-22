@@ -1,28 +1,23 @@
 //! End-to-end forward-geocoding accuracy against the AU tantivy index.
 //!
 //! Requires `GEOCODER_INDEX_DIR` pointing at a directory that contains both
-//! the binary reverse-geocoding index *and* a `tantivy/` subdirectory built
-//! by `build-forward-index`. Skipped otherwise.
+//! the binary reverse-geocoding index and a `tantivy/` or `tantivy_au/` index.
+//! Skipped only when the environment variable is unset.
 
 #![cfg(feature = "forward")]
 
-use query_server::forward::{Forward, Hit, KIND_PLACE, KIND_STREET};
+use query_server::forward::{Forward, Hit, StructuredQuery, KIND_PLACE, KIND_STREET};
 use std::path::PathBuf;
 
 fn load_forward() -> Option<Forward> {
     let dir = std::env::var("GEOCODER_INDEX_DIR").ok()?;
-    let path = PathBuf::from(dir).join("tantivy");
-    if !path.exists() {
-        eprintln!("SKIP: {} not found; run build-forward-index first", path.display());
-        return None;
-    }
-    match Forward::open(&path) {
-        Ok(f) => Some(f),
-        Err(e) => {
-            eprintln!("FAIL: could not open forward index: {e}");
-            None
-        }
-    }
+    let forward = Forward::open(&PathBuf::from(dir)).expect("open configured forward index");
+    assert!(!forward.is_empty(), "configured index has no forward data");
+    assert!(
+        forward.has_default() || forward.countries().any(|cc| cc == b"au"),
+        "configured index has no AU shard"
+    );
+    Some(forward)
 }
 
 fn first_hit_name_ci(hits: &[Hit], needle: &str) -> Option<String> {
@@ -101,26 +96,32 @@ fn search_empty_query_is_graceful() {
 }
 
 #[test]
-fn search_latency_under_10ms_for_common_query() {
+fn search_latency_under_10ms_for_common_au_query() {
     let Some(fwd) = load_forward() else { return };
+    // This AU guard must not time fanout across every loaded country.
+    let search = || fwd.search_structured(StructuredQuery {
+        q: Some("sydney"),
+        country_code: Some("AU"),
+        kind: Some(KIND_PLACE),
+        limit: 10,
+        ..Default::default()
+    });
     // Warm up caches.
     for _ in 0..5 {
-        let _ = fwd.search("sydney", Some(KIND_PLACE), 10);
+        let hits = search().expect("search");
+        assert!(!hits.is_empty(), "expected an AU place result");
+        assert!(hits.iter().all(|hit| hit.country_code.as_deref() == Some("AU")));
     }
 
     let t0 = std::time::Instant::now();
     let runs = 100;
     for _ in 0..runs {
-        let _ = fwd
-            .search("sydney", Some(KIND_PLACE), 10)
-            .expect("search");
+        let _ = search().expect("search");
     }
     let elapsed = t0.elapsed();
     let per_query = elapsed / runs;
-    eprintln!("avg latency for 'sydney' place search: {per_query:?}");
-    // Loose bound — tantivy point lookups on a ~250K-doc index should
-    // comfortably beat 10 ms. We're asserting an order-of-magnitude guard,
-    // not a benchmark.
+    eprintln!("avg latency for 'sydney' AU place search: {per_query:?}");
+    // Warm country-scoped place lookups should comfortably beat 10 ms.
     assert!(
         per_query.as_millis() < 10,
         "avg {:?} > 10ms — performance regression?",
