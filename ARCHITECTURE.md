@@ -200,9 +200,8 @@ Autocomplete {
      the FST lookup + ~40 µs for the reverse-geocode enrichment.
 
 1. Parse freeform `q` if present:
-     extract house_number (leading digits),
-     state abbreviation (NSW/VIC/...),
-     postcode (trailing 4 digits),
+     extract house_number and unit using supported country patterns,
+     country-aware state and postcode hints,
      remaining tokens → bag for name/suburb matching.
 
 2. Dispatch to a FieldedIndex:
@@ -219,12 +218,16 @@ Autocomplete {
 4. Search top 3× limit, re-rank by BM25 × rank-prominence factor
      (rank 16 place ~1.4×, rank 19 suburb ~1.15×, rank 26 street 1.0×).
 
-5. Fallback ladder if 0 hits: drop country_code → state → city → kind,
-     retry each drop. Re-dispatch in case the fallback crosses countries.
+5. If strict search misses, retry eligible address/street/locality fallbacks.
+     Explicit country/state/city filters stay in force.
+     An explicit postcode miss returns an empty result from this ladder.
 
-6. Last-resort fuzzy fallback: retry with FuzzyTermQuery (Levenshtein
-     distance 1) on the name field. Fires only if the strict ladder
-     produced nothing — typical typo cost is ~150 µs vs ~40 µs strict.
+6. Attempt bounded whitespace repair for structured and freeform addresses,
+     including text without commas. Preserve literal matches and address
+     constraints; reject competing identities, overflows and full pages.
+     If repair abstains, retain any earlier hits.
+     If still empty, try dictionary-frequency/Levenshtein spelling correction
+     across the selected country shards, retaining correctly typed words.
 
 7. For each top hit, if housenumber was parsed, refine via
      find_addr_point_in_country — routes through G-NAF first (AU),
@@ -493,7 +496,7 @@ compares shape-by-shape.
 | Storage | mmap'd flat binaries | RocksDB (LSM) + mmap |
 | Country partitioning | Per-country `tantivy_<cc>/` + `oa_<cc>_*.bin` + `fst_<cc>.*` | ISO-2 prefix in FST, ~250 country partitions |
 | FST fast-path for common queries | `/autocomplete` + `/search` exact-match, 400 ns | "Serves 80% of traffic, order-of-magnitude faster than tantivy" |
-| Fuzzy fallback | Dictionary spelling fallback; bounded structured whitespace repair | FastText subword embeddings; exact correction policy not disclosed |
+| Fuzzy fallback | Dictionary spelling fallback; bounded structured/freeform whitespace repair | FastText subword embeddings; exact correction policy not disclosed |
 | Open-source intent | Yes | "Plan to open source" their S2 bindings |
 
 Both architectures rejected the same class of alternatives: no

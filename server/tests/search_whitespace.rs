@@ -39,6 +39,50 @@ fn fixture() -> (tempfile::TempDir, Forward) {
             s.postcode => "2000", s.suburb => "Testville", s.state => "State", s.country_code => country,
             s.kind => KIND_ADDRESS, s.rank => 26u64, s.lat => lat, s.lng => 151.0)).unwrap();
     }
+    for (street, city, state, postal, cc, lat) in [
+        ("Maple Road", "St Albans", "England", "AL1 1AA", "GB", 51.0),
+        ("Cedar Road", "", "State", "2000", "AU", -35.2),
+        ("Rose Bank Road", "Testville", "State", "2000", "AU", -35.3),
+        ("Rosebank", "Road", "State", "2000", "AU", -35.4),
+        (
+            "Maple Road",
+            "New Glasgow",
+            "Nova Scotia",
+            "B2H 1A1",
+            "CA",
+            45.0,
+        ),
+        ("Maple Road", "New York", "New York", "10001", "US", 40.0),
+        (
+            "Maple Road",
+            "Sydney",
+            "New South Wales",
+            "2000",
+            "AU",
+            -33.0,
+        ),
+        (
+            "Willow Lane",
+            "North Testville",
+            "State",
+            "2000",
+            "AU",
+            -35.0,
+        ),
+        (
+            "Willow Lane North",
+            "Testville",
+            "State",
+            "2000",
+            "AU",
+            -35.1,
+        ),
+    ] {
+        writer.add_document(doc!(s.name => canonicalise_phrase(street), s.name_raw => street,
+            s.housenumber => "12", s.housenumber_raw => "12", s.unit => "3", s.unit_raw => "3",
+            s.postcode => postal.replace(' ', ""), s.suburb => city, s.state => state, s.country_code => cc,
+            s.kind => KIND_ADDRESS, s.rank => 26u64, s.lat => lat, s.lng => 151.0)).unwrap();
+    }
     writer.commit().unwrap();
     let forward = Forward::open(dir.path()).unwrap();
     (dir, forward)
@@ -208,7 +252,6 @@ fn freeform_repairs_decline_conflicts_unexplained_sections_and_ambiguous_boundar
         freeform("Unit 3, 12 Ke ats Street, Testville, Otherstate, 2000"),
         freeform("Unit 3, 12 Ke ats Street, Testville, State, 2001"),
         freeform("Unit 3, 12 Ke ats Street, Testville, State, 2000, Extra"),
-        freeform("3/12 Ke ats Street Testville State 2000"),
         freeform("3/12 Ke ats Street"),
         freeform("Unit 3, 12 Ke ats Street, Testville Extra, State, 2000"),
         freeform("Unit 3, 12 For eign Road, Testville, State, 2000"),
@@ -234,6 +277,80 @@ fn freeform_repairs_decline_conflicts_unexplained_sections_and_ambiguous_boundar
     ] {
         let hits = fwd.search_structured(q.clone()).unwrap();
         assert!(hits.is_empty(), "{q:?}: {hits:?}");
+    }
+}
+
+#[test]
+fn repairs_undelimited_street_boundaries_units_and_postal_context() {
+    let (_dir, fwd) = fixture();
+    for text in [
+        "3/12 Ke ats Street Testville State 2000",
+        "Unit 3 12 Ke ats Street Testville State 2000",
+        "#3 12 NewBrunswick Drive Testville State 2000",
+        "3 / 12 Éc ole Road Testville State 2000",
+        "3/12 Ke ats Street Testville",
+        "3/12 Ke ats Street 2000",
+    ] {
+        let hits = fwd.search_structured(freeform(text)).unwrap();
+        assert!(!hits.is_empty(), "{text}");
+        assert_eq!(hits[0].housenumber.as_deref(), Some("12"));
+        assert_eq!(hits[0].unit.as_deref(), Some("3"));
+        assert_eq!(hits[0].suburb.as_deref(), Some("Testville"));
+    }
+    for (cc, tail) in [
+        ("GB", "St Albans England AL1 1AA"),
+        ("CA", "New Glasgow Nova Scotia B2H 1A1"),
+        ("CA", "New Glasgow NS B2H1A1"),
+        ("US", "New York New York 10001"),
+        ("US", "New York NY 10001"),
+        ("AU", "Sydney New South Wales 2000"),
+        ("AU", "Sydney NSW 2000"),
+    ] {
+        let text = format!("Unit 3 12 Ma ple Road {tail}");
+        let hits = fwd
+            .search_structured(StructuredQuery {
+                country_code: Some(cc),
+                ..freeform(&text)
+            })
+            .unwrap();
+        assert!(!hits.is_empty(), "{cc}: {text}");
+        assert_eq!(hits[0].name, "Maple Road");
+        assert_eq!(hits[0].country_code.as_deref(), Some(cc));
+    }
+}
+
+#[test]
+fn plain_repair_declines_competing_boundaries_wrong_fields_and_full_pages() {
+    let (_dir, fwd) = fixture();
+    for text in [
+        "3/12 Wil low Lane North Testville State 2000",
+        "3/99 New Port Lane Testville State 2000",
+        "88 Pop lar Road Testville State 2000",
+        "Unit 4 12 Ke ats Street Testville State 2000",
+        "3/13 Ke ats Street Testville State 2000",
+        "3/12 Ke ats Street Othercity State 2000",
+        "3/12 Ke ats Street Testville Otherstate 2000",
+        "3/12 Ke ats Street Testville State 2001",
+        "3/12 Ke ats Street Testville Extra State 2000",
+        "3/12 Ke ats Street State",
+        "3/12 Ce dar Road State",
+    ] {
+        let hits = fwd
+            .search_structured(StructuredQuery {
+                limit: 1,
+                ..freeform(text)
+            })
+            .unwrap();
+        assert!(hits.is_empty(), "{text}: {hits:?}");
+    }
+    for text in [
+        "3/12 New Port Lane Testville State 2000",
+        "Unit 3 12 New Port Lane Testville State 2000",
+        "3/12 Rose Bank Road",
+    ] {
+        let hits = fwd.search_structured(freeform(text)).unwrap();
+        let expected = if text.contains("Rose") { "Rose Bank Road" } else { "New Port Lane" };
+        assert_eq!(hits[0].name, expected, "{text}");
     }
 }
 

@@ -348,15 +348,14 @@ Parameters:
 
 Response includes each hit's `confidence` label (`exact`, `interpolated`, `fallback`) and a `source` field when served from the FST fast-path.
 
-Structured street-and-house searches can repair one missing or misplaced
-space, such as `Ke ats Street` or `NewBrunswick Drive`. Supply one country and
-a city or postcode. Repairs preserve supplied address constraints and decline
-ambiguous matches. See the [serving implementation and accuracy results](docs/search-accuracy.md).
+Structured street-and-house searches can repair one missing or misplaced space, such as `Ke ats Street` or `NewBrunswick Drive`.
+Supply one country and a city or postcode.
+Repairs preserve supplied address constraints and decline ambiguous matches.
+See the [serving implementation and accuracy results](docs/search-accuracy.md).
 
-Freeform addresses with comma-separated street/locality sections, or `q` text
-containing only a house and street with explicit locality fields, can use the
-same repair. Uncertain undelimited street/locality boundaries are declined. See the
-[freeform implementation and tests](docs/search-accuracy.md).
+Freeform addresses can use the same repair with comma-separated sections, undelimited street/locality text, or a house and street with explicit locality fields.
+The index must establish an unambiguous address within the query budget.
+See the [freeform implementation and tests](docs/search-accuracy.md).
 
 #### Disambiguating ambiguous queries
 
